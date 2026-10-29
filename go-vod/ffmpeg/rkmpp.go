@@ -28,6 +28,14 @@ func buildRKMPPArgs(s Spec) []string {
 		args = append(args, "-noaccurate_seek")
 	}
 	hw := usesRKMPPFrames(s)
+	tonemap := hw && s.HDR && s.RKMPPOpenCL
+	if tonemap {
+		args = append(args,
+			"-init_hw_device", "rkmpp=memories",
+			"-init_hw_device", "opencl=memories_opencl@memories",
+			"-filter_hw_device", "memories_opencl",
+		)
+	}
 	if hw {
 		args = append(args, "-hwaccel", "rkmpp", "-hwaccel_output_format", "drm_prime")
 	}
@@ -45,14 +53,25 @@ func buildRKMPPArgs(s Spec) []string {
 		filters = append(filters, fmt.Sprintf("trim=start=%.6f", s.StartAt))
 	}
 	dims := ""
-	if s.Quality != QualityMax {
-		d := max(s.Width, s.Height)
-		dims = fmt.Sprintf(":w=%d:h=%d", d, d)
+	if s.Width > 0 && s.Height > 0 {
+		dims = fmt.Sprintf(":w=%d:h=%d", s.Width, s.Height)
 	}
 	if hw {
-		filters = append(filters, "scale_rkrga=force_original_aspect_ratio=decrease:force_divisible_by=2:format=nv12"+dims)
+		format := "nv12"
+		if tonemap {
+			format = "p010"
+		}
+		filters = append(filters, "scale_rkrga=force_divisible_by=2:format="+format+dims)
+		if tonemap {
+			filters = append(filters,
+				"hwmap=derive_device=opencl:mode=read",
+				"tonemap_opencl=tonemap=hable:desat=0:format=nv12:primaries=bt709:transfer=bt709:matrix=bt709:range=tv",
+				"hwmap=derive_device=rkmpp:mode=write:reverse=1",
+				"format=drm_prime",
+			)
+		}
 	} else {
-		filters = append(filters, "scale=force_original_aspect_ratio=decrease:force_divisible_by=2"+dims)
+		filters = append(filters, "scale=force_divisible_by=2"+dims)
 		if s.HDR {
 			filters = append(filters, "zscale=t=linear:npl=100", "format=gbrpf32le", "zscale=p=bt709", "tonemap=hable:desat=0", "zscale=t=bt709:m=bt709:range=tv")
 		}
@@ -124,7 +143,14 @@ func RKMPPFrameRate(s Spec) int {
 	return max(1, int(math.Round(fps)))
 }
 func usesRKMPPFrames(s Spec) bool {
-	if !s.RKMPP || s.HDR || (s.ForceSwTranspose && s.Rotation != 0) || (s.CodecName == "h264" && s.BitDepth > 8) {
+	if !s.RKMPP || (s.HDR && !s.RKMPPOpenCL) || s.BitDepth > 10 || (s.ForceSwTranspose && s.Rotation != 0) {
+		return false
+	}
+	// The video decoders support 4:2:0; MJPEG also supports other chroma layouts.
+	// Keep unsupported profiles on CPU decode while retaining MPP encoding.
+	if s.CodecName != "mjpeg" && s.PixelFormat != "" &&
+		!strings.HasPrefix(s.PixelFormat, "yuv420p") && s.PixelFormat != "yuvj420p" &&
+		s.PixelFormat != "nv12" && s.PixelFormat != "nv15" && !strings.HasPrefix(s.PixelFormat, "p010") {
 		return false
 	}
 	return slices.Contains([]string{"h264", "hevc", "vp8", "vp9", "av1", "h263", "mpeg1video", "mpeg2video", "mpeg4", "mjpeg"}, s.CodecName)
