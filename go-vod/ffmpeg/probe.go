@@ -1,8 +1,6 @@
-
+// Package ffmpeg owns everything that shells out to the ffmpeg toolchain:
+// probing inputs, building transcoder arguments and naming output segments.
 package ffmpeg
-
-// Package ffmpeg probes media files, reads stream metadata,
-// identifies HDR formats, and extracts keyframe timestamps.
 
 import (
 	"bytes"
@@ -35,7 +33,6 @@ const (
 	defaultFrameDen = 1
 )
 
-// VideoInfo describes the first video stream and first audio stream.
 type VideoInfo struct {
 	Width          int
 	Height         int
@@ -51,8 +48,7 @@ type VideoInfo struct {
 	Audio          AudioInfo
 }
 
-// AudioInfo describes the first audio stream.
-// All fields remain zero-valued for silent video.
+// AudioInfo describes the first audio stream; empty when silent.
 type AudioInfo struct {
 	CodecName  string
 	Channels   int
@@ -67,13 +63,11 @@ type sideData struct {
 
 type videoStream struct {
 	ffprobe.Stream
-
 	NominalFrameRate string     `json:"r_frame_rate"`
 	SideDataList     []sideData `json:"side_data_list"`
 	ColorTransfer    string     `json:"color_transfer"`
 	ColorPrimaries   string     `json:"color_primaries"`
-
-	BitsPerRawSample string `json:"bits_per_raw_sample"`
+	BitsPerRawSample string     `json:"bits_per_raw_sample"`
 }
 
 type probeOutput struct {
@@ -81,453 +75,264 @@ type probeOutput struct {
 	Format  *ffprobe.Format `json:"format"`
 }
 
-// Probe executes ffprobe and returns metadata for the first video
-// stream, with metadata from the first audio stream if present.
-func Probe(
-	ctx context.Context,
-	bin, fileURL, headers string,
-) (VideoInfo, error) {
+// Probe runs ffprobe and parses the first video stream.
+func Probe(ctx context.Context, bin, fileURL, headers string) (VideoInfo, error) {
 	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
 
-	args := []string{"-v", "error"}
-
+	args := []string{
+		"-v", "error",
+	}
 	if headers != "" {
 		args = append(args, "-headers", headers)
 	}
-
 	args = append(args,
 		"-show_entries", "format:stream",
 		"-of", "json",
 		"-i", fileURL,
 	)
-
 	out, serr, err := runFFprobe(ctx, bin, args...)
 	if err != nil {
-		return VideoInfo{}, probeError(
-			ctx, "ffprobe", fileURL, serr, err,
-		)
+		if ctx.Err() != nil {
+			err = ctx.Err()
+		}
+		return VideoInfo{}, fmt.Errorf("ffprobe %s: %w: %s", fileURL, err, serr)
 	}
-
 	return ParseProbeJSON(out)
 }
 
-// runFFprobe executes the requested binary without using a shell.
-// This avoids shell interpretation of input URLs and headers.
-func runFFprobe(
-	ctx context.Context,
-	bin string,
-	args ...string,
-) (stdout, stderr []byte, err error) {
+// runFFprobe executes the binary, capturing stdout and stderr.
+func runFFprobe(ctx context.Context, bin string, args ...string) (stdout, stderr []byte, err error) {
 	cmd := exec.CommandContext(ctx, bin, args...)
-
 	var out, serr bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &serr
-
 	err = cmd.Run()
-
 	return out.Bytes(), serr.Bytes(), err
 }
 
-func probeError(
-	ctx context.Context,
-	operation, fileURL string,
-	stderr []byte,
-	err error,
-) error {
-	if ctx.Err() != nil {
-		err = ctx.Err()
-	}
-
-	message := strings.TrimSpace(string(stderr))
-
-	if message == "" {
-		return fmt.Errorf("%s %q: %w",
-			operation, fileURL, err)
-	}
-
-	return fmt.Errorf("%s %q: %w: %s",
-		operation, fileURL, err, message)
-}
-
-// ParseProbeJSON parses ffprobe JSON output.
+// ParseProbeJSON parses Probe output, defaulting missing fields.
 func ParseProbeJSON(data []byte) (VideoInfo, error) {
 	var out probeOutput
-
 	if err := json.Unmarshal(data, &out); err != nil {
-		return VideoInfo{}, fmt.Errorf(
-			"invalid ffprobe JSON: %w", err,
-		)
+		return VideoInfo{}, err
 	}
-
-	var video *videoStream
-
+	var s *videoStream
 	for i := range out.Streams {
 		if out.Streams[i].CodecType == "video" {
-			video = &out.Streams[i]
+			s = &out.Streams[i]
 			break
 		}
 	}
-
-	if video == nil {
-		return VideoInfo{}, errors.New(
-			"no video streams found",
-		)
+	if s == nil {
+		return VideoInfo{}, errors.New("no video streams found")
 	}
 
-	fps := exactFrameRate(
-		video.AvgFrameRate,
-		video.NominalFrameRate,
-	)
+	duration := parseDuration(s.Duration)
+	if duration == 0 && out.Format != nil {
+		duration = durationFromSeconds(out.Format.DurationSeconds)
+	}
 
-	bitRate := parsePositiveInt(video.BitRate)
-	if bitRate == 0 {
-		if out.Format != nil {
-			bitRate = parsePositiveInt(out.Format.BitRate)
-		}
+	bitRate := positiveInt(s.BitRate)
+	if bitRate == 0 && out.Format != nil {
+		bitRate = positiveInt(out.Format.BitRate)
 	}
 	if bitRate == 0 {
 		bitRate = defaultBitRate
 	}
 
-	depth := probeBitDepth(video.PixFmt)
-
-	if rawDepth := parsePositiveInt(
-		video.BitsPerRawSample,
-	); rawDepth >= 8 && rawDepth <= 32 {
-		depth = rawDepth
-	}
-
 	return VideoInfo{
-		Width:          video.Width,
-		Height:         video.Height,
-		Duration:       probeDuration(*video, out.Format),
-		FrameRate:      int(math.Round(fps)),
-		FrameRateExact: fps,
-		PixelFormat:    video.PixFmt,
-		CodecName:      video.CodecName,
+		Width:          s.Width,
+		Height:         s.Height,
+		Duration:       duration,
+		FrameRate:      parseFrameRate(s.AvgFrameRate),
+		FrameRateExact: exactFrameRate(s.NominalFrameRate, s.AvgFrameRate),
+		PixelFormat:    s.PixFmt,
+		CodecName:      s.CodecName,
 		BitRate:        bitRate,
-		Rotation:       probeRotation(*video),
-		HDR:            probeHDR(*video),
-		BitDepth:       depth,
+		Rotation:       probeRotation(*s),
+		HDR:            probeHDR(*s),
+		BitDepth:       streamBitDepth(*s),
 		Audio:          probeAudio(out.Streams),
 	}, nil
 }
 
-// probeDuration uses stream duration when valid, otherwise
-// falls back to container duration.
-func probeDuration(
-	s videoStream,
-	format *ffprobe.Format,
-) time.Duration {
-	if duration, ok := parseDuration(s.Duration); ok {
-		return duration
-	}
-
-	if format != nil {
-		duration := format.Duration()
-		if duration > 0 {
-			return duration
-		}
-	}
-
-	return 0
-}
-
-func parseDuration(value string) (time.Duration, bool) {
+func parseDuration(value string) time.Duration {
 	seconds, err := strconv.ParseFloat(value, 64)
-
-	if err != nil ||
-		math.IsNaN(seconds) ||
-		math.IsInf(seconds, 0) ||
-		seconds <= 0 ||
-		seconds > float64(math.MaxInt64)/float64(time.Second) {
-		return 0, false
-	}
-
-	return time.Duration(seconds * float64(time.Second)), true
-}
-
-func parsePositiveInt(value string) int {
-	number, err := strconv.Atoi(value)
-	if err != nil || number <= 0 {
+	if err != nil {
 		return 0
 	}
-	return number
+	return durationFromSeconds(seconds)
 }
 
-// probeAudio finds the first valid audio stream.
+func durationFromSeconds(seconds float64) time.Duration {
+	if math.IsNaN(seconds) || math.IsInf(seconds, 0) || seconds <= 0 || seconds >= float64(math.MaxInt64)/float64(time.Second) {
+		return 0
+	}
+	return time.Duration(seconds * float64(time.Second))
+}
+
+func positiveInt(value string) int {
+	n, err := strconv.Atoi(value)
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return n
+}
+
+// probeAudio describes the first audio stream; empty when silent.
 func probeAudio(streams []videoStream) AudioInfo {
 	for i := range streams {
-		s := &streams[i]
-
-		if s.CodecType != "audio" ||
-			s.CodecName == "" {
+		st := &streams[i]
+		if st.CodecType != "audio" || st.CodecName == "" {
 			continue
 		}
-
 		return AudioInfo{
-			CodecName:  s.CodecName,
-			Channels:   s.Channels,
-			SampleRate: parsePositiveInt(s.SampleRate),
-			BitRate:    parsePositiveInt(s.BitRate),
+			CodecName:  st.CodecName,
+			Channels:   st.Channels,
+			SampleRate: positiveInt(st.SampleRate),
+			BitRate:    positiveInt(st.BitRate),
 		}
 	}
-
 	return AudioInfo{}
 }
 
-// parseFrameRate preserves the existing integer-returning helper.
+// parseFrameRate parses a "num/den" frame rate, defaulting to 30fps.
 func parseFrameRate(frac string) int {
-	return int(math.Round(exactFrameRate(frac)))
-}
-
-// exactFrameRate parses rational or decimal frame rates.
-// Values outside 1-240 fps are treated as invalid.
-func exactFrameRate(values ...string) float64 {
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-
-		var fps float64
-
-		if num, den, ok := strings.Cut(value, "/"); ok {
-			n, e1 := strconv.ParseFloat(num, 64)
-			d, e2 := strconv.ParseFloat(den, 64)
-
-			if e1 != nil || e2 != nil || d <= 0 {
-				continue
-			}
-
-			fps = n / d
-		} else {
-			var err error
-			fps, err = strconv.ParseFloat(value, 64)
-			if err != nil {
-				continue
-			}
-		}
-
-		if !math.IsNaN(fps) &&
-			!math.IsInf(fps, 0) &&
-			fps >= 1 &&
-			fps <= 240 {
-			return fps
-		}
+	parts := strings.Split(frac, "/")
+	if len(parts) != 2 {
+		return defaultFrameNum
 	}
-
-	return float64(defaultFrameNum) /
-		float64(defaultFrameDen)
+	num, e1 := strconv.Atoi(parts[0])
+	den, e2 := strconv.Atoi(parts[1])
+	if e1 != nil || e2 != nil || den == 0 {
+		num, den = defaultFrameNum, defaultFrameDen
+	}
+	return int(float64(num) / float64(den))
 }
 
-// probeRotation prefers display matrix rotation over metadata tags.
+// probeRotation reads rotation from display-matrix side data, else tags.
 func probeRotation(s videoStream) int {
 	for _, sd := range s.SideDataList {
-		if strings.EqualFold(
-			sd.SideDataType, "Display Matrix",
-		) {
-			return normalizeRotation(sd.Rotation)
+		if strings.EqualFold(sd.SideDataType, "Display Matrix") {
+			return NormalizeRotation(sd.Rotation)
 		}
 	}
-
-	return normalizeRotation(s.Tags.Rotate)
+	// Legacy rotate tags are clockwise; display matrices are counterclockwise.
+	return NormalizeRotation(-s.Tags.Rotate)
 }
 
-func normalizeRotation(rotation int) int {
-	rotation %= 360
-
-	if rotation < 0 {
-		rotation += 360
-	}
-
-	return rotation
-}
-
-// probeBitDepth identifies the logical sample depth,
-// not the storage container size.
-//
-// Examples:
-// nv12     -> 8
-// yuv420p10le -> 10
-// p010le   -> 10
-// p012le   -> 12
-// p016le   -> 16
-// nv15     -> 10
+// probeBitDepth reads sample depth from the pix_fmt name, 8 when unknown.
+// Matched on explicit suffixes since Contains "12" would match nv12.
 func probeBitDepth(pixFmt string) int {
 	pixFmt = strings.ToLower(strings.TrimSpace(pixFmt))
-
 	switch pixFmt {
-	case "nv15", "nv20", "nv30":
+	case "nv15", "nv20", "nv30", "y410":
 		return 10
-	case "p010le", "p010be",
-		"p210le", "p210be",
-		"p410le", "p410be",
-		"y210le", "y210be",
-		"y410":
-		return 10
-	case "p012le", "p012be",
-		"y212le", "y212be",
-		"y412":
+	case "y412":
 		return 12
-	case "p016le", "p016be",
-		"p216le", "p216be",
-		"p416le", "p416be",
-		"y216le", "y216be",
-		"y416":
+	case "y416":
 		return 16
 	}
-
-	// Standard planar formats include the bit depth
-	// directly before their endianness suffix.
-	// Examples: yuv420p10le, gbrp12be, gray16le.
-	for _, depth := range []int{16, 14, 12, 10, 9} {
-		suffix := strconv.Itoa(depth)
-
-		if strings.HasSuffix(pixFmt, suffix+"le") ||
-			strings.HasSuffix(pixFmt, suffix+"be") {
+	for _, depth := range []int{9, 10, 12, 14, 16} {
+		d := strconv.Itoa(depth)
+		if strings.HasSuffix(pixFmt, d+"le") || strings.HasSuffix(pixFmt, d+"be") {
 			return depth
 		}
 	}
-
 	return 8
 }
 
-// probeHDR detects HDR10, HLG and Dolby Vision using
-// available ffprobe color and side-data metadata.
-func probeHDR(s videoStream) bool {
-	transfer := strings.ToLower(s.ColorTransfer)
+func streamBitDepth(s videoStream) int {
+	if depth := positiveInt(s.BitsPerRawSample); depth >= 8 && depth <= 32 {
+		return depth
+	}
+	return probeBitDepth(s.PixFmt)
+}
 
-	switch transfer {
+// probeHDR detects HDR from transfer and color metadata.
+func probeHDR(s videoStream) bool {
+	switch strings.ToLower(s.ColorTransfer) {
 	case "smpte2084", "arib-std-b67":
 		return true
 	}
-
+	// Dolby Vision by codec or RPU side data, including profile 8 tucked
+	// into HEVC streams whose transfer tags look SDR alone. Explicit names
+	// only: prefix-matching "dv" would catch SDR dvvideo.
 	switch strings.ToLower(s.CodecName) {
-	case "dvav", "dva1", "dvhe",
-		"dvh1", "dvh2", "dvh3",
-		"dvc1", "dav1":
+	case "dvav", "dva1", "dvhe", "dvh1", "dvh2", "dvh3", "dvc1", "dav1":
 		return true
 	}
-
 	for _, sd := range s.SideDataList {
 		name := strings.ToLower(sd.SideDataType)
-
-		if strings.Contains(name, "dolby vision") ||
-			strings.Contains(name, "dovi configuration") ||
-			strings.Contains(name, "hdr dynamic metadata") {
+		if strings.Contains(name, "dolby vision") || strings.Contains(name, "dovi configuration") || strings.Contains(name, "hdr dynamic metadata") {
 			return true
 		}
 	}
-
-	// BT.2020 alone does not conclusively mean HDR.
-	// Use sample depth as an additional indication.
-	if s.ColorSpace == "bt2020nc" ||
-		s.ColorSpace == "bt2020c" ||
-		s.ColorPrimaries == "bt2020" {
-		depth := probeBitDepth(s.PixFmt)
-
-		if rawDepth := parsePositiveInt(
-			s.BitsPerRawSample,
-		); rawDepth >= 8 && rawDepth <= 32 {
-			depth = rawDepth
-		}
-
-		return depth > 8
+	if s.ColorSpace == "bt2020nc" || s.ColorSpace == "bt2020c" || s.ColorPrimaries == "bt2020" {
+		return streamBitDepth(s) > 8
 	}
-
 	return false
 }
 
-// Keyframes returns packet PTS values in seconds for
-// keyframes in the first video stream.
-func Keyframes(
-	ctx context.Context,
-	bin, fileURL, headers string,
-) ([]float64, error) {
-	ctx, cancel := context.WithTimeout(
-		ctx, keyframeTimeout,
-	)
+// Keyframes runs ffprobe and parses keyframe timestamps in seconds.
+func Keyframes(ctx context.Context, bin, fileURL, headers string) ([]float64, error) {
+	ctx, cancel := context.WithTimeout(ctx, keyframeTimeout)
 	defer cancel()
 
-	args := []string{"-v", "error"}
-
+	args := []string{
+		"-v", "error",
+	}
 	if headers != "" {
 		args = append(args, "-headers", headers)
 	}
-
 	args = append(args,
 		"-select_streams", "v:0",
 		"-show_entries", "packet=pts_time,flags",
 		"-of", "csv=p=0",
 		"-i", fileURL,
 	)
-
 	out, serr, err := runFFprobe(ctx, bin, args...)
 	if err != nil {
-		return nil, probeError(
-			ctx, "ffprobe keyframes",
-			fileURL, serr, err,
-		)
+		if ctx.Err() != nil {
+			err = ctx.Err()
+		}
+		return nil, fmt.Errorf("ffprobe keyframes %s: %w: %s", fileURL, err, serr)
 	}
-
 	return ParseKeyframes(out), nil
 }
 
-// ParseKeyframes extracts valid keyframe timestamps
-// from FFprobe CSV packet output.
-//
-// Invalid, negative and non-finite timestamps are ignored.
+// ParseKeyframes parses Keyframes output, keeping keyframe (K) packets,
+// so garbage yields an empty slice and callers fall back to re-encoding.
 func ParseKeyframes(data []byte) []float64 {
-	var timestamps []float64
-
-	for line := range strings.SplitSeq(
-		string(data), "\n",
-	) {
-		line = strings.TrimSpace(line)
-		if line == "" {
+	var out []float64
+	for line := range strings.SplitSeq(string(data), "\n") {
+		pts, flags, _ := strings.Cut(strings.TrimSpace(line), ",")
+		if strings.HasPrefix(pts, "K") {
+			pts, flags = flags, pts
+		}
+		if !strings.Contains(flags, "K") {
 			continue
 		}
-
-		fields := strings.Split(line, ",")
-		if len(fields) < 2 {
-			continue
+		if ts, err := strconv.ParseFloat(pts, 64); err == nil && ts >= 0 && !math.IsNaN(ts) && !math.IsInf(ts, 0) {
+			out = append(out, ts)
 		}
-
-		var timestamp string
-		var flags string
-
-		// FFprobe normally emits:
-		// 0.000000,K_
-		//
-		// Accept both possible field orders.
-		for _, field := range fields {
-			field = strings.TrimSpace(field)
-
-			if strings.HasPrefix(field, "K") {
-				flags = field
-			} else if timestamp == "" {
-				if value, err := strconv.ParseFloat(
-					field, 64,
-				); err == nil &&
-					!math.IsNaN(value) &&
-					!math.IsInf(value, 0) &&
-					value >= 0 {
-					timestamp = field
-				}
-			}
-		}
-
-		if flags == "" || timestamp == "" {
-			continue
-		}
-
-		ts, err := strconv.ParseFloat(timestamp, 64)
-		if err != nil {
-			continue
-		}
-
-		timestamps = append(timestamps, ts)
 	}
+	return out
+}
 
-	return timestamps
+func exactFrameRate(values ...string) float64 {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		num, den, ok := strings.Cut(value, "/")
+		if !ok {
+			num, den = value, "1"
+		}
+		n, e1 := strconv.ParseFloat(num, 64)
+		d, e2 := strconv.ParseFloat(den, 64)
+		if e1 == nil && e2 == nil && d > 0 && n/d >= 1 && n/d <= 240 {
+			return n / d
+		}
+	}
+	return 30
 }
