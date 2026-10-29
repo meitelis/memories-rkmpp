@@ -1,0 +1,19 @@
+name: Source checks
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  source:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Go formatting, race tests, vet, and build
+        run: docker build --target build -f go-vod/Dockerfile.rkmpp go-vod
+      - name: Player regression tests
+        run: node --test memories_rkmpp_player/js/player.test.cjs
