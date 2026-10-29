@@ -52,7 +52,7 @@ test('the playlist loader handles both provider load orders and browser module s
         return [];
       },
     };
-    const player = { isConnected: true, currentTime: 0, paused: false, addEventListener() {} };
+    const player = { isConnected: true, currentTime: 0, paused: false, qualities: { switch: 'current' }, addEventListener() {} };
     class Loader {
       load(context) { this.url = context.url; }
     }
@@ -86,6 +86,7 @@ test('the playlist loader handles both provider load orders and browser module s
     vm.runInNewContext(fs.readFileSync(require.resolve('./player.js'), 'utf8'), context);
     if (!late) listeners.get('hls-instance')({ detail: hls, target: { closest: () => player } });
     const loader = new hls.config.pLoader();
+    assert.equal(player.qualities.switch, 'load');
     loader.load({ url: hls.url }, {}, {});
     assert.equal(new URL(loader.url).searchParams.get('codecs'), supported ? 'h264,hevc' : 'h264');
     events.get('MANIFEST_PARSED')();
