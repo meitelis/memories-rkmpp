@@ -18,7 +18,7 @@ func TestRKMPPAuthenticatedColdSeek(t *testing.T) {
 }
 
 func TestRKMPPUnsupportedDecodeKeepsHardwareEncode(t *testing.T) {
-	for _, s := range []Spec{{CodecName: "h264", BitDepth: 10}, {CodecName: "hevc", BitDepth: 10, HDR: true}, {CodecName: "prores", BitDepth: 10}} {
+	for _, s := range []Spec{{CodecName: "hevc", BitDepth: 12}, {CodecName: "hevc", BitDepth: 10, HDR: true}, {CodecName: "prores", BitDepth: 10}, {CodecName: "h264", PixelFormat: "yuv422p"}, {CodecName: "hevc", PixelFormat: "yuv444p10le", BitDepth: 10}} {
 		s.RKMPP = true
 		s.FrameRate = 30
 		s.Quality = "720p"
@@ -29,4 +29,12 @@ func TestRKMPPUnsupportedDecodeKeepsHardwareEncode(t *testing.T) {
 		require.NotContains(t, args, "-hwaccel rkmpp")
 		require.NotContains(t, args, "scale_rkrga")
 	}
+}
+
+func TestRKMPPHigh10H264UsesHardwareFrames(t *testing.T) {
+	s := Spec{RKMPP: true, CodecName: "h264", BitDepth: 10, PixelFormat: "yuv420p10le", Width: 1280, Height: 720, FrameRate: 30}
+	args := strings.Join(BuildArgs(s), " ")
+	require.Contains(t, args, "-hwaccel rkmpp")
+	require.Contains(t, args, "scale_rkrga=")
+	require.Contains(t, args, "-c:v h264_rkmpp")
 }
