@@ -67,7 +67,9 @@ type Manager struct {
 	generation uint64
 	// idle reports expiry to the registry.
 	idle chan IdleEvent
-	// inactive counts ticks since any transcode (-1 once destroyed).
+	// destroyed is separate from activity, which an in-flight tick may update.
+	destroyed atomic.Bool
+	// inactive counts ticks since any transcode.
 	inactive atomic.Int32
 
 	// probe holds the source properties, immutable after creation.
@@ -167,9 +169,7 @@ func NewManager(a NewManagerArgs) (*Manager, error) {
 	}
 
 	if err := m.ffprobe(); err != nil {
-		if m.usesTemp {
-			os.RemoveAll(m.tempDir)
-		}
+		os.RemoveAll(m.tempDir)
 		return nil, err
 	}
 
@@ -182,7 +182,7 @@ func NewManager(a NewManagerArgs) (*Manager, error) {
 
 	// height is our primary dimension for scaling
 	// using the probed size, we adjust the width of the stream
-	// the smaller dimemension of the output should match the height here
+	// the smaller dimension of the output should match the height here
 	smDim, lgDim := m.probe.Height, m.probe.Width
 	if m.probe.Height > m.probe.Width {
 		smDim, lgDim = lgDim, smDim
@@ -246,19 +246,27 @@ func NewManager(a NewManagerArgs) (*Manager, error) {
 		stream.width = int(math.Ceil(float64(lgDim) * float64(stream.height) / float64(smDim)))
 
 		if rkmpp {
+			// Round to the nearest even width instead of dropping the rendition
+			// whenever its aspect ratio happens to produce an odd pixel count.
+			stream.width = int(math.Round(float64(lgDim)*float64(stream.height)/float64(smDim)/2)) * 2
 			stream.bitrate = min(stream.bitrate, balancedRKMPPBitrate(stream.width, stream.height, m.FrameRate()))
 		}
 
 		// remove invalid streams
 		if (stream.height > smDim || stream.width > lgDim) || // no upscaling; we're not AI
 			(!rkmpp && float64(stream.bitrate) > float64(m.probe.BitRate)*0.8) ||
-			(rkmpp && stream.height == smDim && stream.width == lgDim) || // no more than 80% of original bitrate
+			(rkmpp && stream.height == smDim/2*2 && stream.width == lgDim/2*2) || // avoid duplicating max
 			(stream.height%2 != 0 || stream.width%2 != 0) { // no odd dimensions
 
 			// remove stream
 			delete(m.streams, k)
 			continue
 		}
+	}
+
+	maxWidth, maxHeight := m.probe.Width, m.probe.Height
+	if rkmpp {
+		maxWidth, maxHeight = maxWidth/2*2, maxHeight/2*2
 	}
 
 	// Original: stream copy as direct when eligible. Keyframes are not
@@ -277,15 +285,15 @@ func NewManager(a NewManagerArgs) (*Manager, error) {
 		m.streams[QUALITY_MAX] = &Stream{
 			c: m.c, m: m,
 			quality: QUALITY_MAX,
-			height:  m.probe.Height,
-			width:   m.probe.Width,
+			height:  maxHeight,
+			width:   maxWidth,
 			bitrate: refBitrate,
 			order:   1,
 		}
 	}
 
 	if rkmpp && m.IsCopyEligible() && len(m.streams) > 1 {
-		m.streams[QUALITY_MAX] = &Stream{c: m.c, m: m, quality: QUALITY_MAX, height: m.probe.Height, width: m.probe.Width, bitrate: refBitrate, order: 1}
+		m.streams[QUALITY_MAX] = &Stream{c: m.c, m: m, quality: QUALITY_MAX, height: maxHeight, width: maxWidth, bitrate: refBitrate, order: 1}
 	}
 
 	// Start all streams
@@ -303,7 +311,7 @@ func NewManager(a NewManagerArgs) (*Manager, error) {
 		for {
 			<-t.C
 
-			if m.inactive.Load() == -1 {
+			if m.destroyed.Load() {
 				t.Stop()
 				return
 			}
@@ -321,7 +329,7 @@ func NewManager(a NewManagerArgs) (*Manager, error) {
 				}
 			}
 
-			// Nothing done for 5 minutes
+			// Expire once the configured manager idle interval has elapsed.
 			if m.inactive.Load() >= int32(m.c.ManagerIdleTime/5) {
 				t.Stop()
 				m.Destroy()
@@ -336,8 +344,10 @@ func NewManager(a NewManagerArgs) (*Manager, error) {
 
 // Destroys streams. DOES NOT emit on the close channel.
 func (m *Manager) Destroy() {
+	if !m.destroyed.CompareAndSwap(false, true) {
+		return
+	}
 	log.Printf("%s: destroying manager", m.id)
-	m.inactive.Store(-1)
 
 	for _, stream := range m.streams {
 		stream.Stop()
@@ -510,9 +520,19 @@ func (m *Manager) ServeChunk(w http.ResponseWriter, quality string, id int) bool
 	if !ok {
 		return false
 	}
+	// Reject stale or malformed requests before starting an encoder or probe.
+	startChunk := float64(id)
+	if quality != QUALITY_DIRECT && m.AdaptiveStartBuffer() && id > 0 {
+		startChunk++
+	}
+	if id < 0 || m.tc.ChunkSize <= 0 || startChunk*float64(m.tc.ChunkSize) >= m.Duration().Seconds() {
+		return false
+	}
 	if quality == QUALITY_DIRECT {
 		// Trigger the probe; on empty grid the stream re-encodes.
-		m.EnsureCopySegments()
+		if segments, ok := m.EnsureCopySegments(); ok && id >= len(segments) {
+			return false
+		}
 	}
 	if quality != QUALITY_DIRECT && m.AdaptiveStartBuffer() {
 		if id == 0 {
@@ -578,7 +598,8 @@ func (m *Manager) ffprobe() error {
 
 	// Copy eligibility is cheap (codec + rotation); keyframes come later
 	// via EnsureCopySegments on direct.m3u8, so creation stays fast.
-	if m.probe.Width <= 0 || m.probe.Height <= 0 || m.probe.Duration <= 0 {
+	if m.probe.Width <= 0 || m.probe.Height <= 0 || m.probe.Duration <= 0 ||
+		(m.c.RKMPP && (m.probe.Width < 2 || m.probe.Height < 2)) {
 		return fmt.Errorf("invalid video dimensions or duration for file %d", m.fileid)
 	}
 	m.copyEligible = m.probe.Rotation == 0 && IsCodecPlayable(m.probe.CodecName, m.playableCodecs)
