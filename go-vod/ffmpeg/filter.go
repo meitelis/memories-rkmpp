@@ -176,7 +176,7 @@ func (b *FilterBuilder) transposePlan() (filters []string, sw bool) {
 		transposer = "transpose"
 		sw = true
 	}
-	switch s.Rotation {
+	switch NormalizeRotation(s.Rotation) {
 	case -90:
 		filters = []string{transposer + "=1"}
 	case 90:
