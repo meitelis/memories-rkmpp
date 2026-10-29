@@ -46,7 +46,7 @@
     return url.href;
   }
 
-  if (typeof module === 'object' && module.exports) {
+  if (typeof document === 'undefined' && typeof module === 'object' && module.exports) {
     module.exports = { shortEdge, initialLevel, qualityText, updateQualityText, manifestURL };
     return;
   }
@@ -54,8 +54,11 @@
   const marker = Symbol.for('memories-rkmpp-player');
   if (window[marker]) return;
   window[marker] = true;
+  console.info('[Memories RKMPP] Player helper 0.2.2 active');
 
   const seen = new WeakSet();
+  const players = new WeakSet();
+  const providers = new WeakSet();
   const forceAVC = new WeakSet();
   let active = null;
   const settings = {
@@ -99,7 +102,7 @@
           updateQualityText(label, level);
         }
       }
-      for (const hint of menu.querySelectorAll('.vds-menu-hint')) {
+      for (const hint of menu.querySelectorAll('[data-part="hint"]')) {
         updateQualityText(hint, active.quality);
       }
     }
@@ -108,6 +111,13 @@
   // Menus can be portalled outside media-player. Ignore clock, thumbnail,
   // and unrelated Nextcloud mutations before querying the quality menu.
   new MutationObserver((records) => {
+    for (const record of records) {
+      for (const node of record.addedNodes) {
+        if (node.nodeType !== 1) continue;
+        if (node.matches('media-player')) watchPlayer(node);
+        for (const player of node.querySelectorAll('media-player')) watchPlayer(player);
+      }
+    }
     if (records.some((record) => {
       const element = record.target.nodeType === 1 ? record.target : record.target.parentElement;
       return element?.closest('.vds-quality-menu') || [...record.addedNodes].some((node) =>
@@ -115,13 +125,12 @@
     })) refreshQualityLabels();
   }).observe(document.documentElement, { childList: true, characterData: true, subtree: true });
 
-  document.addEventListener('hls-instance', (event) => {
-    const hls = event.detail;
-    const player = event.target.closest?.('media-player');
+  function configureHLS(player, hls) {
     const events = hls?.constructor?.Events;
     if (!player || !events || typeof hls.once !== 'function' || seen.has(hls)) return;
     seen.add(hls);
-    active = { player, hls, quality: null };
+    active = { player, hls, quality: hls.levels[hls.currentLevel] || null };
+    console.info('[Memories RKMPP] HLS output preference:', supportsHEVC() && !forceAVC.has(player) ? 'HEVC' : 'AVC');
 
     // Public hls.js playlist loader hook: negotiate before loading the master.
     const Loader = hls.constructor.DefaultConfig.loader;
@@ -135,16 +144,17 @@
     apply();
     queueMicrotask(apply);
 
-    hls.once(events.MANIFEST_PARSED, () => {
-      if (hls.levels.length) {
+    const initialize = () => {
+      if (hls.levels.length && !player.currentTime) {
         const index = initialLevel(hls.levels);
         hls.startLevel = index;
         hls.nextAutoLevel = index;
         budget(hls, index);
       }
       refreshQualityLabels();
-      hls.startLoad();
-    });
+      if (!player.currentTime) hls.startLoad();
+    };
+    hls.once(events.MANIFEST_PARSED, initialize);
     hls.on(events.LEVEL_SWITCHING, (_, data) => budget(hls, data.level));
     hls.on(events.LEVEL_SWITCHED, (_, data) => {
       if (active?.hls === hls) {
@@ -170,5 +180,39 @@
       }, { once: true });
       player.src = { src: manifestURL(hls.url, location.href, false), type: 'application/x-mpegurl' };
     });
+
+    // onInstance also reports an instance created before this script attached.
+    // If its master is already loading, restart just the initial manifest with
+    // the correct MSE capability report. Never reset an active playhead.
+    if (hls.url && !player.currentTime) {
+      const url = manifestURL(hls.url, location.href, !forceAVC.has(player) && supportsHEVC());
+      if (url !== hls.url) {
+        hls.stopLoad();
+        hls.loadSource(url);
+        return;
+      }
+    }
+    if (hls.levels.length) initialize();
+  }
+
+  function watchProvider(player, provider) {
+    if (provider?.type !== 'hls' || typeof provider.onInstance !== 'function' || providers.has(provider)) return;
+    providers.add(provider);
+    provider.onInstance((hls) => configureHLS(player, hls));
+  }
+
+  function watchPlayer(player) {
+    if (!players.has(player)) {
+      players.add(player);
+      player.addEventListener('provider-change', (event) => watchProvider(player, event.detail));
+      player.addEventListener('hls-instance', (event) => configureHLS(player, event.detail));
+    }
+    watchProvider(player, player.provider);
+  }
+
+  document.addEventListener('hls-instance', (event) => {
+    const player = event.target.closest?.('media-player');
+    if (player) configureHLS(player, event.detail);
   }, true);
+  for (const player of document.querySelectorAll('media-player')) watchPlayer(player);
 })();
