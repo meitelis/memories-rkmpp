@@ -1,0 +1,56 @@
+{
+  "platform": "RK3588 / ROCK 5B+ / Armbian vendor 6.1",
+  "memories": "10.2.0",
+  "goVod": "0.6.3",
+  "player": "0.2.5",
+  "library": {
+    "sources": 63,
+    "passed": 63,
+    "strictlyDecodedFragments": 180,
+    "sourceStatsUnchanged": true
+  },
+  "syntheticHdr": {
+    "gpuCases": 24,
+    "gpuCasesPassed": 24,
+    "originalSizeCases": 4,
+    "originalSizeCasesPassed": 4,
+    "transfers": [
+      "smpte2084",
+      "arib-std-b67"
+    ],
+    "outputs": [
+      "hevc",
+      "h264"
+    ],
+    "outputColour": "8-bit BT709 SDR",
+    "coldSeek": true,
+    "rotation90": true,
+    "disabledGpuFallbackPassed": true,
+    "failedGpuProbeFallbackPassed": true
+  },
+  "high10": {
+    "frames": 60,
+    "decodeErrors": 0,
+    "hardwareDecodeScaleEncode": true
+  },
+  "checks": [
+    "Go race tests",
+    "go vet",
+    "gofmt",
+    "ARM64 image build",
+    "four player regressions",
+    "PHP syntax"
+  ],
+  "limits": [
+    "Real library was SDR",
+    "HDR uses synthetic fixtures; colour accuracy not display-calibrated",
+    "Dolby Vision unvalidated",
+    "Unsupported profiles may need CPU decode/tone mapping",
+    "Audio/previews involve CPU work",
+    "No zero-rebuffering guarantee"
+  ],
+  "image": {
+    "id": "sha256:cbe9df78fb0a252f1e2a4f50763f19afb267c6af6a2de1755b1217fe5444d7f4",
+    "bytes": 167078053
+  }
+}

@@ -85,7 +85,7 @@ func (r *Registry) get(p ManagerParams) *Manager {
 	defer r.mu.Unlock()
 
 	m := r.members[p.StreamID]
-	if m == nil || m.url != p.URL || m.inactive.Load() == -1 {
+	if m == nil || m.url != p.URL || m.destroyed.Load() {
 		return nil
 	}
 	if m.usesTemp != p.UsesTemp {

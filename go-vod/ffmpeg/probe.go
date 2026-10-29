@@ -269,6 +269,12 @@ func probeHDR(s videoStream) bool {
 			return true
 		}
 	}
+	// Wide-gamut 10-bit SDR is not HDR. Infer HDR from BT.2020 only when
+	// transfer metadata is missing, never over an explicit SDR transfer tag.
+	transfer := strings.ToLower(strings.TrimSpace(s.ColorTransfer))
+	if transfer != "" && transfer != "unknown" && transfer != "unspecified" {
+		return false
+	}
 	if s.ColorSpace == "bt2020nc" || s.ColorSpace == "bt2020c" || s.ColorPrimaries == "bt2020" {
 		return streamBitDepth(s) > 8
 	}

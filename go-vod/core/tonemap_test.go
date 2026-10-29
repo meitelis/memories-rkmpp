@@ -87,3 +87,41 @@ func TestTonemapProbeSkipped(t *testing.T) {
 		})
 	}
 }
+
+func TestRKMPPOpenCLSelectionAndFallback(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		s, calls := tonemapStream(t, fail)
+		s.c.RKMPP, s.c.RKMPPOpenCL = true, true
+		s.c.RKMPPOutputCodec = "hevc"
+		s.m.playableCodecs = []string{"hevc"}
+		s.m.probe.CodecName, s.m.probe.PixelFormat, s.m.probe.BitDepth = "hevc", "yuv420p10le", 10
+		for range 3 {
+			spec := s.transcodeSpec(0, true)
+			require.Equal(t, !fail, spec.RKMPPOpenCL)
+			args := strings.Join(ffmpeg.BuildArgs(spec), " ")
+			require.Contains(t, args, "-c:v hevc_rkmpp")
+			if fail {
+				require.Contains(t, args, "zscale=")
+				require.NotContains(t, args, "tonemap_opencl=")
+			} else {
+				require.Contains(t, args, "tonemap_opencl=")
+				require.Contains(t, args, "hwmap=derive_device=rkmpp:mode=write:reverse=1")
+				require.NotContains(t, args, "hwdownload")
+				require.NotContains(t, args, "zscale=")
+			}
+		}
+		data, err := os.ReadFile(calls)
+		require.NoError(t, err)
+		require.Equal(t, "call\n", string(data))
+	}
+}
+
+func TestRKMPPDisabledOpenCLDoesNotProbe(t *testing.T) {
+	s, calls := tonemapStream(t, false)
+	s.c.RKMPP = true
+	s.c.RKMPPOpenCL = false
+	s.m.probe.CodecName = "hevc"
+	spec := s.transcodeSpec(0, true)
+	require.False(t, spec.RKMPPOpenCL)
+	require.NoFileExists(t, calls)
+}

@@ -10,10 +10,23 @@ import (
 // ProbeVAAPIOpenCL tests decoding, scaling, interop and encoding a real frame.
 // Filter/device listings alone cannot establish whether hwmap works.
 func ProbeVAAPIOpenCL(ctx context.Context, s Spec) error {
+	s.VAAPIOpenCL = true
+	return probeTonemapFrame(ctx, s, "VA-API/OpenCL")
+}
+
+// ProbeRKMPPOpenCL verifies a complete MPP/RGA/Mali/MPP frame pipeline.
+func ProbeRKMPPOpenCL(ctx context.Context, s Spec) error {
+	s.RKMPPOpenCL = true
+	if !usesRKMPPFrames(s) {
+		return fmt.Errorf("source profile requires software decoding")
+	}
+	return probeTonemapFrame(ctx, s, "RKMPP/OpenCL")
+}
+
+func probeTonemapFrame(ctx context.Context, s Spec, name string) error {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	s.VAAPIOpenCL = true
 	s.Audio = AudioInfo{}
 	args := BuildArgs(s)
 	args = append(args, "-nostdin", "-abort_on", "empty_output", "-frames:v", "1", "-an", "-f", "null", "-")
@@ -22,7 +35,7 @@ func ProbeVAAPIOpenCL(ctx context.Context, s Spec) error {
 		return ctx.Err()
 	}
 	if err != nil {
-		return fmt.Errorf("VA-API/OpenCL probe: %w: %s", err, out)
+		return fmt.Errorf("%s probe: %w: %s", name, err, out)
 	}
 	return nil
 }

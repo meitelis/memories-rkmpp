@@ -13,7 +13,7 @@ const KeyframeCacheFile = "keyframes.json"
 
 const ProbeCacheFile = "probe.json"
 
-const probeCacheVersion = 4
+const probeCacheVersion = 5
 
 // FileCacheDir is the file's cache home, sharded by hashed fileid.
 // Empty when caching is unavailable (no cache dir or fileid).
@@ -82,7 +82,7 @@ func StoreCachedKeyframes(cacheDir string, fileid int64, etag string, keys []flo
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0644)
+	return publishCacheFile(path, data)
 }
 
 func ProbeCachePath(cacheDir string, fileid int64) string {
@@ -140,5 +140,26 @@ func StoreCachedProbe(cacheDir string, fileid int64, etag string, probe *ProbeVi
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0644)
+	return publishCacheFile(path, data)
+}
+
+// Publish only complete metadata: concurrent readers must never see a truncated
+// JSON document and mistake an in-progress write for a corrupt cache entry.
+func publishCacheFile(path string, data []byte) error {
+	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+"-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	defer f.Close()
+	if err := f.Chmod(0644); err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), path)
 }

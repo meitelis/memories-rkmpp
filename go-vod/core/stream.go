@@ -44,11 +44,13 @@ type Stream struct {
 
 	coder        *exec.Cmd
 	coderDone    chan struct{}
+	coderFailed  bool
 	backpressure bool
 	resumed      *sync.Cond
 
 	tonemapOnce sync.Once
 	vaapiOpenCL bool
+	rkmppOpenCL bool
 
 	inactive int
 	stop     chan bool
@@ -78,7 +80,7 @@ func (s *Stream) Run() {
 
 			s.inactive++
 
-			// Nothing done for 2 minutes
+			// Release an encoder after the configured stream idle interval.
 			if s.inactive >= s.c.StreamIdleTime/5 && s.coder != nil {
 				s.clear()
 			}
@@ -98,6 +100,7 @@ func (s *Stream) clear() {
 	log.Printf("%s-%s: stopping stream", s.m.id, s.quality)
 	coder, done := s.coder, s.coderDone
 	s.coder, s.coderDone = nil, nil
+	s.coderFailed = false
 	s.resumed.Broadcast()
 	if coder != nil && coder.Process != nil {
 		coder.Process.Kill()
@@ -126,6 +129,11 @@ func (s *Stream) ServeChunk(w http.ResponseWriter, id int) error {
 	s.checkGoal(id)
 
 	chunk, ok := s.chunks[id]
+	if s.coderFailed && (!ok || !chunk.done) {
+		s.mutex.Unlock()
+		s.restartAtChunk(w, id)
+		return nil
+	}
 	if !ok {
 		// Restart unless a nearby chunk shows the transcode is close
 		restart := true
@@ -198,7 +206,7 @@ func (s *Stream) ServeFullVideo(w http.ResponseWriter, r *http.Request) error {
 	w.Header().Set("Content-Type", "video/mp4")
 	w.WriteHeader(http.StatusOK)
 
-	// Write data, flusing every 1MB
+	// Copy through a 1 MiB buffer and flush each write.
 	buf := make([]byte, 1024*1024)
 	for {
 		n, readErr := stdoutReader.Read(buf)
@@ -277,6 +285,7 @@ func (s *Stream) waitForChunk(w http.ResponseWriter, chunk *Chunk) {
 	current, ok := s.chunks[chunk.id]
 	finished := ok && current.done
 	restarted := coder != s.coder
+	failed := s.coderFailed
 	s.mutex.Unlock()
 
 	if finished {
@@ -287,6 +296,10 @@ func (s *Stream) waitForChunk(w http.ResponseWriter, chunk *Chunk) {
 	// Check if coder was changed
 	if restarted {
 		w.WriteHeader(http.StatusConflict)
+		return
+	}
+	if failed {
+		w.WriteHeader(http.StatusBadGateway)
 		return
 	}
 
@@ -320,6 +333,10 @@ func (s *Stream) spec(startAt float64, isHls bool) ffmpeg.Spec {
 	// direct falls back to re-encoding (like max); progressive MP4 copies
 	// fine without keyframes, so it always copies.
 	_, grid := s.m.CopySegments()
+	width, height := s.width, s.height
+	if s.quality != QUALITY_MAX && s.quality != QUALITY_DIRECT && s.m.probe.Width < s.m.probe.Height {
+		width, height = height, width
+	}
 	return ffmpeg.Spec{
 		Bin:     s.c.FFmpeg,
 		Input:   s.m.ffmpegInput(),
@@ -334,8 +351,8 @@ func (s *Stream) spec(startAt float64, isHls bool) ffmpeg.Spec {
 		FrameRateExact: s.m.probe.FrameRateExact,
 		PixelFormat:    s.m.probe.PixelFormat,
 		Quality:        s.quality,
-		Width:          s.width,
-		Height:         s.height,
+		Width:          width,
+		Height:         height,
 		QF:             s.m.tc.QF,
 		FrameRate:      s.m.probe.FrameRate,
 		Rotation:       s.m.probe.Rotation,
@@ -372,8 +389,8 @@ func (s *Stream) transcode(startId int) error {
 			startAt = segs[startId].Start + copySeekEpsilon
 		}
 	} else if startId > 0 {
-		// Start one frame before.
-		// This ensures that the keyframes are aligned.
+		// Other backends warm up one segment earlier. RKMPP uses the exact
+		// requested segment clock shared by every adaptive rendition.
 		startNumber = startId - 1
 		if s.c.RKMPP {
 			startNumber = startId
@@ -387,6 +404,7 @@ func (s *Stream) transcode(startId int) error {
 
 	// Start the process
 	s.coder = exec.Command(s.c.FFmpeg, args...)
+	s.coderFailed = false
 
 	// Log command, quoting the args as needed
 	log.Printf("%s-%s: %s", s.m.id, s.quality, ffmpeg.QuoteForLog(ffmpeg.RedactArgs(s.coder.Args)))
@@ -527,10 +545,11 @@ func (s *Stream) monitorExit(coder *exec.Cmd, done chan struct{}) {
 		s.mutex.Lock()
 		defer s.mutex.Unlock()
 
-		// If error code is >0, there was an error in transcoding
-		if exitcode > 0 && s.coder == coder {
-			// Wake all outstanding chunks; they re-evaluate
-			// (409 on coder change, else 408) instead of waiting out
+		// An unsuccessful exit must not leave a dead encoder cached forever.
+		if s.coder == coder {
+			s.coderFailed = true
+			// Wake pending requests to report the failure immediately.
+			// The next request restarts the encoder; completed chunks remain usable.
 			for _, chunk := range s.chunks {
 				chunk.signal(false)
 			}

@@ -292,14 +292,13 @@ func TestVodReusesManagerOnConfigChange(t *testing.T) {
 
 func TestVersionGuard(t *testing.T) {
 	s := testServer(t, func(c *config.Config) { c.VersionMonitor = true })
-	go func() { <-s.idle }()
 
 	r := httptest.NewRequest("POST", "/vod", strings.NewReader(`{"client":"beefbeef","fileid":7,"profile":"test","config":{"chunkSize":3}}`))
 	r.Header.Set("X-Go-Vod-Version", "wrong")
 	w := httptest.NewRecorder()
 	s.routes().ServeHTTP(w, r)
 	require.Equal(t, http.StatusServiceUnavailable, w.Code)
-	require.Equal(t, 12, s.exitCode)
+	require.Equal(t, int32(12), s.exitCode.Load())
 
 	r = httptest.NewRequest("POST", "/vod", strings.NewReader(`{"client":"beefbeef","fileid":7,"profile":"test","config":{"chunkSize":3}}`))
 	r.Header.Set("X-Go-Vod-Version", "test")

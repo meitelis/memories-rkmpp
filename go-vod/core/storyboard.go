@@ -43,8 +43,7 @@ type storyboardService struct {
 
 var sharedStoryboards = &storyboardService{}
 
-// storyboardSlots caps concurrent storyboard ffmpeg builds at NumCPU;
-// extra builds queue behind it.
+// Serialize preview builds so they do not compete with video playback.
 var storyboardSlots = make(chan struct{}, 1)
 
 // IsStoryboardLeaf reports whether a serve leaf is a storyboard file.
@@ -205,14 +204,19 @@ func (s *storyboardService) build(dir string, in StoryboardInput) error {
 		plan.Count = max
 		plan.Sprites = len(parts)
 	}
+	current := make(map[string]bool, len(parts))
 	for i, part := range parts {
-		if err := os.Rename(part, filepath.Join(dir, ffmpeg.SpriteName(i))); err != nil {
+		name := filepath.Join(dir, ffmpeg.SpriteName(i))
+		if err := os.Rename(part, name); err != nil {
 			return err
 		}
+		current[name] = true
 	}
 	// Drop sprites from a stale longer plan, if any.
-	for _, stale := range glob(filepath.Join(dir, "storyboard-*.jpg"))[len(parts):] {
-		os.Remove(stale)
+	for _, stale := range glob(filepath.Join(dir, "storyboard-*.jpg")) {
+		if !current[stale] {
+			os.Remove(stale)
+		}
 	}
 
 	data, err := json.Marshal(storyboardFile{Etag: in.Etag, Plan: plan})

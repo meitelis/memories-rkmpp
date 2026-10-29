@@ -8,21 +8,22 @@ RUN test -z "$(gofmt -l .)" && go test -race ./... && go vet ./... && CGO_ENABLE
 
 FROM jellyfin/jellyfin@sha256:fea863d0cd9ec445985d9c75fc6ed64e38a1d2766cf0c250a33d553f4fc1b771 AS media
 RUN set -eu; \
-    mkdir -p /rootfs/usr/lib/jellyfin-ffmpeg /rootfs/usr/local/bin /rootfs/etc /rootfs/tmp /rootfs/cache/tmp /rootfs/app; \
-    for bin in /usr/lib/jellyfin-ffmpeg/ffmpeg /usr/lib/jellyfin-ffmpeg/ffprobe; do \
+    mkdir -p /rootfs/usr/lib/jellyfin-ffmpeg /rootfs/usr/local/bin /rootfs/etc/OpenCL/vendors /rootfs/tmp /rootfs/cache/tmp /rootfs/app; \
+    for bin in /usr/lib/jellyfin-ffmpeg/ffmpeg /usr/lib/jellyfin-ffmpeg/ffprobe /usr/lib/aarch64-linux-gnu/libmali.so.1; do \
       cp -L --parents "$bin" /rootfs; \
       LD_PRELOAD= ldd "$bin"; \
     done | awk '/=> \// {print $3} /^[[:space:]]*\// {print $1}' | sort -u > /tmp/runtime-libraries; \
     while IFS= read -r lib; do cp -L --parents "$lib" /rootfs; done < /tmp/runtime-libraries; \
     ln -s /usr/lib/jellyfin-ffmpeg/ffmpeg /rootfs/usr/local/bin/ffmpeg; \
     ln -s /usr/lib/jellyfin-ffmpeg/ffprobe /rootfs/usr/local/bin/ffprobe; \
+    printf '/usr/lib/aarch64-linux-gnu/libmali.so.1\n' > /rootfs/etc/OpenCL/vendors/mali.icd; \
     cp -L --parents /etc/ssl/certs/ca-certificates.crt /rootfs; \
     printf 'transcoder:x:1000:1000:Video transcoder:/tmp:/nonexistent\n' > /rootfs/etc/passwd; \
     printf 'transcoder:x:1000:\n' > /rootfs/etc/group; \
     printf 'hosts: files dns\n' > /rootfs/etc/nsswitch.conf; \
     chmod 1777 /rootfs/tmp; \
     chown -R 1000:1000 /rootfs/cache; \
-    for file in /usr/share/doc/jellyfin-ffmpeg*/copyright; do if [ -f "$file" ]; then cp -L --parents "$file" /rootfs; fi; done
+    for file in /usr/share/doc/jellyfin-ffmpeg*/copyright /usr/share/doc/libmali*/copyright; do if [ -f "$file" ]; then cp -L --parents "$file" /rootfs; fi; done
 
 FROM scratch
 COPY --from=media /rootfs/ /
@@ -32,6 +33,7 @@ ENV PATH=/usr/local/bin:/app \
     LD_LIBRARY_PATH=/usr/lib/jellyfin-ffmpeg/lib \
     MEMORIES_RKMPP=1 \
     MEMORIES_RKMPP_CODEC=hevc \
+    MEMORIES_RKMPP_OPENCL=true \
     MEMORIES_EXPECTED_APP_VERSION=10.2.0 \
     CACHE_DIR=/cache \
     TMPDIR=/cache/tmp \
@@ -43,4 +45,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["/ap
 ENTRYPOINT ["/app/go-vod"]
 CMD ["-version-monitor"]
 
-LABEL org.opencontainers.image.version="memories-10.2.0-govod-0.6.3-rkmpp-r3"
+LABEL org.opencontainers.image.version="memories-10.2.0-govod-0.6.3-rkmpp-r4"

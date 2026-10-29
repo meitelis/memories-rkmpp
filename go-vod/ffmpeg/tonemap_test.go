@@ -45,3 +45,24 @@ func TestProbeVAAPIOpenCLFailure(t *testing.T) {
 	defer cancel()
 	require.ErrorIs(t, ProbeVAAPIOpenCL(ctx, s), context.DeadlineExceeded)
 }
+
+func TestProbeRKMPPOpenCLChecksARealPipeline(t *testing.T) {
+	dir := t.TempDir()
+	record := filepath.Join(dir, "args")
+	t.Setenv("PROBE_ARGS", record)
+	s := baseSpec()
+	s.RKMPP, s.HDR, s.CodecName, s.PixelFormat, s.BitDepth = true, true, "hevc", "yuv420p10le", 10
+	s.Bin = filepath.Join(dir, "ffmpeg")
+	require.NoError(t, os.WriteFile(s.Bin, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$PROBE_ARGS\"\n"), 0755))
+	require.NoError(t, ProbeRKMPPOpenCL(context.Background(), s))
+	data, err := os.ReadFile(record)
+	require.NoError(t, err)
+	args := string(data)
+	for _, part := range []string{"rkmpp=memories", "opencl=memories_opencl@memories", "format=p010", "tonemap_opencl=", "hwmap=derive_device=rkmpp:mode=write:reverse=1"} {
+		require.Contains(t, args, part)
+	}
+	require.NotContains(t, args, "hwdownload")
+	require.False(t, s.RKMPPOpenCL)
+	s.CodecName = "prores"
+	require.ErrorContains(t, ProbeRKMPPOpenCL(context.Background(), s), "software decoding")
+}

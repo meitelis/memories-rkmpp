@@ -117,3 +117,12 @@ func TestAdditionalProbeMetadata(t *testing.T) {
 	require.Equal(t, 2500*time.Millisecond, info.Duration)
 	require.InDelta(t, 29.97, exactFrameRate(" 29.97 "), 0.001)
 }
+
+func TestWideGamutSDRIsNotToneMapped(t *testing.T) {
+	for _, transfer := range []string{"bt709", "bt2020-10", "gamma22", "iec61966-2-1"} {
+		data := "{\"streams\":[{\"codec_type\":\"video\",\"codec_name\":\"hevc\",\"pix_fmt\":\"yuv420p10le\",\"color_space\":\"bt2020nc\",\"color_primaries\":\"bt2020\",\"color_transfer\":\"" + transfer + "\"}]}"
+		info, err := ParseProbeJSON([]byte(data))
+		require.NoError(t, err)
+		require.False(t, info.HDR, transfer)
+	}
+}

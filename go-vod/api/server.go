@@ -10,7 +10,10 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -24,10 +27,15 @@ type Server struct {
 	server   *http.Server
 	reg      *core.Registry
 	idle     chan core.IdleEvent
-	exitCode int
+	stop     chan struct{}
+	stopOnce sync.Once
+	exitCode atomic.Int32
 }
 
 func NewServer(cfg *config.Config) (*Server, error) {
+	if err := validateScratchDir(cfg.TempDir, cfg.CacheDir()); err != nil {
+		return nil, err
+	}
 	if err := os.RemoveAll(cfg.TempDir); err != nil {
 		return nil, fmt.Errorf("reset temporary directory: %w", err)
 	}
@@ -35,9 +43,28 @@ func NewServer(cfg *config.Config) (*Server, error) {
 		return nil, fmt.Errorf("create temporary directory: %w", err)
 	}
 
-	s := &Server{cfg: cfg, idle: make(chan core.IdleEvent)}
+	s := &Server{cfg: cfg, idle: make(chan core.IdleEvent), stop: make(chan struct{})}
 	s.reg = core.NewRegistry(cfg, s.idle)
 	return s, nil
+}
+
+// Scratch is reset at startup, so it must not contain persistent cache data.
+func validateScratchDir(tempDir, cacheDir string) error {
+	scratch, err := filepath.Abs(tempDir)
+	if err != nil || tempDir == "" || filepath.Dir(scratch) == scratch {
+		return fmt.Errorf("temporary directory must be a dedicated scratch directory")
+	}
+	if cacheDir != "" {
+		cache, err := filepath.Abs(cacheDir)
+		if err != nil {
+			return fmt.Errorf("resolve cache directory: %w", err)
+		}
+		rel, err := filepath.Rel(scratch, cache)
+		if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+			return fmt.Errorf("temporary directory must not contain the persistent cache directory")
+		}
+	}
+	return nil
 }
 
 func (s *Server) routes() *http.ServeMux {
@@ -231,7 +258,7 @@ func (s *Server) versionOk(w http.ResponseWriter, r *http.Request) bool {
 
 		w.WriteHeader(http.StatusServiceUnavailable)
 
-		s.exitCode = 12
+		s.exitCode.Store(12)
 		s.Close()
 		return false
 	}
@@ -246,11 +273,14 @@ func (s *Server) Start() int {
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(sig)
 	go func() {
-		<-sig
-		s.Close()
+		select {
+		case <-sig:
+			s.Close()
+		case <-s.stop:
+		}
 	}()
 
-	s.server = &http.Server{Addr: s.cfg.Bind, Handler: s.routes()}
+	s.server = &http.Server{Addr: s.cfg.Bind, Handler: s.routes(), ReadHeaderTimeout: 5 * time.Second}
 
 	go func() {
 		err := s.server.ListenAndServe()
@@ -261,12 +291,14 @@ func (s *Server) Start() int {
 		}
 	}()
 
+idleLoop:
 	for {
-		ev := <-s.idle
-		if ev.ID == "" {
-			break
+		select {
+		case ev := <-s.idle:
+			s.reg.Remove(ev.ID, ev.Generation)
+		case <-s.stop:
+			break idleLoop
 		}
-		s.reg.Remove(ev.ID, ev.Generation)
 	}
 
 	log.Println("Shutting down HTTP server")
@@ -274,9 +306,9 @@ func (s *Server) Start() int {
 	defer cancel()
 	s.server.Shutdown(ctx)
 
-	return s.exitCode
+	return int(s.exitCode.Load())
 }
 
 func (s *Server) Close() {
-	s.idle <- core.IdleEvent{}
+	s.stopOnce.Do(func() { close(s.stop) })
 }
