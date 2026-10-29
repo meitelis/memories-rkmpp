@@ -3,7 +3,7 @@
 <id>memories_rkmpp_player</id><name>Memories RKMPP Player</name>
 <summary>Hardware HEVC negotiation and balanced video playback for Memories</summary>
 <description>Negotiates HEVC with an AVC fallback, starts adaptive video around 1080p, corrects portrait quality labels, and bounds browser buffering.</description>
-<version>0.2.4</version><licence>agpl</licence><author>meitelis</author>
+<version>0.2.5</version><licence>agpl</licence><author>meitelis</author>
 <namespace>MemoriesRkmppPlayer</namespace><category>multimedia</category>
 <dependencies><nextcloud min-version="35" max-version="35"/></dependencies>
 </info>
