@@ -1,0 +1,157 @@
+{
+  "memories": "10.2.0",
+  "go_vod": "0.6.3",
+  "image": "local/memories-go-vod:rkmpp-10.2.0-v0.6.3-r1",
+  "image_id": "sha256:728e836fef050168c26463876d1b1b6e6bf5ec8b35f4e1913d4e9c206d844523",
+  "image_bytes": 109171649,
+  "go_race_tests": "pass",
+  "go_vet": "pass",
+  "library": {
+    "count": 63,
+    "passed": 63,
+    "segments": 180,
+    "completed": true
+  },
+  "additional_checks": [
+    {
+      "name": "quality-switch-continuity",
+      "ok": true,
+      "seconds": 11.838,
+      "qualities": [
+        "1080p",
+        "1440p",
+        "720p",
+        "1080p"
+      ],
+      "request_seconds": [
+        1.963,
+        1.564,
+        1.491,
+        0.026
+      ],
+      "boundary_deltas_seconds": [
+        {
+          "video": -0.021333,
+          "audio": -0.058666
+        },
+        {
+          "video": 0.0,
+          "audio": -0.029333
+        },
+        {
+          "video": 0.021333,
+          "audio": 0.024
+        }
+      ]
+    },
+    {
+      "name": "pause-resume-after-hardware-idle",
+      "ok": true,
+      "seconds": 32.461,
+      "pause_seconds": 25,
+      "resume_seconds": 1.859,
+      "boundary_deltas_seconds": [
+        {
+          "video": -0.021333,
+          "audio": -0.058666
+        }
+      ]
+    },
+    {
+      "name": "long-camera-video-preview",
+      "ok": true,
+      "seconds": 10.859,
+      "sprites": 1,
+      "preview_seconds": 10.205
+    },
+    {
+      "name": "library-preview",
+      "ok": true,
+      "seconds": 1.908,
+      "sprites": 1,
+      "preview_seconds": 1.349
+    },
+    {
+      "name": "progressive-transcode",
+      "ok": true,
+      "seconds": 11.513,
+      "bytes": 42212370,
+      "request_seconds": 6.28,
+      "codec_name": "h264",
+      "width": 1920,
+      "height": 1080,
+      "pix_fmt": "yuv420p",
+      "avg_frame_rate": "160000/5347",
+      "audio_samples_present": true,
+      "video_packets": 1034
+    }
+  ],
+  "production_smoke": [
+    {
+      "case": 0,
+      "ok": true,
+      "seconds": 1.841
+    },
+    {
+      "case": 0,
+      "ok": true,
+      "seconds": 1.372
+    },
+    {
+      "case": 1,
+      "ok": true,
+      "seconds": 2.1
+    },
+    {
+      "case": 1,
+      "ok": true,
+      "seconds": 0.91
+    },
+    {
+      "case": 2,
+      "ok": true,
+      "seconds": 1.895
+    },
+    {
+      "case": 2,
+      "ok": true,
+      "seconds": 0.007
+    }
+  ],
+  "kernel_engine_peak_percent": {
+    "vdpu": 0,
+    "vepu": 0,
+    "jpegd": 0,
+    "jpege-core": 0,
+    "iep": 0,
+    "rkvenc-core": 82.98,
+    "rkvdec-core": 99.97,
+    "av1d": 0
+  },
+  "rga_peak_percent": 95,
+  "source_originals_unchanged": true,
+  "browser_check": "User confirms the videos checked played smoothly without pausing. Server logs verified hardware output through the final segment. This is user-reported playback verification; automated browser observation was blocked after user input.",
+  "published": true,
+  "latest_user_playback": {
+    "hardware_decode": true,
+    "hardware_scale": true,
+    "hardware_encode": true,
+    "qualities_reached_final_segment": [
+      "1080p",
+      "1440p"
+    ],
+    "transcoder_errors": 0,
+    "nextcloud_memories_warnings_or_errors": 0,
+    "video_http_status_counts": {
+      "200": 85,
+      "499": 3
+    },
+    "container_health": "healthy",
+    "container_restarts": 0,
+    "oom": false,
+    "client_smoothness_directly_observed": false,
+    "user_reported_smooth_playback": true,
+    "user_feedback": "It did not pause; videos checked play smoothly."
+  },
+  "publication_note": "This file records the tested build; repository publication does not certify other hardware or clients."
+}
