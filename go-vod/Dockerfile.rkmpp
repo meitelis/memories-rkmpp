@@ -4,7 +4,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -r
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN go test -race ./... && go vet ./... && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/go-vod .
+RUN test -z "$(gofmt -l .)" && go test -race ./... && go vet ./... && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/go-vod .
 
 FROM jellyfin/jellyfin@sha256:fea863d0cd9ec445985d9c75fc6ed64e38a1d2766cf0c250a33d553f4fc1b771 AS media
 RUN set -eu; \
@@ -31,6 +31,7 @@ COPY LICENSE /usr/share/licenses/go-vod/LICENSE
 ENV PATH=/usr/local/bin:/app \
     LD_LIBRARY_PATH=/usr/lib/jellyfin-ffmpeg/lib \
     MEMORIES_RKMPP=1 \
+    MEMORIES_RKMPP_CODEC=hevc \
     MEMORIES_EXPECTED_APP_VERSION=10.2.0 \
     CACHE_DIR=/cache \
     TMPDIR=/cache/tmp \
@@ -42,4 +43,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["/ap
 ENTRYPOINT ["/app/go-vod"]
 CMD ["-version-monitor"]
 
-LABEL org.opencontainers.image.version="memories-10.2.0-govod-0.6.3-rkmpp-r1"
+LABEL org.opencontainers.image.version="memories-10.2.0-govod-0.6.3-rkmpp-r3"
