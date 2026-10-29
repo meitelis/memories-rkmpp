@@ -2,9 +2,18 @@ package ffmpeg
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
+
+func TestProbeUsesContainerDurationWhenStreamDurationIsUnavailable(t *testing.T) {
+	for _, duration := range []string{"N/A", "0", "NaN", "+Inf", ""} {
+		info, err := ParseProbeJSON([]byte(`{"streams":[{"codec_type":"video","duration":"` + duration + `"}],"format":{"duration":"12.5"}}`))
+		require.NoError(t, err)
+		require.Equal(t, 12500*time.Millisecond, info.Duration)
+	}
+}
 
 func TestParseFrameRate(t *testing.T) {
 	require.Equal(t, 30, parseFrameRate("30/1"))
@@ -96,4 +105,15 @@ func TestParseKeyframes(t *testing.T) {
 	require.Empty(t, ParseKeyframes([]byte("")))
 	// Probe JSON is not a keyframe grid
 	require.Empty(t, ParseKeyframes([]byte(`{"streams":[]}`)))
+	require.Equal(t, []float64{2.5}, ParseKeyframes([]byte("NaN,K_\n+Inf,K_\n-1,K_\nK_,2.5\n")))
+}
+
+func TestAdditionalProbeMetadata(t *testing.T) {
+	info, err := ParseProbeJSON([]byte(`{"streams":[{"codec_type":"video","codec_name":"hevc","pix_fmt":"nv15","bits_per_raw_sample":"10","duration":"N/A","side_data_list":[{"side_data_type":"DOVI configuration record"}]}],"format":{"duration":"2.5","bit_rate":"123456"}}`))
+	require.NoError(t, err)
+	require.Equal(t, 10, info.BitDepth)
+	require.True(t, info.HDR)
+	require.Equal(t, 123456, info.BitRate)
+	require.Equal(t, 2500*time.Millisecond, info.Duration)
+	require.InDelta(t, 29.97, exactFrameRate(" 29.97 "), 0.001)
 }
