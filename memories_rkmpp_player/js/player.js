@@ -54,7 +54,7 @@
   const marker = Symbol.for('memories-rkmpp-player');
   if (window[marker]) return;
   window[marker] = true;
-  console.info('[Memories RKMPP] Player helper 0.2.2 active');
+  console.info('[Memories RKMPP] Player helper 0.2.3 active');
 
   const seen = new WeakSet();
   const players = new WeakSet();
@@ -129,6 +129,9 @@
     const events = hls?.constructor?.Events;
     if (!player || !events || typeof hls.once !== 'function' || seen.has(hls)) return;
     seen.add(hls);
+    // Vidstack's default immediate switch flushes decoded data. Preserve the
+    // buffer and apply manual quality choices to the next loaded fragment.
+    if (player.qualities) player.qualities.switch = 'load';
     active = { player, hls, quality: hls.levels[hls.currentLevel] || null };
     console.info('[Memories RKMPP] HLS output preference:', supportsHEVC() && !forceAVC.has(player) ? 'HEVC' : 'AVC');
 
