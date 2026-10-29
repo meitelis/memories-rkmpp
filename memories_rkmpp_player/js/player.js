@@ -54,7 +54,7 @@
   const marker = Symbol.for('memories-rkmpp-player');
   if (window[marker]) return;
   window[marker] = true;
-  console.info('[Memories RKMPP] Player helper 0.2.3 active');
+  console.info('[Memories RKMPP] Player helper 0.2.4 active');
 
   const seen = new WeakSet();
   const players = new WeakSet();
@@ -64,7 +64,9 @@
   const settings = {
     autoStartLoad: false,
     capLevelToPlayerSize: true,
-    maxDevicePixelRatio: 1.5,
+    // Respect the real display density; a 1.5x cap underserves phone screens.
+    ignoreDevicePixelRatio: false,
+    maxDevicePixelRatio: Number.POSITIVE_INFINITY,
     capLevelOnFPSDrop: true,
     maxBufferLength: 12,
     maxMaxBufferLength: 12,
