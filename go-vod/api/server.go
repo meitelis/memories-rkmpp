@@ -27,13 +27,17 @@ type Server struct {
 	exitCode int
 }
 
-func NewServer(cfg *config.Config) *Server {
-	os.RemoveAll(cfg.TempDir)
-	os.MkdirAll(cfg.TempDir, 0755)
+func NewServer(cfg *config.Config) (*Server, error) {
+	if err := os.RemoveAll(cfg.TempDir); err != nil {
+		return nil, fmt.Errorf("reset temporary directory: %w", err)
+	}
+	if err := os.MkdirAll(cfg.TempDir, 0755); err != nil {
+		return nil, fmt.Errorf("create temporary directory: %w", err)
+	}
 
 	s := &Server{cfg: cfg, idle: make(chan core.IdleEvent)}
 	s.reg = core.NewRegistry(cfg, s.idle)
-	return s
+	return s, nil
 }
 
 func (s *Server) routes() *http.ServeMux {
