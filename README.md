@@ -6,7 +6,7 @@ The tested platform is a Radxa ROCK 5B+ running Armbian's 6.1 vendor kernel. Oth
 
 ## Hardware and playback
 
-Supported SDR sources use MPP decoding and RGA scaling/rotation. The default output is hardware HEVC (`hevc_rkmpp`) when the client reports support, with hardware AVC (`h264_rkmpp`) as the compatibility fallback. There is no software video-encoder fallback. Unsupported source formats can require CPU decoding; HDR tone mapping, audio processing, and preview generation use CPU work. Dolby Vision rendering is not validated. Compatible originals can be served without re-encoding on the AVC path.
+Supported SDR sources use MPP decoding and RGA scaling/rotation. The default output is hardware HEVC (`hevc_rkmpp`) when the client reports support, with hardware AVC (`h264_rkmpp`) as the compatibility fallback. There is no software video-encoder fallback. Supported HDR10/PQ and HLG sources use Mali OpenCL tone mapping to SDR, between MPP decoding/RGA scaling and hardware encoding. A real-frame probe checks this pipeline per rendition; unsupported profiles or failed GPU probes retain CPU tone mapping with hardware encoding. Unsupported source formats can require CPU decoding; audio processing and preview generation also use CPU work. Dolby Vision rendering is not validated. Compatible originals can be served without re-encoding on the AVC path.
 
 The backend retains the shared rendition clock, independently decodable HLS segments, bounded bitrate, six-second startup fragment, three-second later fragments, direct cold seeks, and hardware-safe buffering from the previous custom build. Inactive encoders are released after 15 seconds. Audio timestamps are preserved; a video-only tail is valid when its audio has already ended.
 
@@ -25,19 +25,21 @@ cd memories-rkmpp
 2. Build on the ARM64 Docker host:
 
    ```sh
-   docker build -f go-vod/Dockerfile.rkmpp -t local/memories-go-vod:rkmpp-10.2.0-v0.6.3-r3 go-vod
+   docker build -f go-vod/Dockerfile.rkmpp -t local/memories-go-vod:rkmpp-10.2.0-v0.6.3-r4 go-vod
    docker compose up -d
    ```
 
 3. In Memories administration, enable external video transcoding and use `memories-rkmpp:47788`. Leave VA-API and NVENC disabled.
 
-The image needs `/dev/mpp_service`, `/dev/rga`, `/dev/dma_heap`, and `/dev/dri`. The tested vendor driver also requires `systempaths=unconfined`; the supplied configuration retains the default AppArmor profile, drops capabilities, runs as UID1000, and keeps the root filesystem read-only.
+The supplied GPU-enabled image needs `/dev/mpp_service`, `/dev/rga`, `/dev/dma_heap`, `/dev/dri`, and `/dev/mali0`. The tested vendor driver also requires `systempaths=unconfined`; the supplied configuration retains the default AppArmor profile, drops capabilities, runs as UID1000, and keeps the root filesystem read-only.
 
 Only the transcoder cache needs a writable volume. The new protocol fetches media through Nextcloud, so the transcoder needs no direct data or photo mounts. Keep your external photo folder mounted read-only in **Nextcloud**, with its existing external-storage configuration. No host ports are published.
 
 For Portainer, build the image on the host first, then use the supplied Compose definition and environment variables. Keep an existing deployment's cache volume name when updating it.
 
 Use a Nextcloud URL that is reachable from the transcoder and accepted by Nextcloud's trusted-domain configuration. The supplied `preflight.py` currently targets the LinuxServer Nextcloud layout (`/app/www/public`, web-server user `abc`); other images need an equivalent version check.
+
+`MEMORIES_RKMPP_OPENCL=false` disables GPU tone mapping for troubleshooting. The image includes one Mali OpenCL runtime from the same pinned Jellyfin media image; the host kernel driver must be compatible. GPU initialization alone is insufficient, so the backend probes a decoded, scaled, tone-mapped and encoded frame before choosing this path. SDR sources skip tone mapping. HDR output is currently converted to SDR; this is not HDR passthrough.
 
 ### Optional player helper
 
