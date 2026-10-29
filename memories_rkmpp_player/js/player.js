@@ -23,6 +23,19 @@
     return edge ? text.replace(/\b\d+p\b/g, `${edge}p`) : text;
   }
 
+  // Keep Lit/Maverick's comment anchors and child elements intact. Replacing
+  // textContent on a reactive hint would detach the player's update targets.
+  function updateQualityText(element, level) {
+    for (const node of element.childNodes) {
+      if (node.nodeType === 3) {
+        const value = qualityText(node.data, level);
+        if (value !== node.data) node.data = value;
+      } else if (node.nodeType === 1) {
+        updateQualityText(node, level);
+      }
+    }
+  }
+
   function manifestURL(value, origin, hevc) {
     const url = new URL(value, origin);
     if (url.origin !== new URL(origin).origin ||
@@ -34,7 +47,7 @@
   }
 
   if (typeof module === 'object' && module.exports) {
-    module.exports = { shortEdge, initialLevel, qualityText, manifestURL };
+    module.exports = { shortEdge, initialLevel, qualityText, updateQualityText, manifestURL };
     return;
   }
   if (!/\/apps\/memories(?:\/|$)/.test(location.pathname)) return;
@@ -83,13 +96,11 @@
         const level = levels.find((item) => `${item.height}_${item.bitrate}` === id);
         const label = radio.querySelector('[data-part="label"]');
         if (level && label) {
-          const value = `${shortEdge(level)}p`;
-          if (value !== label.textContent) label.textContent = value;
+          updateQualityText(label, level);
         }
       }
       for (const hint of menu.querySelectorAll('.vds-menu-hint')) {
-        const value = qualityText(hint.textContent, active.quality);
-        if (value !== hint.textContent) hint.textContent = value;
+        updateQualityText(hint, active.quality);
       }
     }
   }
