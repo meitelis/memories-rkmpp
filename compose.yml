@@ -1,11 +1,12 @@
 services:
   memories-rkmpp:
-    image: local/memories-go-vod:rkmpp-10.2.0-v0.6.3-r1
+    image: local/memories-go-vod:rkmpp-10.2.0-v0.6.3-r3
     pull_policy: never
     init: true
     restart: unless-stopped
     environment:
       MEMORIES_RKMPP: "1"
+      MEMORIES_RKMPP_CODEC: ${MEMORIES_RKMPP_CODEC:-hevc}
       MEMORIES_EXPECTED_APP_VERSION: "10.2.0"
       NEXTCLOUD_HOST: ${NEXTCLOUD_HOST:-http://nextcloud}
       CACHE_DIR: /cache
