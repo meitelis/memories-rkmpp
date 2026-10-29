@@ -34,6 +34,7 @@ type Config struct {
 	Version          string `json:"-"`
 	VersionMonitor   bool   `json:"-"`
 	RKMPP            bool   `json:"-"`
+	RKMPPOpenCL      bool   `json:"rkmppOpenCL"`
 	RKMPPOutputCodec string `json:"rkmppOutputCodec" validate:"omitempty,oneof=h264 hevc"`
 }
 
@@ -47,6 +48,7 @@ func Defaults(version string) *Config {
 		StreamIdleTime:   60,
 		ManagerIdleTime:  60,
 		RKMPP:            os.Getenv("MEMORIES_RKMPP") == "1",
+		RKMPPOpenCL:      true,
 		RKMPPOutputCodec: "hevc",
 	}
 	if c.RKMPP {
@@ -97,6 +99,13 @@ func (c *Config) DescribeURL() string {
 }
 
 func (c *Config) AutoDetect() error {
+	if value := os.Getenv("MEMORIES_RKMPP_OPENCL"); value != "" {
+		enabled, err := strconv.ParseBool(value)
+		if err != nil {
+			return fmt.Errorf("invalid MEMORIES_RKMPP_OPENCL: %w", err)
+		}
+		c.RKMPPOpenCL = enabled
+	}
 	if v := os.Getenv("MEMORIES_RKMPP_CODEC"); v != "" {
 		c.RKMPPOutputCodec = v
 	}
