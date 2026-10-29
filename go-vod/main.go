@@ -55,7 +55,11 @@ func main() {
 		log.Fatal("Invalid config: ", err)
 	}
 
-	code := api.NewServer(c).Start()
+	server, err := api.NewServer(c)
+	if err != nil {
+		log.Fatal("Error preparing server: ", err)
+	}
+	code := server.Start()
 
 	log.Println("Exiting go-vod with status code", code)
 	os.Exit(code)
