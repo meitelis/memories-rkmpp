@@ -1,9 +1,9 @@
 <?xml version="1.0"?>
 <info xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="https://apps.nextcloud.com/schema/apps/info.xsd">
 <id>memories_rkmpp_player</id><name>Memories RKMPP Player</name>
-<summary>Balanced automatic video quality for Memories</summary>
-<description>Starts adaptive video around 1080p and bounds browser buffering.</description>
-<version>0.1.0</version><licence>agpl</licence><author>meitelis</author>
+<summary>Hardware HEVC negotiation and balanced video playback for Memories</summary>
+<description>Negotiates HEVC with an AVC fallback, starts adaptive video around 1080p, corrects portrait quality labels, and bounds browser buffering.</description>
+<version>0.2.0</version><licence>agpl</licence><author>meitelis</author>
 <namespace>MemoriesRkmppPlayer</namespace><category>multimedia</category>
 <dependencies><nextcloud min-version="35" max-version="35"/></dependencies>
 </info>
