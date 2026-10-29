@@ -1,0 +1,45 @@
+FROM golang@sha256:b76020929b709ddb6202afc05410a0faefae20ae05e27ad548b3870092688a69 AS build
+WORKDIR /src
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN go test -race ./... && go vet ./... && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/go-vod .
+
+FROM jellyfin/jellyfin@sha256:fea863d0cd9ec445985d9c75fc6ed64e38a1d2766cf0c250a33d553f4fc1b771 AS media
+RUN set -eu; \
+    mkdir -p /rootfs/usr/lib/jellyfin-ffmpeg /rootfs/usr/local/bin /rootfs/etc /rootfs/tmp /rootfs/cache/tmp /rootfs/app; \
+    for bin in /usr/lib/jellyfin-ffmpeg/ffmpeg /usr/lib/jellyfin-ffmpeg/ffprobe; do \
+      cp -L --parents "$bin" /rootfs; \
+      LD_PRELOAD= ldd "$bin"; \
+    done | awk '/=> \// {print $3} /^[[:space:]]*\// {print $1}' | sort -u > /tmp/runtime-libraries; \
+    while IFS= read -r lib; do cp -L --parents "$lib" /rootfs; done < /tmp/runtime-libraries; \
+    ln -s /usr/lib/jellyfin-ffmpeg/ffmpeg /rootfs/usr/local/bin/ffmpeg; \
+    ln -s /usr/lib/jellyfin-ffmpeg/ffprobe /rootfs/usr/local/bin/ffprobe; \
+    cp -L --parents /etc/ssl/certs/ca-certificates.crt /rootfs; \
+    printf 'transcoder:x:1000:1000:Video transcoder:/tmp:/nonexistent\n' > /rootfs/etc/passwd; \
+    printf 'transcoder:x:1000:\n' > /rootfs/etc/group; \
+    printf 'hosts: files dns\n' > /rootfs/etc/nsswitch.conf; \
+    chmod 1777 /rootfs/tmp; \
+    chown -R 1000:1000 /rootfs/cache; \
+    for file in /usr/share/doc/jellyfin-ffmpeg*/copyright; do if [ -f "$file" ]; then cp -L --parents "$file" /rootfs; fi; done
+
+FROM scratch
+COPY --from=media /rootfs/ /
+COPY --from=build /out/go-vod /app/go-vod
+COPY LICENSE /usr/share/licenses/go-vod/LICENSE
+ENV PATH=/usr/local/bin:/app \
+    LD_LIBRARY_PATH=/usr/lib/jellyfin-ffmpeg/lib \
+    MEMORIES_RKMPP=1 \
+    MEMORIES_EXPECTED_APP_VERSION=10.2.0 \
+    CACHE_DIR=/cache \
+    TMPDIR=/cache/tmp \
+    HOME=/tmp
+USER 1000:1000
+WORKDIR /app
+EXPOSE 47788
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["/app/go-vod", "-healthcheck"]
+ENTRYPOINT ["/app/go-vod"]
+CMD ["-version-monitor"]
+
+LABEL org.opencontainers.image.version="memories-10.2.0-govod-0.6.3-rkmpp-r1"
