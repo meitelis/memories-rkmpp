@@ -35,8 +35,8 @@ type Spec struct {
 	// Quality is the rendition label ("480p", …, QualityMax). Anything but
 	// QualityMax enables the downscale filter.
 	Quality string
-	// Width is always the larger source dimension, scaled proportionally
-	// (callers swap axes for portrait sources).
+	// Width and Height are the output dimensions before explicit rotation.
+	// The manager preserves aspect ratio and aligns RKMPP sizes to even pixels.
 	Width, Height int
 	// QF is the quality factor: CRF (x264), global_quality (VA-API), CQ (NVENC).
 	QF    int
@@ -71,6 +71,8 @@ type Spec struct {
 	VAAPIDevice string
 	// VAAPIOpenCL enables GPU HDR tonemapping after a successful interop probe.
 	VAAPIOpenCL bool
+	// RKMPPOpenCL enables Mali HDR tonemapping after a successful frame probe.
+	RKMPPOpenCL bool
 	// NVENC selects h264_nvenc with CUDA offload. NVENCScale picks the scaler
 	// ("cuda" or "npp"); NVENCTemporalAQ enables temporal AQ.
 	NVENC, NVENCTemporalAQ bool
@@ -157,10 +159,10 @@ func reconnectArgs() []string {
 // fixed mapping (first video re-encoded, optional first audio normalized
 // to stereo 48kHz AAC), and
 // constant-quality rate control per encoder (crf / global_quality / cq).
-// Audio is always normalized to stereo 48kHz AAC: passthrough channel
-// counts and sample rates (notably multichannel) yield segments that
-// Chrome's MSE audio SourceBuffer rejects with bufferAppendingError.
-// Ladder bitrates appear only in playlists, never here. With Copy set, the
+// Mono/stereo AAC can be copied on the generic backends; other audio is
+// normalized to stereo 48kHz AAC for MSE compatibility. RKMPP normalizes all
+// audio to keep the adaptive ladder's audio configuration consistent.
+// RKMPP also uses the rendition bitrate for bounded rate control. With Copy set, the
 // offload, filter graph and rate control collapse to "-c:v copy".
 func BuildArgs(s Spec) []string {
 	if IsRKMPPEncoder(Encoder(s)) {
