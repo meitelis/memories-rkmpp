@@ -16,6 +16,16 @@ func TestDefaultsValid(t *testing.T) {
 	require.NoError(t, c.Validate())
 }
 
+func TestRKMPPEnvironmentResolvedAtStartup(t *testing.T) {
+	t.Setenv("MEMORIES_RKMPP", "1")
+	c := Defaults("test")
+	t.Setenv("MEMORIES_RKMPP", "0")
+	require.True(t, c.RKMPP)
+	require.Equal(t, "hevc", c.RKMPPOutputCodec)
+	require.Equal(t, 2, c.GoalBufferMax)
+	require.False(t, Defaults("test").RKMPP)
+}
+
 func TestFileURL(t *testing.T) {
 	c := Defaults("test")
 	c.NextcloudURL = "https://cloud.example.com/"
