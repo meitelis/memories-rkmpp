@@ -8,9 +8,17 @@ import (
 	"strings"
 )
 
-const EncoderRKMPP = "h264_rkmpp"
+const (
+	EncoderRKMPP     = "h264_rkmpp"
+	EncoderRKMPPHEVC = "hevc_rkmpp"
+)
+
+func IsRKMPPEncoder(encoder string) bool {
+	return encoder == EncoderRKMPP || encoder == EncoderRKMPPHEVC
+}
 
 func buildRKMPPArgs(s Spec) []string {
+	s.Rotation = NormalizeRotation(s.Rotation)
 	args := []string{"-hide_banner", "-loglevel", "warning"}
 	seek := s.HLS && s.StartAt > 0
 	if s.StartAt > 0 {
@@ -68,7 +76,17 @@ func buildRKMPPArgs(s Spec) []string {
 			filters = append(filters, "transpose="+transpose)
 		}
 	}
-	args = append(args, "-vf", strings.Join(filters, ","), "-map", "0:v:0", "-c:v", EncoderRKMPP)
+	// RGA transpose can leave an invalid SAR (1/0). Square pixels match the
+	// dimensions advertised by our rendition ladder.
+	filters = append(filters, "setsar=1")
+	args = append(args, "-vf", strings.Join(filters, ","), "-map", "0:v:0", "-c:v", Encoder(s))
+	if s.OutputCodec == "hevc" {
+		level := HEVCLevel(s.Width, s.Height, RKMPPFrameRate(s))
+		args = append(args, "-profile:v", "main", "-tier", "main", "-level:v", level.Name, "-tag:v", "hvc1")
+	}
+	if s.HDR {
+		args = append(args, "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709", "-color_range", "tv")
+	}
 	qp := s.QF
 	if qp <= 0 || qp > 51 {
 		qp = 24
@@ -90,6 +108,8 @@ func buildRKMPPArgs(s Spec) []string {
 			af = fmt.Sprintf("atrim=start=%.6f,", s.StartAt) + af
 		}
 		args = append(args, "-map", "0:a:0?", "-c:a", "aac", "-ac", "2", "-ar", "48000", "-b:a", "128k", "-af", af)
+	} else {
+		args = append(args, "-an")
 	}
 	return args
 }
