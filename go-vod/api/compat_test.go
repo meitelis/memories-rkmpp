@@ -1,11 +1,12 @@
 package api
 
 import (
-	"github.com/pulsejet/memories/go-vod/config"
-	"github.com/stretchr/testify/require"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/pulsejet/memories/go-vod/config"
+	"github.com/stretchr/testify/require"
 )
 
 func TestExpectedMemoriesVersionHealthGuard(t *testing.T) {
@@ -21,7 +22,8 @@ func TestExpectedMemoriesVersionHealthGuard(t *testing.T) {
 		c.TempDir = t.TempDir()
 		c.NextcloudURL = upstream.URL
 		c.ExpectedAppVersion = "10.2.0"
-		server := NewServer(c)
+		server, err := NewServer(c)
+		require.NoError(t, err)
 		response := httptest.NewRecorder()
 		server.handleHealth(response, httptest.NewRequest("GET", "/health", nil))
 		require.Equal(t, tc.status, response.Code)

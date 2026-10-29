@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -116,6 +117,7 @@ type Rendition struct {
 	Height  int
 	Bitrate int
 	Order   int
+	Codecs  string
 }
 
 // NewManagerArgs bundles NewManager construction args.
@@ -149,8 +151,12 @@ func NewManager(a NewManagerArgs) (*Manager, error) {
 	m.tempDir = fmt.Sprintf("%s/%s-%s-%d", m.c.TempDir, m.id, ph, a.Generation)
 
 	// Delete temp dir if exists
-	os.RemoveAll(m.tempDir)
-	os.MkdirAll(m.tempDir, 0755)
+	if err := os.RemoveAll(m.tempDir); err != nil {
+		return nil, fmt.Errorf("reset stream directory: %w", err)
+	}
+	if err := os.MkdirAll(m.tempDir, 0755); err != nil {
+		return nil, fmt.Errorf("create stream directory: %w", err)
+	}
 
 	// Temp-file inputs need full file downloaded.
 	if m.usesTemp {
@@ -189,7 +195,7 @@ func NewManager(a NewManagerArgs) (*Manager, error) {
 		refBitrate *= 2
 	}
 
-	rkmpp := os.Getenv("MEMORIES_RKMPP") == "1"
+	rkmpp := m.c.RKMPP
 	if rkmpp {
 		refBitrate = m.probe.BitRate
 		if m.probe.CodecName != CODEC_H264 {
@@ -204,6 +210,9 @@ func NewManager(a NewManagerArgs) (*Manager, error) {
 
 	if rkmpp {
 		refBitrate = min(refBitrate, balancedRKMPPBitrate(m.probe.Width, m.probe.Height, m.FrameRate()))
+		if m.OutputCodec() == "hevc" {
+			refBitrate = max(256000, refBitrate*2/3)
+		}
 	}
 
 	// Get the multiplier for the reference bitrate.
@@ -341,11 +350,11 @@ func (m *Manager) Destroy() {
 func (m *Manager) Renditions() []Rendition {
 	out := make([]Rendition, 0, len(m.streams))
 	for _, s := range m.streams {
-		if os.Getenv("MEMORIES_RKMPP") == "1" && s.quality == QUALITY_DIRECT && len(m.streams) > 1 {
+		if m.c.RKMPP && s.quality == QUALITY_DIRECT && len(m.streams) > 1 {
 			continue
 		}
 		width, height := s.width, s.height
-		rotated := m.probe != nil && (m.probe.Rotation == 90 || m.probe.Rotation == -90)
+		rotated := m.probe != nil && ffmpeg.SwapsAxes(m.probe.Rotation)
 		if s.quality == QUALITY_MAX || s.quality == QUALITY_DIRECT {
 			if rotated {
 				width, height = height, width
@@ -353,12 +362,17 @@ func (m *Manager) Renditions() []Rendition {
 		} else if m.probe != nil && ((m.probe.Width < m.probe.Height) != rotated) {
 			width, height = height, width
 		}
+		codecs := ""
+		if m.OutputCodec() == "hevc" && s.quality != QUALITY_DIRECT {
+			codecs = ffmpeg.HEVCCodecs(width, height, m.FrameRate(), m.probe.Audio.CodecName != "")
+		}
 		out = append(out, Rendition{
 			Quality: s.quality,
 			Width:   width,
 			Height:  height,
 			Bitrate: s.bitrate,
 			Order:   s.order,
+			Codecs:  codecs,
 		})
 	}
 	return out
@@ -480,7 +494,7 @@ func (m *Manager) EnsureCopySegments() ([]ffmpeg.Segment, bool) {
 }
 
 func (m *Manager) FrameRate() int {
-	if os.Getenv("MEMORIES_RKMPP") == "1" {
+	if m.c.RKMPP {
 		return ffmpeg.RKMPPFrameRate(ffmpeg.Spec{FrameRate: m.probe.FrameRate, FrameRateExact: m.probe.FrameRateExact})
 	}
 	return m.probe.FrameRate
@@ -557,15 +571,23 @@ func (m *Manager) ffprobe() error {
 			Audio:          info.Audio,
 		}
 
-		StoreCachedProbe(m.c.CacheDir(), m.fileid, m.etag, m.probe)
+		if err := StoreCachedProbe(m.c.CacheDir(), m.fileid, m.etag, m.probe); err != nil {
+			log.Printf("%s: probe cache store failed: %v", m.id, err)
+		}
 	}
 
 	// Copy eligibility is cheap (codec + rotation); keyframes come later
 	// via EnsureCopySegments on direct.m3u8, so creation stays fast.
+	if m.probe.Width <= 0 || m.probe.Height <= 0 || m.probe.Duration <= 0 {
+		return fmt.Errorf("invalid video dimensions or duration for file %d", m.fileid)
+	}
 	m.copyEligible = m.probe.Rotation == 0 && IsCodecPlayable(m.probe.CodecName, m.playableCodecs)
 
-	if os.Getenv("MEMORIES_RKMPP") == "1" {
+	if m.c.RKMPP {
 		m.copyEligible = m.copyEligible && m.probe.CodecName == CODEC_H264 && !m.probe.HDR && m.probe.BitDepth <= 8
+		if m.OutputCodec() == "hevc" {
+			m.copyEligible = false
+		}
 	}
 
 	return nil
@@ -666,7 +688,7 @@ func (m *Manager) ffmpegInput() string {
 }
 
 func (m *Manager) AdaptiveStartBuffer() bool {
-	if os.Getenv("MEMORIES_RKMPP") != "1" {
+	if !m.c.RKMPP {
 		return false
 	}
 	count := 0
@@ -676,6 +698,15 @@ func (m *Manager) AdaptiveStartBuffer() bool {
 		}
 	}
 	return count > 1
+}
+
+// OutputCodec keeps the entire adaptive ladder on one codec. Missing or
+// negative client capability reports always select the H.264 fallback.
+func (m *Manager) OutputCodec() string {
+	if m.c.RKMPP && m.c.RKMPPOutputCodec != "h264" && slices.Contains(m.playableCodecs, "hevc") {
+		return "hevc"
+	}
+	return "h264"
 }
 func balancedRKMPPBitrate(width, height, fps int) int {
 	return max(256000, int(float64(width)*float64(height)*2.4*math.Sqrt(float64(max(1, fps))/30)))

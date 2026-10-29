@@ -35,8 +35,8 @@ type VodQuery struct {
 	Liveid string `json:"liveid,omitempty"`
 }
 
-// Encode renders "?..." with only the auth fields.
-// Codecs are server-side only and never baked into URLs.
+// Encode preserves authentication and codec negotiation on every child request.
+// Losing codecs would change manager identity and the output codec mid-stream.
 func (q VodQuery) Encode() string {
 	v := url.Values{}
 	if q.Albums != "" {
@@ -44,6 +44,9 @@ func (q VodQuery) Encode() string {
 	}
 	if q.Token != "" {
 		v.Set("token", q.Token)
+	}
+	if q.Codecs != "" {
+		v.Set("codecs", q.Codecs)
 	}
 	if s := v.Encode(); s != "" {
 		return "?" + s

@@ -27,6 +27,7 @@ func MasterPlaylist(renditions []core.Rendition, frameRate int, query string) (s
 			Bandwidth:  uint32(r.Bitrate),
 			Resolution: fmt.Sprintf("%dx%d", r.Width, r.Height),
 			FrameRate:  float64(frameRate),
+			Codecs:     r.Codecs,
 		})
 	}
 	return m.Encode().String(), nil

@@ -23,7 +23,9 @@ func testServer(t *testing.T, mutate func(*config.Config)) *Server {
 	if mutate != nil {
 		mutate(cfg)
 	}
-	return NewServer(cfg)
+	server, err := NewServer(cfg)
+	require.NoError(t, err)
+	return server
 }
 
 func postVod(s *Server, body string) *httptest.ResponseRecorder {
@@ -217,8 +219,7 @@ func TestVodCodecsQueryParam(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code)
 	require.Contains(t, w.Body.String(), "direct.m3u8")
 	require.NotContains(t, w.Body.String(), "max.m3u8")
-	require.Contains(t, w.Body.String(), "direct.m3u8?token=abc")
-	require.NotContains(t, w.Body.String(), "codecs=")
+	require.Contains(t, w.Body.String(), "direct.m3u8?codecs=h264%2Chevc&token=abc")
 }
 
 func TestVodLivephotoFullVideo(t *testing.T) {
@@ -250,8 +251,8 @@ func TestVodLivephotoFullVideo(t *testing.T) {
 
 func TestVodQueryEncode(t *testing.T) {
 	require.Equal(t, "", VodQuery{}.Encode())
-	require.Equal(t, "?token=abc", VodQuery{Token: "abc", Codecs: "h264,hevc"}.Encode())
-	require.Equal(t, "?albums=xyz&token=abc", VodQuery{Albums: "xyz", Token: "abc", Codecs: "h264"}.Encode())
+	require.Equal(t, "?codecs=h264%2Chevc&token=abc", VodQuery{Token: "abc", Codecs: "h264,hevc"}.Encode())
+	require.Equal(t, "?albums=xyz&codecs=h264&token=abc", VodQuery{Albums: "xyz", Token: "abc", Codecs: "h264"}.Encode())
 }
 
 func TestNullQueryValues(t *testing.T) {

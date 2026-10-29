@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"os"
 	"sync"
 	"sync/atomic"
 
@@ -49,7 +48,7 @@ func NewRegistry(cfg *config.Config, idle chan IdleEvent) *Registry {
 }
 
 func (r *Registry) GetOrCreate(p ManagerParams) (*Manager, error) {
-	if os.Getenv("MEMORIES_RKMPP") == "1" {
+	if r.cfg.RKMPP {
 		identity, _ := json.Marshal(struct {
 			URL    string
 			FileID int64

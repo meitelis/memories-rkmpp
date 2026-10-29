@@ -1,0 +1,110 @@
+{
+  "date": "2026-10-29",
+  "platform": "ROCK 5B+ / RK3588 / Armbian vendor 6.1",
+  "versions": {
+    "nextcloud": "35.0.2",
+    "memories": "10.2.0",
+    "goVOD": "0.6.3",
+    "player": "0.2.3"
+  },
+  "image": {
+    "tag": "local/memories-go-vod:rkmpp-10.2.0-v0.6.3-r3",
+    "id": "sha256:77ed3855598fbd97b87aff30dbe94bccbc85ab3202fb6a244bc207e7aecd42a8",
+    "bytes": 109171649
+  },
+  "checks": {
+    "go": [
+      "gofmt",
+      "go test -race ./...",
+      "go vet ./...",
+      "ARM64 image build"
+    ],
+    "playerTests": 4,
+    "library": {
+      "videos": 63,
+      "passed": 63,
+      "segments": 180,
+      "positions": [
+        "startup",
+        "cold middle",
+        "cold end"
+      ],
+      "allSDR": true
+    },
+    "codecLadders": {
+      "scenarios": 8,
+      "segments": 72,
+      "outputs": [
+        "AVC",
+        "HEVC"
+      ]
+    },
+    "orientation": {
+      "cases": 10,
+      "rotations": [
+        0,
+        90,
+        -90,
+        180,
+        270
+      ],
+      "outputs": [
+        "AVC",
+        "HEVC"
+      ],
+      "maxColorError": 0
+    },
+    "serverTransitions": {
+      "videoBoundaryMaxAbsMs": 21.333,
+      "audioBoundaryMs": [
+        -58.666,
+        24
+      ],
+      "pauseSeconds": 25,
+      "coldResumeSeconds": 1.443
+    },
+    "browser": {
+      "portraitLabels": [
+        "1080p",
+        "720p",
+        "480p"
+      ],
+      "observedDimensions": [
+        [
+          1080,
+          1920
+        ],
+        [
+          720,
+          1280
+        ],
+        [
+          1080,
+          1920
+        ]
+      ],
+      "returnedToAuto": true,
+      "reachedEnd": true,
+      "fatalErrors": 0,
+      "nonfatalEvents": [
+        "bufferSeekOverHole",
+        "bufferStalledError"
+      ],
+      "notes": "Playback recovered and reached the end; observations do not establish zero brief rebuffering."
+    },
+    "production": {
+      "health": "healthy",
+      "observedEncoder": "hevc_rkmpp",
+      "observedScaler": "scale_rkrga",
+      "encoderErrorsDuringBrowserCheck": 0,
+      "photoMount": "read-only"
+    }
+  },
+  "limits": [
+    "One browser/device observed; all browser/network combinations are not validated.",
+    "No real HDR or Dolby Vision rendering validation.",
+    "Source formats unsupported by MPP can use CPU decoding; HDR tone mapping, audio and previews use CPU work.",
+    "No software video encoder fallback.",
+    "A damaged source was diagnosed separately; originals were not modified."
+  ]
+}

@@ -6,11 +6,11 @@ The tested platform is a Radxa ROCK 5B+ running Armbian's 6.1 vendor kernel. Oth
 
 ## Hardware and playback
 
-Supported SDR sources use MPP decoding, RGA scaling/rotation, and `h264_rkmpp` encoding. There is no software video-encoder fallback. Unsupported source formats can require CPU decoding; HDR tone mapping, audio processing, and preview generation use CPU work. Compatible originals can be served without re-encoding.
+Supported SDR sources use MPP decoding and RGA scaling/rotation. The default output is hardware HEVC (`hevc_rkmpp`) when the client reports support, with hardware AVC (`h264_rkmpp`) as the compatibility fallback. There is no software video-encoder fallback. Unsupported source formats can require CPU decoding; HDR tone mapping, audio processing, and preview generation use CPU work. Dolby Vision rendering is not validated. Compatible originals can be served without re-encoding on the AVC path.
 
 The backend retains the shared rendition clock, independently decodable HLS segments, bounded bitrate, six-second startup fragment, three-second later fragments, direct cold seeks, and hardware-safe buffering from the previous custom build. Inactive encoders are released after 15 seconds. Audio timestamps are preserved; a video-only tail is valid when its audio has already ended.
 
-An optional `memories_rkmpp_player` companion app starts Auto at the highest available resolution up to 1080p and leaves adaptive quality enabled. It does not modify or rebuild signed Memories assets.
+The `memories_rkmpp_player` companion app checks HEVC MediaSource support before requesting the master playlist, starts Auto at the highest available short edge up to 1080p, and leaves adaptive quality enabled. It corrects portrait quality labels using the shorter displayed edge, without altering HLS dimensions or quality selection. Manual quality changes preserve buffered video and apply to newly loaded fragments, so the displayed resolution may change after the existing buffer plays. It retries once with AVC if a fatal codec error contradicts the browser's support report. It does not modify or rebuild signed Memories assets. Without the helper, negotiation uses Memories' file-playback capability report, which can differ from MSE support.
 
 ## Build and connect
 
@@ -25,7 +25,7 @@ cd memories-rkmpp
 2. Build on the ARM64 Docker host:
 
    ```sh
-   docker build -f go-vod/Dockerfile.rkmpp -t local/memories-go-vod:rkmpp-10.2.0-v0.6.3-r1 go-vod
+   docker build -f go-vod/Dockerfile.rkmpp -t local/memories-go-vod:rkmpp-10.2.0-v0.6.3-r3 go-vod
    docker compose up -d
    ```
 
@@ -42,6 +42,8 @@ Use a Nextcloud URL that is reachable from the transcoder and accepted by Nextcl
 ### Optional player helper
 
 Copy `memories_rkmpp_player/` into your persistent Nextcloud apps directory, then enable it with `occ app:enable memories_rkmpp_player` as Nextcloud's web-server user. Reload Memories afterward. The helper currently declares support for Nextcloud 35, which is the tested version. Its AGPL license is separate from the backend's Apache license.
+
+The helper is recommended for HEVC negotiation and portrait labels. `MEMORIES_RKMPP_CODEC=h264` forces the compatibility output for troubleshooting. The default `hevc` still requires client support; it does not force unsupported clients to decode HEVC. Child playlists preserve the negotiated codec list so the output format stays consistent across qualities and seeks.
 
 ## Future updates
 

@@ -31,21 +31,25 @@ type Config struct {
 	StreamIdleTime  int `json:"streamIdleTime" validate:"gte=0"`
 	ManagerIdleTime int `json:"managerIdleTime" validate:"gte=0"`
 
-	Version        string `json:"-"`
-	VersionMonitor bool   `json:"-"`
+	Version          string `json:"-"`
+	VersionMonitor   bool   `json:"-"`
+	RKMPP            bool   `json:"-"`
+	RKMPPOutputCodec string `json:"rkmppOutputCodec" validate:"omitempty,oneof=h264 hevc"`
 }
 
 func Defaults(version string) *Config {
 	c := &Config{
-		Version:         version,
-		Bind:            ":47788",
-		LookBehind:      3,
-		GoalBufferMin:   1,
-		GoalBufferMax:   4,
-		StreamIdleTime:  60,
-		ManagerIdleTime: 60,
+		Version:          version,
+		Bind:             ":47788",
+		LookBehind:       3,
+		GoalBufferMin:    1,
+		GoalBufferMax:    4,
+		StreamIdleTime:   60,
+		ManagerIdleTime:  60,
+		RKMPP:            os.Getenv("MEMORIES_RKMPP") == "1",
+		RKMPPOutputCodec: "hevc",
 	}
-	if os.Getenv("MEMORIES_RKMPP") == "1" {
+	if c.RKMPP {
 		c.GoalBufferMax = 2
 		c.StreamIdleTime = 15
 	}
@@ -93,6 +97,9 @@ func (c *Config) DescribeURL() string {
 }
 
 func (c *Config) AutoDetect() error {
+	if v := os.Getenv("MEMORIES_RKMPP_CODEC"); v != "" {
+		c.RKMPPOutputCodec = v
+	}
 	if v := os.Getenv("MEMORIES_EXPECTED_APP_VERSION"); v != "" {
 		c.ExpectedAppVersion = v
 	}
