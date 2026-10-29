@@ -327,7 +327,8 @@ func (s *Stream) spec(startAt float64, isHls bool) ffmpeg.Spec {
 		StartAt: startAt,
 		HLS:     isHls,
 
-		RKMPP:          os.Getenv("MEMORIES_RKMPP") == "1",
+		RKMPP:          s.c.RKMPP,
+		OutputCodec:    s.m.OutputCodec(),
 		Bitrate:        s.bitrate,
 		CodecName:      s.m.probe.CodecName,
 		FrameRateExact: s.m.probe.FrameRateExact,
@@ -374,14 +375,14 @@ func (s *Stream) transcode(startId int) error {
 		// Start one frame before.
 		// This ensures that the keyframes are aligned.
 		startNumber = startId - 1
-		if os.Getenv("MEMORIES_RKMPP") == "1" {
+		if s.c.RKMPP {
 			startNumber = startId
 		}
 		startAt = float64(startNumber * s.m.tc.ChunkSize)
 	}
 
 	spec := s.transcodeSpec(startAt, true)
-	s.backpressure = ffmpeg.Encoder(spec) == ffmpeg.EncoderRKMPP
+	s.backpressure = ffmpeg.IsRKMPPEncoder(ffmpeg.Encoder(spec))
 	args := ffmpeg.SegmentArgs(spec, startNumber, s.getTsPath(-1))
 
 	// Start the process
