@@ -37,70 +37,70 @@ test('label updates preserve reactive comment anchors and child nodes', () => {
 test('the playlist loader handles both provider load orders and browser module shims', () => {
   for (const supported of [true, false]) {
     for (const late of [true, false]) {
-    const listeners = new Map();
-    const events = new Map();
-    // Markup contract observed in Vidstack's default quality menu.
-    const labelText = { nodeType: 3, data: '1920p' };
-    const hintText = { nodeType: 3, data: 'Auto (1920p)' };
-    const menu = {
-      querySelectorAll(selector) {
-        if (selector === 'media-radio') return [{
-          getAttribute: () => '1920_1000000',
-          querySelector: () => ({ childNodes: [labelText] }),
-        }];
-        if (selector === '[data-part="hint"]') return [{ childNodes: [hintText] }];
-        return [];
-      },
-    };
-    const player = { isConnected: true, currentTime: 0, paused: false, qualities: { switch: 'current' }, addEventListener() {} };
-    class Loader {
-      load(context) { this.url = context.url; }
-    }
-    class Hls {
-      static DefaultConfig = { loader: Loader };
-      static Events = Object.fromEntries(['MANIFEST_PARSED', 'LEVEL_SWITCHING', 'LEVEL_SWITCHED', 'DESTROYING', 'ERROR'].map((name) => [name, name]));
-      config = {};
-      levels = [{ width: 1080, height: 1920, bitrate: 1000000 }];
-      url = 'https://cloud.example/apps/memories/api/video/transcode/abc/123/index.m3u8';
-      once(name, fn) { events.set(name, fn); }
-      on(name, fn) { events.set(name, fn); }
-      startLoad() { this.started = true; }
-      stopLoad() { this.stopped = true; }
-      loadSource(url) { this.url = url; }
-    }
-    const hls = new Hls();
-    if (late) player.provider = { type: 'hls', onInstance: (callback) => callback(hls) };
-    const context = {
-      URL, WeakSet, Symbol, console, queueMicrotask: (fn) => fn(),
-      // Some browser hosts expose a CommonJS shim. It must not disable setup.
-      module: { exports: {} },
-      window: { MediaSource: { isTypeSupported: () => supported } },
-      location: { pathname: '/apps/memories/', href: 'https://cloud.example/apps/memories/' },
-      document: {
-        documentElement: {},
-        querySelectorAll: (selector) => selector === 'media-player' && late ? [player] : selector === '.vds-quality-menu' ? [menu] : [],
-        addEventListener: (name, fn) => listeners.set(name, fn),
-      },
-      MutationObserver: class { observe() {} },
-    };
-    vm.runInNewContext(fs.readFileSync(require.resolve('./player.js'), 'utf8'), context);
-    if (!late) listeners.get('hls-instance')({ detail: hls, target: { closest: () => player } });
-    const loader = new hls.config.pLoader();
-    assert.equal(player.qualities.switch, 'load');
-    loader.load({ url: hls.url }, {}, {});
-    assert.equal(new URL(loader.url).searchParams.get('codecs'), supported ? 'h264,hevc' : 'h264');
-    events.get('MANIFEST_PARSED')();
-    assert.equal(hls.started, true);
-    assert.equal(hls.startLevel, 0);
-    events.get('LEVEL_SWITCHED')(null, { level: 0 });
-    assert.equal(labelText.data, '1080p');
-    assert.equal(hintText.data, 'Auto (1080p)');
-    player.currentTime = 12;
-    events.get('ERROR')(null, { fatal: true, details: 'bufferAddCodecError' });
-    assert.equal(new URL(player.src.src).searchParams.get('codecs'), 'h264');
-    player.src = null;
-    events.get('ERROR')(null, { fatal: true, details: 'bufferAddCodecError' });
-    assert.equal(player.src, null);
+      const listeners = new Map();
+      const events = new Map();
+      // Markup contract observed in Vidstack's default quality menu.
+      const labelText = { nodeType: 3, data: '1920p' };
+      const hintText = { nodeType: 3, data: 'Auto (1920p)' };
+      const menu = {
+        querySelectorAll(selector) {
+          if (selector === 'media-radio') return [{
+            getAttribute: () => '1920_1000000',
+            querySelector: () => ({ childNodes: [labelText] }),
+          }];
+          if (selector === '[data-part="hint"]') return [{ childNodes: [hintText] }];
+          return [];
+        },
+      };
+      const player = { isConnected: true, currentTime: 0, paused: false, qualities: { switch: 'current' }, addEventListener() {} };
+      class Loader {
+        load(context) { this.url = context.url; }
+      }
+      class Hls {
+        static DefaultConfig = { loader: Loader };
+        static Events = Object.fromEntries(['MANIFEST_PARSED', 'LEVEL_SWITCHING', 'LEVEL_SWITCHED', 'DESTROYING', 'ERROR'].map((name) => [name, name]));
+        config = {};
+        levels = [{ width: 1080, height: 1920, bitrate: 1000000 }];
+        url = 'https://cloud.example/apps/memories/api/video/transcode/abc/123/index.m3u8';
+        once(name, fn) { events.set(name, fn); }
+        on(name, fn) { events.set(name, fn); }
+        startLoad() { this.started = true; }
+        stopLoad() { this.stopped = true; }
+        loadSource(url) { this.url = url; }
+      }
+      const hls = new Hls();
+      if (late) player.provider = { type: 'hls', onInstance: (callback) => callback(hls) };
+      const context = {
+        URL, WeakSet, Symbol, console, queueMicrotask: (fn) => fn(),
+        // Some browser hosts expose a CommonJS shim. It must not disable setup.
+        module: { exports: {} },
+        window: { MediaSource: { isTypeSupported: () => supported } },
+        location: { pathname: '/apps/memories/', href: 'https://cloud.example/apps/memories/' },
+        document: {
+          documentElement: {},
+          querySelectorAll: (selector) => selector === 'media-player' && late ? [player] : selector === '.vds-quality-menu' ? [menu] : [],
+          addEventListener: (name, fn) => listeners.set(name, fn),
+        },
+        MutationObserver: class { observe() {} },
+      };
+      vm.runInNewContext(fs.readFileSync(require.resolve('./player.js'), 'utf8'), context);
+      if (!late) listeners.get('hls-instance')({ detail: hls, target: { closest: () => player } });
+      const loader = new hls.config.pLoader();
+      assert.equal(player.qualities.switch, 'load');
+      loader.load({ url: hls.url }, {}, {});
+      assert.equal(new URL(loader.url).searchParams.get('codecs'), supported ? 'h264,hevc' : 'h264');
+      events.get('MANIFEST_PARSED')();
+      assert.equal(hls.started, true);
+      assert.equal(hls.startLevel, 0);
+      events.get('LEVEL_SWITCHED')(null, { level: 0 });
+      assert.equal(labelText.data, '1080p');
+      assert.equal(hintText.data, 'Auto (1080p)');
+      player.currentTime = 12;
+      events.get('ERROR')(null, { fatal: true, details: 'bufferAddCodecError' });
+      assert.equal(new URL(player.src.src).searchParams.get('codecs'), 'h264');
+      player.src = null;
+      events.get('ERROR')(null, { fatal: true, details: 'bufferAddCodecError' });
+      assert.equal(player.src, null);
     }
   }
 });
