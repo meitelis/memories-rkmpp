@@ -9,6 +9,17 @@ import (
 
 func (s *Stream) transcodeSpec(startAt float64, isHLS bool) ffmpeg.Spec {
 	spec := s.spec(startAt, isHLS)
+	if ffmpeg.IsRKMPPEncoder(ffmpeg.Encoder(spec)) && spec.HDR && s.c.RKMPPOpenCL {
+		s.tonemapOnce.Do(func() {
+			if err := ffmpeg.ProbeRKMPPOpenCL(context.Background(), spec); err != nil {
+				log.Printf("%s-%s: Mali HDR probe failed; using CPU tone mapping: %v", s.m.id, s.quality, err)
+				return
+			}
+			s.rkmppOpenCL = true
+			log.Printf("%s-%s: HDR tone mapping uses Mali OpenCL", s.m.id, s.quality)
+		})
+		spec.RKMPPOpenCL = s.rkmppOpenCL
+	}
 
 	// The OpenCL graph uses an OpenCL filter device, whereas software
 	// transpose uploads through the VA-API filter device. Keep that workaround.
