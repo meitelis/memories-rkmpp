@@ -1,0 +1,44 @@
+services:
+  memories-rkmpp:
+    image: local/memories-go-vod:rkmpp-10.2.0-v0.6.3-r1
+    pull_policy: never
+    init: true
+    restart: unless-stopped
+    environment:
+      MEMORIES_RKMPP: "1"
+      MEMORIES_EXPECTED_APP_VERSION: "10.2.0"
+      NEXTCLOUD_HOST: ${NEXTCLOUD_HOST:-http://nextcloud}
+      CACHE_DIR: /cache
+    user: "1000:1000"
+    group_add:
+      - ${VIDEO_GID:-44}
+      - ${RENDER_GID:-993}
+    security_opt:
+      - systempaths=unconfined
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    devices:
+      - /dev/mpp_service:/dev/mpp_service
+      - /dev/rga:/dev/rga
+      - /dev/dma_heap:/dev/dma_heap
+      - /dev/dri:/dev/dri
+    volumes:
+      - cache:/cache
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=64m,mode=1777
+    pids_limit: 512
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    networks:
+      - nextcloud
+networks:
+  nextcloud:
+    external: true
+    name: ${NEXTCLOUD_NETWORK:-nextcloud_stack_nextcloud_network}
+volumes:
+  cache:

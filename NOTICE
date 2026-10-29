@@ -1,0 +1,13 @@
+This project contains modifications to the Memories go-vod transcoder.
+Upstream: https://github.com/pulsejet/memories
+Baseline: v10.2.0 / d59c33d94d4e9627565e2023eb3c5c798788ebe2; go-vod protocol 0.6.3
+The upstream go-vod Apache License 2.0 is retained in LICENSE.
+
+Hardware support comes from Rockchip MPP/RGA and the FFmpeg work shipped in
+Jellyfin FFmpeg, including work from nyanmisaka/ffmpeg-rockchip.
+https://github.com/jellyfin/jellyfin-ffmpeg
+https://github.com/nyanmisaka/ffmpeg-rockchip
+FFmpeg and bundled libraries retain their respective licenses. The runtime
+retains the Jellyfin FFmpeg copyright file from its pinned base image.
+
+The optional memories_rkmpp_player companion app is licensed under AGPL-3.0-or-later. Its license is included in memories_rkmpp_player/LICENSE.

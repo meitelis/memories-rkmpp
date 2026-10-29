@@ -1,0 +1,10 @@
+.env
+!.env.example
+__pycache__/
+*.pyc
+*.log
+cache/
+tmp/
+go-vod/go-vod
+*.key
+*.pem
