@@ -14,6 +14,13 @@ An optional `memories_rkmpp_player` companion app starts Auto at the highest ava
 
 ## Build and connect
 
+Start with a local checkout:
+
+```sh
+git clone https://github.com/meitelis/memories-rkmpp.git
+cd memories-rkmpp
+```
+
 1. Copy `.env.example` to `.env`. Set the internal Nextcloud URL and existing Docker network. Set the device group IDs to match your host.
 2. Build on the ARM64 Docker host:
 
@@ -29,6 +36,12 @@ The image needs `/dev/mpp_service`, `/dev/rga`, `/dev/dma_heap`, and `/dev/dri`.
 Only the transcoder cache needs a writable volume. The new protocol fetches media through Nextcloud, so the transcoder needs no direct data or photo mounts. Keep your external photo folder mounted read-only in **Nextcloud**, with its existing external-storage configuration. No host ports are published.
 
 For Portainer, build the image on the host first, then use the supplied Compose definition and environment variables. Keep an existing deployment's cache volume name when updating it.
+
+Use a Nextcloud URL that is reachable from the transcoder and accepted by Nextcloud's trusted-domain configuration. The supplied `preflight.py` currently targets the LinuxServer Nextcloud layout (`/app/www/public`, web-server user `abc`); other images need an equivalent version check.
+
+### Optional player helper
+
+Copy `memories_rkmpp_player/` into your persistent Nextcloud apps directory, then enable it with `occ app:enable memories_rkmpp_player` as Nextcloud's web-server user. Reload Memories afterward. The helper currently declares support for Nextcloud 35, which is the tested version. Its AGPL license is separate from the backend's Apache license.
 
 ## Future updates
 
