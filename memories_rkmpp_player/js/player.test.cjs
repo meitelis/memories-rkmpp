@@ -392,3 +392,22 @@ test('connection recommendations and late settings apply without restarting the 
   h.hlsEvents.get('FRAG_LOADED')();
   assert.equal(h.hls.config.maxBufferLength, 18);
 });
+
+const { initialLevelForThroughput } = require('./player.js');
+
+test('initial rendition uses actual advertised bitrate, not fixed resolution', () => {
+  const levels = [
+    { width: 1920, height: 1080, bitrate: 9000000 },
+    { width: 1280, height: 720, bitrate: 3000000 },
+    { width: 2560, height: 1440, bitrate: 14000000 },
+    { width: 854, height: 480, bitrate: 1200000 },
+  ];
+  assert.equal(initialLevelForThroughput(levels, 20000000), 2);
+  assert.equal(initialLevelForThroughput(levels, 15000000), 0);
+  assert.equal(initialLevelForThroughput(levels, 6000000), 1);
+  assert.equal(initialLevelForThroughput(levels, 1000000), 3);
+  assert.equal(initialLevelForThroughput(levels, 0), initialLevel(levels));
+  assert.equal(initialLevelForThroughput([], 10000000), 0);
+  assert.equal(initialLevelForThroughput([{ height: 720, bitrate: 3000000, maxBitrate: 7000000 },
+    { height: 1080, bitrate: 5000000, maxBitrate: 9000000 }], 11000000), 0);
+});
