@@ -26,6 +26,38 @@ func copyRKMPPAudio(audio AudioInfo) bool {
 		audio.BitRate > 0 && audio.BitRate <= 256000
 }
 
+func NormalizeRKMPPAudio(audio AudioInfo) bool {
+	return audio.CodecName != "" && !copyRKMPPAudio(audio)
+}
+
+// One audio encoder is shared by the HLS video qualities. It never opens a
+// hardware video decoder or encoder, and uses the same source timestamp clock.
+func buildRKMPPAudioArgs(s Spec) []string {
+	args := []string{"-hide_banner", "-loglevel", "warning"}
+	if s.StartAt > 0 {
+		args = append(args, "-ss", fmt.Sprintf("%.6f", s.StartAt))
+	}
+	if s.Headers != "" {
+		args = append(args, "-multiple_requests", "1", "-seekable", "1")
+		args = append(args, reconnectArgs()...)
+		args = append(args, "-headers", s.Headers)
+	}
+	filter := fmt.Sprintf("aresample=async=1:first_pts=%d", int64(math.Round(s.StartAt*48000)))
+	if remaining := s.EndAt - s.StartAt; remaining > 0 {
+		// A shorter audio source must not make HLS wait for nonexistent tail
+		// fragments. Silence is cheap to encode and keeps the video playable.
+		filter += fmt.Sprintf(",apad=whole_dur=%.6f", remaining)
+	}
+	filter += fmt.Sprintf(",asetpts=N/SR/TB+%.6f/TB", s.StartAt)
+	args = append(args, "-i", s.Input, "-copyts", "-fflags", "+genpts", "-vn", "-map", "0:a:0",
+		"-c:a", "aac", "-ac", "2", "-ar", "48000", "-b:a", "128k", "-af", filter)
+	if s.EndAt > s.StartAt {
+		// copyts preserves absolute source timestamps, including on cold seeks.
+		args = append(args, "-to", fmt.Sprintf("%.6f", s.EndAt))
+	}
+	return args
+}
+
 func rkmppAudioBitrate(audio AudioInfo) int {
 	if audio.CodecName == "" {
 		return 0
@@ -145,7 +177,7 @@ func buildRKMPPArgs(s Spec) []string {
 		args = append(args, "-rc_mode", "CQP", "-qp_init", strconv.Itoa(qp))
 	}
 	args = append(args, "-fps_mode", "passthrough")
-	if s.Audio.CodecName != "" {
+	if s.Audio.CodecName != "" && !s.SeparateAudio {
 		args = append(args, "-map", "0:a:0?")
 		if copyAudio {
 			args = append(args, "-c:a", "copy")

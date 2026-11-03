@@ -228,6 +228,9 @@
       notifySaved();
     });
     content.append(form); dialog.append(content); document.body.append(dialog);
+    // Keep viewer shortcuts from seeking or closing the video behind the form.
+    dialog.addEventListener('keydown', (event) => event.stopPropagation());
+    dialog.addEventListener('keyup', (event) => event.stopPropagation());
     let backdropPointer = null;
     function isBackdrop(event) {
       if (!dialog.open || event.target !== dialog) return false;
@@ -315,8 +318,10 @@
   function changesViewer(record) {
     if (record.type === 'attributes') return record.target.matches?.('.memories-viewer');
     const target = record.target.nodeType === 1 ? record.target : record.target.parentElement;
-    return target?.closest?.('.memories-viewer') || [...record.addedNodes, ...record.removedNodes].some((node) =>
-      node.nodeType === 1 && (node.matches('.memories-viewer') || node.querySelector('.memories-viewer')));
+    // Ignore clocks, captions and other player updates; only toolbar/viewer
+    // creation, replacement or removal can affect our own button.
+    return target?.matches?.('.memories-viewer > .inner > .top-bar') || [...record.addedNodes, ...record.removedNodes].some((node) =>
+      node.nodeType === 1 && (node.matches('.memories-viewer, .top-bar') || node.querySelector('.memories-viewer, .top-bar')));
   }
 
   function mount() {

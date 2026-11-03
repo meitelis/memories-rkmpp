@@ -360,11 +360,14 @@ func (s *Stream) spec(startAt float64, isHls bool) ffmpeg.Spec {
 		width, height = height, width
 	}
 	return ffmpeg.Spec{
-		Bin:     s.c.FFmpeg,
-		Input:   s.m.ffmpegInput(),
-		Headers: s.m.inputHeaders(),
-		StartAt: startAt,
-		HLS:     isHls,
+		AudioOnly:     s.quality == QUALITY_AUDIO,
+		SeparateAudio: isHls && s.quality != QUALITY_AUDIO && s.m.HasStream(QUALITY_AUDIO),
+		EndAt:         s.m.Duration().Seconds(),
+		Bin:           s.c.FFmpeg,
+		Input:         s.m.ffmpegInput(),
+		Headers:       s.m.inputHeaders(),
+		StartAt:       startAt,
+		HLS:           isHls,
 
 		RKMPP:          s.c.RKMPP,
 		OutputCodec:    s.m.OutputCodec(),

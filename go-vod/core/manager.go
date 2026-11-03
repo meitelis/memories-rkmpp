@@ -24,6 +24,7 @@ import (
 const (
 	QUALITY_MAX    = "max"
 	QUALITY_DIRECT = "direct"
+	QUALITY_AUDIO  = "audio"
 )
 
 // ErrCopyPending means the keyframe probe is still running; answer 409
@@ -113,12 +114,13 @@ type ProbeVideoData struct {
 }
 
 type Rendition struct {
-	Quality string
-	Width   int
-	Height  int
-	Bitrate int
-	Order   int
-	Codecs  string
+	Quality       string
+	Width         int
+	Height        int
+	Bitrate       int
+	Order         int
+	Codecs        string
+	SeparateAudio bool
 }
 
 // NewManagerArgs bundles NewManager construction args.
@@ -298,6 +300,10 @@ func NewManager(a NewManagerArgs) (*Manager, error) {
 		m.streams[QUALITY_MAX] = &Stream{c: m.c, m: m, quality: QUALITY_MAX, height: maxHeight, width: maxWidth, bitrate: refBitrate, order: 1}
 	}
 
+	if rkmpp && ffmpeg.NormalizeRKMPPAudio(m.probe.Audio) {
+		m.streams[QUALITY_AUDIO] = &Stream{c: m.c, m: m, quality: QUALITY_AUDIO, bitrate: 128000}
+	}
+
 	// Start all streams
 	for _, stream := range m.streams {
 		stream.init()
@@ -362,7 +368,14 @@ func (m *Manager) Destroy() {
 func (m *Manager) Renditions() []Rendition {
 	out := make([]Rendition, 0, len(m.streams))
 	for _, s := range m.streams {
-		if m.c.RKMPP && s.quality == QUALITY_DIRECT && len(m.streams) > 1 {
+		if s.quality == QUALITY_AUDIO {
+			continue
+		}
+		videoCount := len(m.streams)
+		if m.HasStream(QUALITY_AUDIO) {
+			videoCount--
+		}
+		if m.c.RKMPP && s.quality == QUALITY_DIRECT && videoCount > 1 {
 			continue
 		}
 		width, height := s.width, s.height
@@ -379,12 +392,13 @@ func (m *Manager) Renditions() []Rendition {
 			codecs = ffmpeg.HEVCCodecs(width, height, m.FrameRate(), m.probe.Audio.CodecName != "")
 		}
 		out = append(out, Rendition{
-			Quality: s.quality,
-			Width:   width,
-			Height:  height,
-			Bitrate: s.bitrate,
-			Order:   s.order,
-			Codecs:  codecs,
+			Quality:       s.quality,
+			Width:         width,
+			Height:        height,
+			Bitrate:       s.bitrate,
+			Order:         s.order,
+			Codecs:        codecs,
+			SeparateAudio: m.HasStream(QUALITY_AUDIO),
 		})
 	}
 	return out
@@ -675,7 +689,7 @@ func (m *Manager) AdaptiveStartBuffer() bool {
 	}
 	count := 0
 	for quality := range m.streams {
-		if quality != QUALITY_DIRECT {
+		if quality != QUALITY_DIRECT && quality != QUALITY_AUDIO {
 			count++
 		}
 	}

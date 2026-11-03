@@ -12,6 +12,8 @@
   box-shadow: 0 16px 64px #0004;
   font: inherit;
 }
+/* Nextcloud's dialog reset can otherwise keep a closed native dialog visible. */
+.memories-playback-dialog:not([open]) { display: none !important; }
 .memories-playback-dialog::backdrop { background: #0007; }
 .memories-playback-content { padding: 24px; }
 .memories-playback-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
@@ -64,6 +66,9 @@
   color: var(--color-main-text, #222); font: inherit; font-weight: 500; cursor: pointer;
 }
 .memories-playback-nav-button:hover { background: var(--color-background-hover, #eee); }
+.memories-viewer.fully-opened.is-video > .inner > .top-bar {
+  display: flex; align-items: center;
+}
 .memories-viewer.is-video > .inner > .top-bar > .memories-playback-viewer-button {
   display: inline-flex; align-items: center; justify-content: center; align-self: center;
   box-sizing: border-box; flex: 0 0 44px; width: 44px; height: 44px; min-width: 44px; min-height: 44px;

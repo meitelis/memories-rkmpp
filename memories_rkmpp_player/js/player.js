@@ -81,13 +81,14 @@
   const marker = Symbol.for('memories-rkmpp-player');
   if (window[marker]) return;
   window[marker] = true;
-  console.info('[Memories RKMPP] Player helper 0.3.1 active');
+  console.info('[Memories RKMPP] Player helper 0.3.3 active');
 
   const seen = new WeakSet();
   const players = new WeakSet();
   const providers = new WeakSet();
   const forceAVC = new WeakSet();
   const pendingRestore = new WeakMap();
+  const pausedAutoplay = new WeakMap();
   const settingsMarker = Symbol.for('memories-rkmpp-settings');
   let preferences = playbackPreferences();
   let settingsService = null;
@@ -131,15 +132,39 @@
     }
   }
 
+  function restoreAutoplay(player) {
+    const saved = pausedAutoplay.get(player);
+    if (!saved) return;
+    pausedAutoplay.delete(player);
+    for (const [name, value] of Object.entries(saved.properties)) player[name] = value;
+  }
+
+  function holdPausedAutoplay(player, url) {
+    let saved = pausedAutoplay.get(player);
+    if (!saved) {
+      saved = { url, properties: {} };
+      // Vidstack 1.15.6 combines these public props with OR for compatibility.
+      for (const name of ['autoPlay', 'autoplay']) {
+        if (name in player) saved.properties[name] = player[name];
+      }
+      pausedAutoplay.set(player, saved);
+    }
+    saved.url = url;
+    for (const name of Object.keys(saved.properties)) player[name] = false;
+  }
+
   function reloadOutput(player, hls, hevc, force = false) {
     const previous = pendingRestore.get(player);
     const current = previous?.url || hls.url;
     if (!current) return;
     const url = manifestURL(current, location.href, hevc);
     if (!force && url === current) return;
-    const time = previous?.time ?? player.currentTime;
+    // Reactive player time can lag a seek while its new fragments are loading.
+    const media = player.querySelector?.('video');
+    const time = previous?.time ?? (media?.readyState ? media.currentTime : player.currentTime);
     const restore = { url, time: Number.isFinite(time) && time >= 0 ? time : 0, paused: previous?.paused ?? player.paused };
     pendingRestore.set(player, restore);
+    if (restore.paused) holdPausedAutoplay(player, url);
     player.addEventListener('can-play', () => {
       const currentHls = active?.player === player ? active.hls : hls;
       discardUnrelatedRestore(player, currentHls.url);
@@ -154,11 +179,16 @@
 
   function discardUnrelatedRestore(player, source, mastersOnly = true) {
     const pending = pendingRestore.get(player);
-    if (!pending || typeof source !== 'string' || !source) return;
+    const autoplay = pausedAutoplay.get(player);
+    if ((!pending && !autoplay) || typeof source !== 'string' || !source) return;
     const url = new URL(source, location.href);
     if (mastersOnly && !url.pathname.endsWith('/index.m3u8')) return;
-    const previous = new URL(pending.url, location.href);
-    if (url.origin !== previous.origin || url.pathname !== previous.pathname) pendingRestore.delete(player);
+    const unrelated = (state) => {
+      const previous = new URL(state.url, location.href);
+      return url.origin !== previous.origin || url.pathname !== previous.pathname;
+    };
+    if (pending && unrelated(pending)) pendingRestore.delete(player);
+    if (autoplay && unrelated(autoplay)) restoreAutoplay(player);
   }
 
   function applyPreferences(value) {
@@ -223,9 +253,9 @@
     if (!player || !events || typeof hls.on !== 'function' || seen.has(hls)) return;
     seen.add(hls);
     discardUnrelatedRestore(player, hls.url);
-    // hls.js keeps the playing fragment and fetch-time padding, replacing
-    // later buffered fragments so a manual choice need not wait the full buffer.
-    if (player.qualities) player.qualities.switch = 'next';
+    // Keep buffered audio intact. nextLevel can flush muxed audio as well as
+    // video; loadLevel applies the new quality after the existing short buffer.
+    if (player.qualities) player.qualities.switch = 'load';
     active = { player, hls, quality: hls.levels[hls.currentLevel] || null };
     const useHEVC = () => prefersHEVC(preferences, supportsHEVC(), forceAVC.has(player));
     console.info('[Memories RKMPP] HLS output preference:', useHEVC() ? 'HEVC' : 'AVC');
@@ -248,6 +278,9 @@
 
     const initialize = () => {
       discardUnrelatedRestore(player, hls.url);
+      // Alternate audio stays buffered during a video-only nextLevel flush.
+      // Muxed audio instead uses loadLevel so its decoder is not interrupted.
+      if (player.qualities) player.qualities.switch = hls.audioTracks?.some((track) => track.url) ? 'next' : 'load';
       const resume = pendingRestore.get(player);
       if (hls.levels.length && (resume || !player.currentTime)) {
         const index = initialLevel(hls.levels);
@@ -314,6 +347,17 @@
         // Source events identify native/direct replacements too. Query-only
         // codec or token changes still refer to the same asset and keep resume.
         discardUnrelatedRestore(player, event.detail?.src, false);
+      });
+      // ready() decides autoplay after dispatching can-play and awaiting
+      // storage. Keep it suppressed for an explicitly paused asset until an
+      // intentional play or another asset, rather than restoring it too early.
+      player.addEventListener('media-play-request', () => {
+        const restore = pendingRestore.get(player);
+        if (restore) restore.paused = false;
+        restoreAutoplay(player);
+      });
+      player.addEventListener('play', (event) => {
+        if (!event.autoPlay) restoreAutoplay(player);
       });
       player.addEventListener('provider-change', (event) => watchProvider(player, event.detail));
       player.addEventListener('hls-instance', (event) => configureHLS(player, event.detail));
