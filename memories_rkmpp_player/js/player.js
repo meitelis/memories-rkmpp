@@ -46,6 +46,117 @@
     return url.href;
   }
 
+
+  // Memories 10.2.0 chooses HLS whenever go-vod is enabled. The companion
+  // reselects the authenticated original stream on the same media-player.
+  // Never manufacture an unauthenticated WebDAV URL or probe private files
+  // through a different origin.
+  function directSource(value, origin) {
+    const source = typeof value === 'string' ? value : value?.src;
+    if (typeof source !== 'string') return null;
+    let url;
+    try { url = new URL(source, origin); } catch { return null; }
+    if (url.origin !== new URL(origin).origin) return null;
+    const match = /^(.*\/apps\/memories\/api)\/video\/transcode\/[a-fA-F0-9]{8,128}\/(\d+)\/index\.m3u8$/.exec(url.pathname);
+    if (!match) return null;
+    const original = new URL(url.href);
+    original.pathname = match[1] + '/stream/' + match[2];
+    original.search = '';
+    for (const name of ['token', 'albums']) {
+      const value = url.searchParams.get(name);
+      if (value !== null) original.searchParams.set(name, value);
+    }
+    return {
+      original: original.href,
+      master: url.href,
+      key: original.href,
+    };
+  }
+
+  // A direct MP4 does not have a bitrate ladder. It is only beneficial if
+  // playable; real decoder errors or sustained buffer starvation switch back
+  // to the same authenticated HLS master with RKMPP adaptive fallback.
+  const directPlayback = new WeakMap();
+  const DIRECT_STALL_MS = 6000;
+
+  function stopDirectTimer(state) {
+    if (state?.stallTimer !== null && state?.stallTimer !== undefined) {
+      clearTimeout(state.stallTimer);
+      state.stallTimer = null;
+    }
+  }
+
+  function playbackTime(player) {
+    const media = player.querySelector?.('video');
+    const value = media?.readyState ? media.currentTime : player.currentTime;
+    return Number.isFinite(value) && value >= 0 ? value : 0;
+  }
+
+  function fallbackToHLS(player, state, reason) {
+    if (!state || directPlayback.get(player) !== state || state.mode !== 'direct') return;
+    stopDirectTimer(state);
+    state.mode = 'hls';
+    console.info('[Memories RKMPP] Direct playback unavailable (' + reason + '); using adaptive HLS');
+    const restore = { url: state.master, time: playbackTime(player), paused: !!player.paused };
+    pendingRestore.set(player, restore);
+    if (restore.paused) holdPausedAutoplay(player, state.master);
+    player.addEventListener('can-play', () => {
+      if (directPlayback.get(player) !== state || pendingRestore.get(player) !== restore) return;
+      pendingRestore.delete(player);
+      player.currentTime = restore.time;
+      if (restore.paused) player.pause?.();
+      else player.play?.()?.catch?.(() => {});
+    }, { once: true });
+    player.src = { src: state.master, type: 'application/x-mpegurl' };
+  }
+
+  function scheduleDirectStall(player) {
+    const state = directPlayback.get(player);
+    if (!state || state.mode !== 'direct' || player.paused || state.stallTimer !== null) return;
+    state.stallTimer = setTimeout(() => {
+      state.stallTimer = null;
+      if (directPlayback.get(player) !== state || state.mode !== 'direct' || player.paused) return;
+      const media = player.querySelector?.('video');
+      let forward = 0;
+      if (media?.buffered) {
+        for (let i = 0; i < media.buffered.length; i++) {
+          if (media.buffered.start(i) <= media.currentTime && media.buffered.end(i) >= media.currentTime) {
+            forward = media.buffered.end(i) - media.currentTime;
+            break;
+          }
+        }
+      }
+      if (!media || media.readyState < 3 || forward < 1) {
+        fallbackToHLS(player, state, 'buffer starvation');
+      }
+    }, DIRECT_STALL_MS);
+  }
+
+  function maybeDirectPlay(player, value) {
+    const candidate = directSource(value, location.href);
+    if (!candidate) return;
+    const previous = directPlayback.get(player);
+    if (previous?.key === candidate.key) return; // Never loop after fallback.
+    if (previous) stopDirectTimer(previous);
+    // An explicit H.264 compatibility preference requests the HLS encoder,
+    // because the original codec isn't known from the media-player source.
+    if (preferences.codec === 'h264') return;
+    // Browser support is checked by the real media element, not MSE probing:
+    // successful MediaSource HEVC support does not guarantee MP4 playback.
+    const state = { ...candidate, mode: 'direct', stallTimer: null };
+    directPlayback.set(player, state);
+    const time = playbackTime(player);
+    const shouldPlay = !player.paused || !!player.autoPlay || !!player.autoplay;
+    player.addEventListener('can-play', () => {
+      if (directPlayback.get(player) !== state || state.mode !== 'direct') return;
+      if (time > 0) player.currentTime = time;
+      if (shouldPlay) player.play?.()?.catch?.(() => {});
+      else player.pause?.();
+    }, { once: true });
+    console.info('[Memories RKMPP] Trying original file before HLS:', candidate.original);
+    player.src = { src: candidate.original, type: 'video/mp4' };
+  }
+
   function playbackPreferences(value) {
     const input = value && typeof value === 'object' ? value : {};
     return {
@@ -74,14 +185,14 @@
   }
 
   if (typeof document === 'undefined' && typeof module === 'object' && module.exports) {
-    module.exports = { shortEdge, initialLevel, qualityText, updateQualityText, manifestURL, playbackPreferences, prefersHEVC, bufferSeconds };
+    module.exports = { shortEdge, initialLevel, qualityText, updateQualityText, manifestURL, directSource, playbackPreferences, prefersHEVC, bufferSeconds };
     return;
   }
   if (!/\/apps\/memories(?:\/|$)/.test(location.pathname)) return;
   const marker = Symbol.for('memories-rkmpp-player');
   if (window[marker]) return;
   window[marker] = true;
-  console.info('[Memories RKMPP] Player helper 0.3.3 active');
+  console.info('[Memories RKMPP] Player helper 0.3.4 active');
 
   const seen = new WeakSet();
   const players = new WeakSet();
@@ -194,6 +305,13 @@
   function applyPreferences(value) {
     const previous = preferences;
     preferences = playbackPreferences(value);
+    // Honor a mid-playback explicit H.264 compatibility selection.
+    for (const player of document.querySelectorAll('media-player')) {
+      if (preferences.codec === 'h264') {
+        const state = directPlayback.get(player);
+        if (state?.mode === 'direct') fallbackToHLS(player, state, 'H.264 requested');
+      }
+    }
     if (!active?.player.isConnected) return;
     const { player, hls } = active;
     budget(hls, hls.currentLevel >= 0 ? hls.currentLevel : 0);
@@ -251,6 +369,7 @@
   function configureHLS(player, hls) {
     const events = hls?.constructor?.Events;
     if (!player || !events || typeof hls.on !== 'function' || seen.has(hls)) return;
+    if (directPlayback.get(player)?.mode === 'direct') { hls.stopLoad?.(); return; }
     seen.add(hls);
     discardUnrelatedRestore(player, hls.url);
     // Keep buffered audio intact. nextLevel can flush muxed audio as well as
@@ -347,7 +466,21 @@
         // Source events identify native/direct replacements too. Query-only
         // codec or token changes still refer to the same asset and keep resume.
         discardUnrelatedRestore(player, event.detail?.src, false);
+        maybeDirectPlay(player, event.detail?.src ?? event.detail);
       });
+      // Capture direct-media errors before Memories' HLS-first error handler:
+      // it otherwise mistakes a failed original for a failed HLS stream.
+      player.addEventListener('error', (event) => {
+        const state = directPlayback.get(player);
+        if (state?.mode !== 'direct') return;
+        event.stopImmediatePropagation?.();
+        fallbackToHLS(player, state, 'decoder or file error');
+      }, true);
+      player.addEventListener('waiting', () => scheduleDirectStall(player));
+      player.addEventListener('stalled', () => scheduleDirectStall(player));
+      player.addEventListener('playing', () => stopDirectTimer(directPlayback.get(player)));
+      player.addEventListener('can-play', () => stopDirectTimer(directPlayback.get(player)));
+      player.addEventListener('pause', () => stopDirectTimer(directPlayback.get(player)));
       // ready() decides autoplay after dispatching can-play and awaiting
       // storage. Keep it suppressed for an explicitly paused asset until an
       // intentional play or another asset, rather than restoring it too early.
@@ -362,6 +495,8 @@
       player.addEventListener('provider-change', (event) => watchProvider(player, event.detail));
       player.addEventListener('hls-instance', (event) => configureHLS(player, event.detail));
     }
+    // The source is normally assigned before Memories inserts the element.
+    maybeDirectPlay(player, player.src);
     watchProvider(player, player.provider);
   }
 
