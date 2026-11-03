@@ -17,8 +17,67 @@ func IsRKMPPEncoder(encoder string) bool {
 	return encoder == EncoderRKMPP || encoder == EncoderRKMPPHEVC
 }
 
+// Keep one source packet clock across adaptive renditions when the original
+// audio already matches the supported AAC-LC configuration. Unknown profiles
+// and bitrates retain normalization rather than guessing compatibility/budget.
+func copyRKMPPAudio(audio AudioInfo) bool {
+	return strings.EqualFold(audio.CodecName, "aac") && strings.EqualFold(audio.Profile, "LC") &&
+		(audio.Channels == 1 || audio.Channels == 2) && (audio.SampleRate == 44100 || audio.SampleRate == 48000) &&
+		audio.BitRate > 0 && audio.BitRate <= 256000
+}
+
+func NormalizeRKMPPAudio(audio AudioInfo) bool {
+	return audio.CodecName != "" && !copyRKMPPAudio(audio)
+}
+
+// One audio encoder is shared by the HLS video qualities. It never opens a
+// hardware video decoder or encoder, and uses the same source timestamp clock.
+func buildRKMPPAudioArgs(s Spec) []string {
+	args := []string{"-hide_banner", "-loglevel", "warning"}
+	if s.StartAt > 0 {
+		args = append(args, "-ss", fmt.Sprintf("%.6f", s.StartAt))
+	}
+	if s.Headers != "" {
+		args = append(args, "-multiple_requests", "1", "-seekable", "1")
+		args = append(args, reconnectArgs()...)
+		args = append(args, "-headers", s.Headers)
+	}
+	filter := fmt.Sprintf("aresample=async=1:first_pts=%d", int64(math.Round(s.StartAt*48000)))
+	if remaining := s.EndAt - s.StartAt; remaining > 0 {
+		// A shorter audio source must not make HLS wait for nonexistent tail
+		// fragments. Silence is cheap to encode and keeps the video playable.
+		filter += fmt.Sprintf(",apad=whole_dur=%.6f", remaining)
+	}
+	filter += fmt.Sprintf(",asetpts=N/SR/TB+%.6f/TB", s.StartAt)
+	args = append(args, "-i", s.Input, "-copyts", "-fflags", "+genpts", "-vn", "-map", "0:a:0",
+		"-c:a", "aac", "-ac", "2", "-ar", "48000", "-b:a", "128k", "-af", filter)
+	if s.EndAt > s.StartAt {
+		// copyts preserves absolute source timestamps, including on cold seeks.
+		args = append(args, "-to", fmt.Sprintf("%.6f", s.EndAt))
+	}
+	return args
+}
+
+func rkmppAudioBitrate(audio AudioInfo) int {
+	if audio.CodecName == "" {
+		return 0
+	}
+	if copyRKMPPAudio(audio) {
+		return audio.BitRate
+	}
+	return 128000
+}
+
+// RKMPPMinBitrate is the minimum advertised bandwidth for a hardware encode:
+// the encoder's 128kbps video floor, the chosen audio, and muxing headroom.
+// Stream-copy video does not use this allocation.
+func RKMPPMinBitrate(audio AudioInfo) int {
+	return ((128000+rkmppAudioBitrate(audio))*10 + 8) / 9
+}
+
 func buildRKMPPArgs(s Spec) []string {
 	s.Rotation = NormalizeRotation(s.Rotation)
+	copyAudio := copyRKMPPAudio(s.Audio)
 	args := []string{"-hide_banner", "-loglevel", "warning"}
 	seek := s.HLS && s.StartAt > 0
 	if s.StartAt > 0 {
@@ -111,22 +170,29 @@ func buildRKMPPArgs(s Spec) []string {
 		qp = 24
 	}
 	if s.HLS && s.Bitrate > 0 {
-		audio := 0
-		if s.Audio.CodecName != "" {
-			audio = 128000
-		}
+		audio := rkmppAudioBitrate(s.Audio)
 		rate := max(128000, s.Bitrate*9/10-audio)
 		args = append(args, "-rc_mode", "VBR", "-b:v", strconv.Itoa(rate), "-maxrate", strconv.Itoa(rate), "-bufsize", strconv.Itoa(rate*2), "-qp_init", strconv.Itoa(qp))
 	} else {
 		args = append(args, "-rc_mode", "CQP", "-qp_init", strconv.Itoa(qp))
 	}
 	args = append(args, "-fps_mode", "passthrough")
-	if s.Audio.CodecName != "" {
-		af := "aresample=async=1"
-		if seek {
-			af = fmt.Sprintf("atrim=start=%.6f,", s.StartAt) + af
+	if s.Audio.CodecName != "" && !s.SeparateAudio {
+		args = append(args, "-map", "0:a:0?")
+		if copyAudio {
+			args = append(args, "-c:a", "copy")
+			if seek {
+				// Discard packets preceding the requested source timestamp without
+				// filtering or resetting their original AAC frame/priming clock.
+				args = append(args, "-copypriorss:a", "0")
+			}
+		} else {
+			af := "aresample=async=1"
+			if seek {
+				af = fmt.Sprintf("atrim=start=%.6f,", s.StartAt) + af
+			}
+			args = append(args, "-c:a", "aac", "-ac", "2", "-ar", "48000", "-b:a", "128k", "-af", af)
 		}
-		args = append(args, "-map", "0:a:0?", "-c:a", "aac", "-ac", "2", "-ar", "48000", "-b:a", "128k", "-af", af)
 	} else {
 		args = append(args, "-an")
 	}

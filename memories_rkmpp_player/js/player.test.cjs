@@ -5,6 +5,26 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const { qualityText, updateQualityText, initialLevel, manifestURL } = require('./player.js');
 
+function eventHub() {
+  const listeners = new Map();
+  const events = new Map();
+  function remove(name, callback) {
+    const current = listeners.get(name) || [];
+    listeners.set(name, current.filter((entry) => entry.callback !== callback));
+  }
+  function add(name, callback, once = false) {
+    const current = listeners.get(name) || [];
+    current.push({ callback, once }); listeners.set(name, current);
+    if (!events.has(name)) events.set(name, (...args) => {
+      for (const entry of [...(listeners.get(name) || [])]) {
+        if (entry.once) remove(name, entry.callback);
+        entry.callback(...args);
+      }
+    });
+  }
+  return { events, add, remove, emit: (name, ...args) => events.get(name)?.(...args) };
+}
+
 test('portrait and landscape quality labels use displayed short edge', () => {
   const portrait = [{ width: 480, height: 854 }, { width: 720, height: 1280 }, { width: 1080, height: 1920 }];
   assert.equal(qualityText('Auto (1920p)', portrait[2]), 'Auto (1080p)');
@@ -38,7 +58,8 @@ test('the playlist loader handles both provider load orders and browser module s
   for (const supported of [true, false]) {
     for (const late of [true, false]) {
       const listeners = new Map();
-      const events = new Map();
+      const hub = eventHub();
+      const events = hub.events;
       // Markup contract observed in Vidstack's default quality menu.
       const labelText = { nodeType: 3, data: '1920p' };
       const hintText = { nodeType: 3, data: 'Auto (1920p)' };
@@ -60,10 +81,19 @@ test('the playlist loader handles both provider load orders and browser module s
         static DefaultConfig = { loader: Loader };
         static Events = Object.fromEntries(['MANIFEST_PARSED', 'LEVEL_SWITCHING', 'LEVEL_SWITCHED', 'DESTROYING', 'ERROR'].map((name) => [name, name]));
         config = {};
-        levels = [{ width: 1080, height: 1920, bitrate: 1000000 }];
+        levels = [
+          { width: 1080, height: 1920, bitrate: 1000000 },
+          { width: 720, height: 1280, bitrate: 750000 },
+          { width: 480, height: 854, bitrate: 300000 },
+        ];
+        switches = [];
+        get currentLevel() { return 0; }
+        set currentLevel(level) { this.switches.push({ mode: 'immediate', level }); }
+        set loadLevel(level) { this.switches.push({ mode: 'buffer-end', level }); }
+        set nextLevel(level) { this.switches.push({ mode: 'fragment-boundary', level }); }
         url = 'https://cloud.example/apps/memories/api/video/transcode/abc/123/index.m3u8';
-        once(name, fn) { events.set(name, fn); }
-        on(name, fn) { events.set(name, fn); }
+        once(name, fn) { hub.add(name, fn, true); }
+        on(name, fn) { hub.add(name, fn); }
         startLoad() { this.started = true; }
         stopLoad() { this.stopped = true; }
         loadSource(url) { this.url = url; }
@@ -86,7 +116,17 @@ test('the playlist loader handles both provider load orders and browser module s
       vm.runInNewContext(fs.readFileSync(require.resolve('./player.js'), 'utf8'), context);
       if (!late) listeners.get('hls-instance')({ detail: hls, target: { closest: () => player } });
       const loader = new hls.config.pLoader();
-      assert.equal(player.qualities.switch, 'load');
+      // Vidstack routes a user selection through hls[qualities.switch + 'Level'].
+      // Exercise that selection path, including switching up and down, rather
+      // than merely checking the configuration string.
+      player.currentTime = 12;
+      for (const selectedIndex of [0, 2, 1]) {
+        hls[player.qualities.switch + 'Level'] = selectedIndex;
+      }
+      assert.deepEqual(hls.switches, [0, 2, 1].map((level) => ({ mode: 'buffer-end', level })));
+      assert.equal(player.currentTime, 12);
+      assert.equal(player.src, undefined);
+      player.currentTime = 0;
       loader.load({ url: hls.url }, {}, {});
       assert.equal(new URL(loader.url).searchParams.get('codecs'), supported ? 'h264,hevc' : 'h264');
       events.get('MANIFEST_PARSED')();
@@ -114,4 +154,241 @@ test('codec negotiation preserves auth and touches only Memories masters', () =>
   assert.equal(new URL(manifestURL(hevc.href, origin, false)).searchParams.get('codecs'), 'h264');
   assert.equal(manifestURL('https://other.example' + path, origin, true), 'https://other.example' + path);
   assert.equal(manifestURL('/video/123.mp4', origin, true), '/video/123.mp4');
+});
+
+const { playbackPreferences, prefersHEVC, bufferSeconds } = require('./player.js');
+const { createPreferencesStore, recommendConnection } = require('./settings.js');
+
+test('buffer profiles and Auto adapt within the video byte budget', () => {
+  const level = { bitrate: 8000000 };
+  assert.equal(bufferSeconds(playbackPreferences(), level), 12);
+  assert.equal(bufferSeconds(playbackPreferences({ buffer: 'responsive' }), level), 6);
+  assert.equal(bufferSeconds(playbackPreferences({ buffer: 'smooth' }), level), 18);
+  assert.equal(bufferSeconds(playbackPreferences({ buffer: 'custom', customSeconds: 30 }), level), 30);
+  assert.equal(bufferSeconds(playbackPreferences(), level, 8000000), 18);
+  assert.equal(bufferSeconds(playbackPreferences(), level, 40000000), 6);
+  assert.equal(bufferSeconds(playbackPreferences({ buffer: 'custom', customSeconds: 30 }), { bitrate: 64000000 }), 4);
+  assert.equal(prefersHEVC(playbackPreferences({ codec: 'hevc' }), false), false);
+  assert.equal(prefersHEVC(playbackPreferences({ codec: 'hevc' }), true, true), false);
+  assert.equal(prefersHEVC(playbackPreferences(), true), true);
+  assert.equal(prefersHEVC(playbackPreferences({ codec: 'h264' }), true), false);
+});
+
+function preferencePlayer({ paused = false, supported = true, lateSettings = false, autoPlay = true, autoplay = true } = {}) {
+  const playerHub = eventHub();
+  const windowEvents = new Map();
+  const hlsHub = eventHub();
+  const hlsEvents = hlsHub.events;
+  const store = createPreferencesStore({ getItem: () => null, setItem() {} });
+  let playbackStatus;
+  let started = true;
+  const service = { ...store, updatePlaybackStatus: (value) => { playbackStatus = value; } };
+  const player = {
+    isConnected: true, currentTime: 45.25, paused, autoPlay, autoplay,
+    qualities: {}, sources: [], playCalls: 0, pauseCalls: 0, autoplayAttempts: 0,
+    addEventListener(name, callback, options) {
+      playerHub.add(name, callback, !!options?.once);
+    },
+    removeEventListener(name, callback) { playerHub.remove(name, callback); },
+    set src(value) {
+      this.sources.push(value); this.currentTime = 0; this.paused = false; started = false;
+      playerHub.emit('source-change', { detail: value });
+      hls.loadSource(value.src);
+    },
+    play() {
+      this.playCalls++; this.paused = false; started = true;
+      playerHub.emit('play', { autoPlay: false });
+      return Promise.resolve();
+    },
+    pause() { this.pauseCalls++; this.paused = true; },
+  };
+  class Hls {
+    static DefaultConfig = { loader: class { load(context) { this.url = context.url; } } };
+    static Events = Object.fromEntries(['MANIFEST_PARSED', 'LEVEL_SWITCHING', 'LEVEL_SWITCHED', 'DESTROYING', 'ERROR', 'FRAG_LOADED'].map((name) => [name, name]));
+    config = {};
+    levels = [{ width: 1920, height: 1080, bitrate: 8000000, videoCodec: supported ? 'hvc1.1.6.L120.B0' : 'avc1.640028' }];
+    currentLevel = 0;
+    url = `https://cloud.example/apps/memories/api/video/transcode/abc/123/index.m3u8?token=keep&codecs=${supported ? 'h264%2Chevc' : 'h264'}`;
+    startCalls = [];
+    on(name, callback) { hlsHub.add(name, callback); }
+    once(name, callback) { hlsHub.add(name, callback, true); }
+    startLoad(position) { this.startCalls.push(position); this.startedAt = position; }
+    stopLoad() {} loadSource(url) { this.url = url; }
+  }
+  const hls = new Hls();
+  player.provider = { type: 'hls', onInstance: (callback) => callback(hls) };
+  const window = { MediaSource: { isTypeSupported: () => supported }, addEventListener: (name, callback) => windowEvents.set(name, callback) };
+  if (!lateSettings) window[Symbol.for('memories-rkmpp-settings')] = service;
+  vm.runInNewContext(fs.readFileSync(require.resolve('./player.js'), 'utf8'), {
+    URL, WeakSet, WeakMap, Symbol, console, queueMicrotask: (callback) => callback(), window,
+    location: { pathname: '/apps/memories/', href: 'https://cloud.example/apps/memories/' },
+    document: { documentElement: {}, querySelectorAll: (selector) => selector === 'media-player' ? [player] : [], addEventListener() {} },
+    MutationObserver: class { observe() {} },
+  });
+  // Model an already parsed playing source. A true once listener is consumed
+  // here, before a codec change reloads a second manifest on this SAME instance.
+  hlsHub.emit('MANIFEST_PARSED');
+  return {
+    player, hls, store, hlsEvents, status: () => playbackStatus,
+    manifestParsed() { hlsHub.emit('MANIFEST_PARSED'); },
+    async canPlay() {
+      playerHub.emit('can-play');
+      // Vidstack ready() awaits storage after can-play, then decides autoplay.
+      // A synchronous pause inside can-play cannot prevent this later play.
+      await Promise.resolve();
+      if (!started && (player.autoPlay || player.autoplay)) {
+        player.autoplayAttempts++; player.playCalls++; player.paused = false; started = true;
+        playerHub.emit('play', { autoPlay: true });
+      }
+    },
+    attachSettings() { window[Symbol.for('memories-rkmpp-settings')] = service; windowEvents.get('memories-rkmpp-settings-ready')(); },
+  };
+}
+
+for (const paused of [false, true]) {
+  test(`live preferences preserve ${paused ? 'paused' : 'playing'} position across codec changes`, async () => {
+    const h = preferencePlayer({ paused });
+    h.store.setPreferences({ buffer: 'smooth' });
+    assert.equal(h.hls.config.maxBufferLength, 18);
+    assert.equal(h.player.sources.length, 0);
+    assert.equal(h.player.currentTime, 45.25);
+    h.store.setPreferences({ codec: 'h264' });
+    assert.equal(new URL(h.player.sources.at(-1).src).searchParams.get('codecs'), 'h264');
+    assert.equal(new URL(h.player.sources.at(-1).src).searchParams.get('token'), 'keep');
+    h.manifestParsed();
+    assert.equal(h.hls.startedAt, 45.25);
+    assert.deepEqual(h.hls.startCalls, [45.25]);
+    // Rapid changes before the replacement can play retain the original position.
+    h.store.setPreferences({ codec: 'auto' });
+    h.manifestParsed();
+    h.store.setPreferences({ codec: 'h264' });
+    h.manifestParsed();
+    assert.deepEqual(h.hls.startCalls, [45.25, 45.25, 45.25]);
+    await h.canPlay();
+    assert.equal(h.player.currentTime, 45.25);
+    assert.equal(h.player.paused, paused);
+    assert.equal(h.player.playCalls, paused ? 0 : 1);
+    assert.equal(h.player.pauseCalls, paused ? 1 : 0);
+    assert.equal(h.player.qualities.switch, 'load');
+  });
+}
+
+for (const suffix of ['index.m3u8', 'original.mp4']) {
+  test(`an unrelated ${suffix} source discards a pending codec restore`, async () => {
+    const h = preferencePlayer({ paused: true });
+    h.store.setPreferences({ codec: 'h264' });
+    h.player.src = { src: `https://cloud.example/apps/memories/api/video/transcode/abc/456/${suffix}`, type: 'video/mp4' };
+    assert.equal(h.player.autoPlay, true);
+    assert.equal(h.player.autoplay, true);
+    if (suffix === 'index.m3u8') {
+      h.manifestParsed();
+      assert.deepEqual(h.hls.startCalls, [undefined]);
+    }
+    await h.canPlay();
+    assert.equal(h.player.currentTime, 0);
+    assert.equal(h.player.pauseCalls, 0);
+    assert.equal(h.player.playCalls, 1);
+    assert.equal(h.player.autoplayAttempts, 1);
+  });
+}
+
+test('query-only authentication refresh keeps the codec resume on the same asset', async () => {
+  const h = preferencePlayer();
+  h.store.setPreferences({ codec: 'h264' });
+  const url = new URL(h.player.sources.at(-1).src);
+  url.searchParams.set('token', 'refreshed-token');
+  h.player.src = { src: url.href, type: 'application/x-mpegurl' };
+  h.manifestParsed();
+  await h.canPlay();
+  assert.equal(h.hls.startedAt, 45.25);
+  assert.equal(h.player.currentTime, 45.25);
+  assert.equal(h.player.paused, false);
+  assert.equal(new URL(h.hls.url).searchParams.get('token'), 'refreshed-token');
+});
+
+test('a separate audio track permits fast video-only switches and resets for muxed sources', () => {
+  const h = preferencePlayer();
+  h.hls.audioTracks = [{ url: 'https://cloud.example/audio.m3u8' }];
+  h.manifestParsed();
+  assert.equal(h.player.qualities.switch, 'next');
+  h.hls.audioTracks = [];
+  h.manifestParsed();
+  assert.equal(h.player.qualities.switch, 'load');
+});
+
+test('a format change preserves a seek before reactive player time catches up', async () => {
+  const h = preferencePlayer({ paused: true });
+  h.player.querySelector = () => ({ readyState: 1, currentTime: 60.5 });
+  h.store.setPreferences({ codec: 'h264' });
+  h.manifestParsed();
+  assert.equal(h.hls.startedAt, 60.5);
+  await h.canPlay();
+  assert.equal(h.player.currentTime, 60.5);
+  assert.equal(h.player.paused, true);
+});
+
+test('HEVC preference respects unsupported browsers and one-time decoder fallback', async () => {
+  const unsupported = preferencePlayer({ supported: false });
+  unsupported.store.setPreferences({ codec: 'hevc' });
+  assert.equal(unsupported.player.sources.length, 0);
+  const loader = new unsupported.hls.config.pLoader();
+  loader.load({ url: unsupported.hls.url });
+  assert.equal(new URL(loader.url).searchParams.get('codecs'), 'h264');
+
+  const h = preferencePlayer();
+  h.hlsEvents.get('ERROR')(null, { fatal: true, details: 'bufferAddCodecError' });
+  assert.equal(new URL(h.player.sources.at(-1).src).searchParams.get('codecs'), 'h264');
+  await h.canPlay();
+  const count = h.player.sources.length;
+  h.store.setPreferences({ codec: 'hevc' });
+  h.hlsEvents.get('ERROR')(null, { fatal: true, details: 'bufferAddCodecError' });
+  assert.equal(h.player.sources.length, count);
+});
+
+for (const flags of [
+  { autoPlay: true, autoplay: false },
+  { autoPlay: false, autoplay: true },
+  { autoPlay: true, autoplay: true },
+  { autoPlay: false, autoplay: false },
+]) {
+  test(`paused codec reload suppresses delayed autoplay and restores both original flags on play: ${JSON.stringify(flags)}`, async () => {
+    const h = preferencePlayer({ paused: true, ...flags });
+    h.store.setPreferences({ codec: 'h264' });
+    h.store.setPreferences({ codec: 'auto' });
+    h.store.setPreferences({ codec: 'h264' });
+    assert.equal(h.player.autoPlay, false);
+    assert.equal(h.player.autoplay, false);
+    h.manifestParsed();
+    await h.canPlay();
+    assert.equal(h.player.currentTime, 45.25);
+    assert.equal(h.player.paused, true);
+    assert.equal(h.player.autoplayAttempts, 0);
+    assert.equal(h.player.autoPlay, false, 'can-play is too early to restore autoplay');
+    assert.equal(h.player.autoplay, false);
+    // A later paused replacement must retain the original, not suppressed, flags.
+    h.player.currentTime = 70;
+    h.store.setPreferences({ codec: 'auto' });
+    h.manifestParsed();
+    await h.canPlay();
+    assert.equal(h.player.currentTime, 70);
+    assert.equal(h.player.paused, true);
+    await h.player.play();
+    assert.equal(h.player.autoPlay, flags.autoPlay);
+    assert.equal(h.player.autoplay, flags.autoplay);
+    assert.equal(h.player.paused, false);
+  });
+}
+
+test('connection recommendations and late settings apply without restarting the video', () => {
+  const h = preferencePlayer({ lateSettings: true });
+  h.attachSettings();
+  h.store.setPreferences(recommendConnection([35, 32]).preferences);
+  assert.equal(h.hls.config.maxBufferLength, 6);
+  assert.equal(h.player.sources.length, 0);
+  assert.equal(h.player.currentTime, 45.25);
+  assert.equal(h.status().bufferSeconds, 6);
+  h.store.setPreferences({ buffer: 'auto' });
+  h.hls.bandwidthEstimate = 8000000;
+  h.hlsEvents.get('FRAG_LOADED')();
+  assert.equal(h.hls.config.maxBufferLength, 18);
 });

@@ -1,7 +1,6 @@
 package core
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"hash/fnv"
@@ -25,6 +24,7 @@ import (
 const (
 	QUALITY_MAX    = "max"
 	QUALITY_DIRECT = "direct"
+	QUALITY_AUDIO  = "audio"
 )
 
 // ErrCopyPending means the keyframe probe is still running; answer 409
@@ -114,12 +114,13 @@ type ProbeVideoData struct {
 }
 
 type Rendition struct {
-	Quality string
-	Width   int
-	Height  int
-	Bitrate int
-	Order   int
-	Codecs  string
+	Quality       string
+	Width         int
+	Height        int
+	Bitrate       int
+	Order         int
+	Codecs        string
+	SeparateAudio bool
 }
 
 // NewManagerArgs bundles NewManager construction args.
@@ -196,7 +197,9 @@ func NewManager(a NewManagerArgs) (*Manager, error) {
 	}
 
 	rkmpp := m.c.RKMPP
+	minRKMPPBitrate := 0
 	if rkmpp {
+		minRKMPPBitrate = ffmpeg.RKMPPMinBitrate(m.probe.Audio)
 		refBitrate = m.probe.BitRate
 		if m.probe.CodecName != CODEC_H264 {
 			refBitrate *= 2
@@ -213,6 +216,7 @@ func NewManager(a NewManagerArgs) (*Manager, error) {
 		if m.OutputCodec() == "hevc" {
 			refBitrate = max(256000, refBitrate*2/3)
 		}
+		refBitrate = max(refBitrate, minRKMPPBitrate)
 	}
 
 	// Get the multiplier for the reference bitrate.
@@ -249,7 +253,7 @@ func NewManager(a NewManagerArgs) (*Manager, error) {
 			// Round to the nearest even width instead of dropping the rendition
 			// whenever its aspect ratio happens to produce an odd pixel count.
 			stream.width = int(math.Round(float64(lgDim)*float64(stream.height)/float64(smDim)/2)) * 2
-			stream.bitrate = min(stream.bitrate, balancedRKMPPBitrate(stream.width, stream.height, m.FrameRate()))
+			stream.bitrate = max(minRKMPPBitrate, min(stream.bitrate, balancedRKMPPBitrate(stream.width, stream.height, m.FrameRate())))
 		}
 
 		// remove invalid streams
@@ -294,6 +298,10 @@ func NewManager(a NewManagerArgs) (*Manager, error) {
 
 	if rkmpp && m.IsCopyEligible() && len(m.streams) > 1 {
 		m.streams[QUALITY_MAX] = &Stream{c: m.c, m: m, quality: QUALITY_MAX, height: maxHeight, width: maxWidth, bitrate: refBitrate, order: 1}
+	}
+
+	if rkmpp && ffmpeg.NormalizeRKMPPAudio(m.probe.Audio) {
+		m.streams[QUALITY_AUDIO] = &Stream{c: m.c, m: m, quality: QUALITY_AUDIO, bitrate: 128000}
 	}
 
 	// Start all streams
@@ -360,7 +368,14 @@ func (m *Manager) Destroy() {
 func (m *Manager) Renditions() []Rendition {
 	out := make([]Rendition, 0, len(m.streams))
 	for _, s := range m.streams {
-		if m.c.RKMPP && s.quality == QUALITY_DIRECT && len(m.streams) > 1 {
+		if s.quality == QUALITY_AUDIO {
+			continue
+		}
+		videoCount := len(m.streams)
+		if m.HasStream(QUALITY_AUDIO) {
+			videoCount--
+		}
+		if m.c.RKMPP && s.quality == QUALITY_DIRECT && videoCount > 1 {
 			continue
 		}
 		width, height := s.width, s.height
@@ -377,12 +392,13 @@ func (m *Manager) Renditions() []Rendition {
 			codecs = ffmpeg.HEVCCodecs(width, height, m.FrameRate(), m.probe.Audio.CodecName != "")
 		}
 		out = append(out, Rendition{
-			Quality: s.quality,
-			Width:   width,
-			Height:  height,
-			Bitrate: s.bitrate,
-			Order:   s.order,
-			Codecs:  codecs,
+			Quality:       s.quality,
+			Width:         width,
+			Height:        height,
+			Bitrate:       s.bitrate,
+			Order:         s.order,
+			Codecs:        codecs,
+			SeparateAudio: m.HasStream(QUALITY_AUDIO),
 		})
 	}
 	return out
@@ -563,38 +579,11 @@ func (m *Manager) ServeFullVideo(w http.ResponseWriter, r *http.Request, quality
 }
 
 func (m *Manager) ffprobe() error {
-	if probe, ok := LoadCachedProbe(m.c.CacheDir(), m.fileid, m.etag); ok {
-		log.Printf("%s: probe cache hit", m.id)
-		m.probe = probe
-	} else {
-		log.Printf("%s: probe cache miss", m.id)
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-
-		info, err := ffmpeg.Probe(ctx, m.c.FFprobe, m.ffmpegInput(), m.inputHeaders())
-		if err != nil {
-			return err
-		}
-
-		m.probe = &ProbeVideoData{
-			Width:          info.Width,
-			Height:         info.Height,
-			Duration:       info.Duration,
-			FrameRate:      info.FrameRate,
-			FrameRateExact: info.FrameRateExact,
-			PixelFormat:    info.PixelFormat,
-			CodecName:      info.CodecName,
-			BitRate:        info.BitRate,
-			Rotation:       info.Rotation,
-			HDR:            info.HDR,
-			BitDepth:       info.BitDepth,
-			Audio:          info.Audio,
-		}
-
-		if err := StoreCachedProbe(m.c.CacheDir(), m.fileid, m.etag, m.probe); err != nil {
-			log.Printf("%s: probe cache store failed: %v", m.id, err)
-		}
+	probe, err := m.probeVideo()
+	if err != nil {
+		return err
 	}
+	m.probe = probe
 
 	// Copy eligibility is cheap (codec + rotation); keyframes come later
 	// via EnsureCopySegments on direct.m3u8, so creation stays fast.
@@ -617,23 +606,9 @@ func (m *Manager) ffprobe() error {
 // probeCopy extracts keyframes and derives the copy grid.
 // Lock-free; EnsureCopySegments publishes the result under copyMu.
 func (m *Manager) probeCopy() ([]ffmpeg.Segment, error) {
-	cachePath := KeyframeCachePath(m.c.CacheDir(), m.fileid)
-	if keys, ok := LoadCachedKeyframes(m.c.CacheDir(), m.fileid, m.etag); ok {
-		log.Printf("%s: keyframe cache hit %s", m.id, cachePath)
-		segs := ffmpeg.CopySegments(keys, m.probe.Duration, m.tc.ChunkSize)
-		if len(segs) == 0 {
-			return nil, fmt.Errorf("no keyframe grid for file %d", m.fileid)
-		}
-		return segs, nil
-	}
-	log.Printf("%s: keyframe cache miss %s", m.id, cachePath)
-
-	keys, err := ffmpeg.Keyframes(context.Background(), m.c.FFprobe, m.ffmpegInput(), m.inputHeaders())
+	keys, err := m.probeKeyframes()
 	if err != nil {
 		return nil, err
-	}
-	if err := StoreCachedKeyframes(m.c.CacheDir(), m.fileid, m.etag, keys); err != nil {
-		log.Printf("%s: keyframe cache store failed: %v", m.id, err)
 	}
 	segs := ffmpeg.CopySegments(keys, m.probe.Duration, m.tc.ChunkSize)
 	if len(segs) == 0 {
@@ -714,7 +689,7 @@ func (m *Manager) AdaptiveStartBuffer() bool {
 	}
 	count := 0
 	for quality := range m.streams {
-		if quality != QUALITY_DIRECT {
+		if quality != QUALITY_DIRECT && quality != QUALITY_AUDIO {
 			count++
 		}
 	}

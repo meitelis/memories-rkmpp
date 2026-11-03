@@ -23,12 +23,17 @@ func MasterPlaylist(renditions []core.Rendition, frameRate int, query string) (s
 
 	m := m3u8.NewMasterPlaylist()
 	for _, r := range sorted {
-		m.Append(r.Quality+".m3u8"+query, nil, m3u8.VariantParams{
+		params := m3u8.VariantParams{
 			Bandwidth:  uint32(r.Bitrate),
 			Resolution: fmt.Sprintf("%dx%d", r.Width, r.Height),
 			FrameRate:  float64(frameRate),
 			Codecs:     r.Codecs,
-		})
+		}
+		if r.SeparateAudio {
+			params.Audio = "audio"
+			params.Alternatives = []*m3u8.Alternative{{GroupId: "audio", Type: "AUDIO", Name: "Audio", Default: true, Autoselect: "YES", URI: "audio.m3u8" + query}}
+		}
+		m.Append(r.Quality+".m3u8"+query, nil, params)
 	}
 	return m.Encode().String(), nil
 }

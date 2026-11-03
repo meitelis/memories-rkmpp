@@ -93,6 +93,10 @@ type Spec struct {
 	// Copy stream-copies the video (-c:v copy) instead of re-encoding it,
 	// for copy-eligible sources.
 	Copy bool
+	// Shared audio is carried by one HLS rendition instead of each video job.
+	AudioOnly, SeparateAudio bool
+	// EndAt bounds a padded shared audio track to the video timeline.
+	EndAt float64
 }
 
 // Encoder resolves the video encoder: stream copy, then RKMPP, VAAPI,
@@ -100,6 +104,8 @@ type Spec struct {
 // served as-is for progressive download) bypasses argument building entirely.
 func Encoder(s Spec) string {
 	switch {
+	case s.AudioOnly:
+		return "aac"
 	case s.Copy:
 		return EncoderCopy
 	case s.RKMPP:
@@ -160,11 +166,15 @@ func reconnectArgs() []string {
 // to stereo 48kHz AAC), and
 // constant-quality rate control per encoder (crf / global_quality / cq).
 // Mono/stereo AAC can be copied on the generic backends; other audio is
-// normalized to stereo 48kHz AAC for MSE compatibility. RKMPP normalizes all
-// audio to keep the adaptive ladder's audio configuration consistent.
+// normalized to stereo 48kHz AAC for MSE compatibility. RKMPP copies known
+// mono/stereo 44.1/48kHz AAC-LC up to 256kbps across every rendition,
+// preserving its packet clock; other audio is normalized across the ladder.
 // RKMPP also uses the rendition bitrate for bounded rate control. With Copy set, the
 // offload, filter graph and rate control collapse to "-c:v copy".
 func BuildArgs(s Spec) []string {
+	if s.AudioOnly {
+		return buildRKMPPAudioArgs(s)
+	}
 	if IsRKMPPEncoder(Encoder(s)) {
 		return buildRKMPPArgs(s)
 	}
@@ -292,7 +302,7 @@ func BuildArgs(s Spec) []string {
 		)
 	}
 
-	if s.Audio.CodecName != "" {
+	if s.Audio.CodecName != "" && !s.SeparateAudio {
 		args = append(args, "-map", "0:a:0?")
 		if s.Audio.CodecName == "aac" && s.Audio.Channels >= 1 && s.Audio.Channels <= 2 {
 			args = append(args, "-c:a", "copy")
@@ -304,6 +314,8 @@ func BuildArgs(s Spec) []string {
 				"-b:a", "128k",
 			)
 		}
+	} else if s.SeparateAudio {
+		args = append(args, "-an")
 	}
 
 	return args
@@ -316,7 +328,9 @@ func BuildArgs(s Spec) []string {
 //     decremented by one (starting a frame early keeps keyframes aligned), so
 //     on-disk segment N is always "<quality>-NNNNNN.ts".
 //   - "-avoid_negative_ts disabled" preserves post-seek timestamps instead of
-//     shifting them to zero, matching the "-copyts" input side.
+//     shifting them to zero, matching the "-copyts" input side. RKMPP also
+//     forwards it to the HLS child muxer so startup AAC priming cannot shift
+//     the warm rendition's audio and video clock relative to a cold seek.
 //   - Time-based splitting (-hls_flags split_by_time) cuts strictly by the
 //     clock so segments stay uniformly sized even when keyframes drift; see
 //     the inline comment and https://github.com/videojs/mux.js/pull/138 for
@@ -338,6 +352,12 @@ func SegmentArgs(s Spec, startID int, pattern string) []string {
 		"-hls_segment_type", "mpegts",
 		"-hls_segment_filename", pattern,
 	)
+	if s.RKMPP {
+		args = append(args, "-hls_segment_options", "avoid_negative_ts=disabled")
+	}
+	if s.AudioOnly {
+		return append(args, "-progress", "pipe:1", "-stats_period", "0.05", "-")
+	}
 
 	if !s.Copy {
 		// HLS may otherwise duplicate VFR frames to match the probed r_frame_rate.
@@ -359,6 +379,9 @@ func SegmentArgs(s Spec, startID int, pattern string) []string {
 		// at the start of the segment.
 		// https://github.com/videojs/mux.js/pull/138
 		if s.RKMPP {
+			// The HLS muxer creates a separate MPEG-TS context. The outer
+			// avoid_negative_ts option alone does not stop that child from
+			// shifting a warm job with negative AAC priming timestamps.
 			args = append(args, "-progress", "pipe:1", "-stats_period", "0.05", "-hls_flags", "independent_segments")
 		} else {
 			args = append(args, "-hls_flags", "split_by_time")

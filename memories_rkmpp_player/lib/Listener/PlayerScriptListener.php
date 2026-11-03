@@ -20,6 +20,8 @@ class PlayerScriptListener implements IEventListener
 
         $path = parse_url(Server::get(IRequest::class)->getRequestUri(), PHP_URL_PATH);
         if (is_string($path) && preg_match('~/apps/memories(?:/|$)~', $path)) {
+            Util::addScript('memories_rkmpp_player', 'settings');
+            Util::addStyle('memories_rkmpp_player', 'settings');
             Util::addScript('memories_rkmpp_player', 'player');
         }
     }

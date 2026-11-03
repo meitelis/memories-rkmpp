@@ -16,4 +16,11 @@ jobs:
       - name: Go formatting, race tests, vet, and build
         run: docker build --target build -f go-vod/Dockerfile.rkmpp go-vod
       - name: Player regression tests
-        run: node --test memories_rkmpp_player/js/player.test.cjs
+        run: node --test memories_rkmpp_player/js/*.test.cjs
+      - name: Connection-test contract checks
+        run: docker run --rm -v "$PWD:/source:ro" php:8.3-cli php /source/memories_rkmpp_player/tests/connection_test.php
+      - name: Bundled deployment checks
+        run: |
+          sh -n scripts/build-release.sh scripts/update-nextcloud-player.sh scripts/deploy.sh
+          node --test scripts/packaging.test.cjs
+          docker run --rm -v "$PWD:/source:ro" php:8.3-cli php -l /source/scripts/nextcloud-player-control.php

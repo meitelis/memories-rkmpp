@@ -51,6 +51,7 @@ type VideoInfo struct {
 // AudioInfo describes the first audio stream; empty when silent.
 type AudioInfo struct {
 	CodecName  string
+	Profile    string
 	Channels   int
 	SampleRate int
 	BitRate    int
@@ -84,7 +85,9 @@ func Probe(ctx context.Context, bin, fileURL, headers string) (VideoInfo, error)
 		"-v", "error",
 	}
 	if headers != "" {
-		args = append(args, "-headers", headers)
+		// Reuse the authenticated connection across Range seeks, including
+		// MP4 files whose media index is stored after their packet data.
+		args = append(args, "-multiple_requests", "1", "-seekable", "1", "-headers", headers)
 	}
 	args = append(args,
 		"-show_entries", "format:stream",
@@ -189,6 +192,7 @@ func probeAudio(streams []videoStream) AudioInfo {
 		}
 		return AudioInfo{
 			CodecName:  st.CodecName,
+			Profile:    st.Profile,
 			Channels:   st.Channels,
 			SampleRate: positiveInt(st.SampleRate),
 			BitRate:    positiveInt(st.BitRate),
@@ -290,7 +294,7 @@ func Keyframes(ctx context.Context, bin, fileURL, headers string) ([]float64, er
 		"-v", "error",
 	}
 	if headers != "" {
-		args = append(args, "-headers", headers)
+		args = append(args, "-multiple_requests", "1", "-seekable", "1", "-headers", headers)
 	}
 	args = append(args,
 		"-select_streams", "v:0",
