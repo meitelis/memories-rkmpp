@@ -107,8 +107,12 @@
   // to the same authenticated HLS master with RKMPP adaptive fallback.
   const directPlayback = new WeakMap();
   const DIRECT_STALL_MS = 6000;
+  const DIRECT_CHECK_MS = 1000;
+  const DIRECT_MIN_BUFFER = 4;
+  const DIRECT_RISK_HORIZON = 8;
 
   function stopDirectTimer(state) {
+    if (state?.monitorTimer != null) { clearInterval(state.monitorTimer); state.monitorTimer = null; }
     if (state?.stallTimer !== null && state?.stallTimer !== undefined) {
       clearTimeout(state.stallTimer);
       state.stallTimer = null;
@@ -137,6 +141,47 @@
       else player.play?.()?.catch?.(() => {});
     }, { once: true });
     player.src = { src: state.master, type: 'application/x-mpegurl' };
+  }
+
+  function bufferedAhead(media) {
+    if (!media?.buffered || !Number.isFinite(media.currentTime)) return 0;
+    for (let i = 0; i < media.buffered.length; i++) {
+      if (media.buffered.start(i) <= media.currentTime &&
+          media.buffered.end(i) >= media.currentTime) {
+        return Math.max(0, media.buffered.end(i) - media.currentTime);
+      }
+    }
+    return 0;
+  }
+
+  // Observe the actual playable buffer, rather than trusting a connection
+  // speed estimate. Falling buffer predicts starvation even for variable
+  // bitrate originals; two consecutive samples avoid reacting to jitter.
+  function directBufferRisk(previous, current, elapsedSeconds) {
+    if (!previous || !(elapsedSeconds > 0) || current < 0) return false;
+    const drain = (previous - current) / elapsedSeconds;
+    if (drain <= 0.25) return false;
+    return current < DIRECT_MIN_BUFFER ||
+      (current / drain < DIRECT_RISK_HORIZON && current < 12);
+  }
+
+  function monitorDirectPlayback(player, state) {
+    if (state.monitorTimer != null) return;
+    state.monitorTimer = setInterval(() => {
+      if (directPlayback.get(player) !== state || state.mode !== 'direct' ||
+          !player.isConnected) { stopDirectTimer(state); return; }
+      if (player.paused || player.seeking) { state.lastBuffer = null; state.riskCount = 0; return; }
+      const media = player.querySelector?.('video');
+      if (!media || media.readyState < 2) return;
+      const now = performance.now();
+      const ahead = bufferedAhead(media);
+      const risk = state.lastBuffer !== null &&
+        directBufferRisk(state.lastBuffer, ahead, (now - state.lastSample) / 1000);
+      state.riskCount = risk ? state.riskCount + 1 : 0;
+      state.lastBuffer = ahead;
+      state.lastSample = now;
+      if (state.riskCount >= 2) fallbackToHLS(player, state, 'predicted buffer exhaustion');
+    }, DIRECT_CHECK_MS);
   }
 
   function scheduleDirectStall(player) {
@@ -172,7 +217,7 @@
     if (preferences.codec === 'h264') return;
     // Browser support is checked by the real media element, not MSE probing:
     // successful MediaSource HEVC support does not guarantee MP4 playback.
-    const state = { ...candidate, mode: 'direct', stallTimer: null };
+    const state = { ...candidate, mode: 'direct', stallTimer: null, monitorTimer: null, lastBuffer: null, lastSample: 0, riskCount: 0 };
     directPlayback.set(player, state);
     const time = playbackTime(player);
     const shouldPlay = !player.paused || !!player.autoPlay || !!player.autoplay;
@@ -184,6 +229,7 @@
     }, { once: true });
     console.info('[Memories RKMPP] Trying original file before HLS:', candidate.original);
     player.src = { src: candidate.original, type: 'video/mp4' };
+    monitorDirectPlayback(player, state);
   }
 
   function playbackPreferences(value) {
@@ -214,7 +260,7 @@
   }
 
   if (typeof document === 'undefined' && typeof module === 'object' && module.exports) {
-    module.exports = { shortEdge, initialLevel, qualityText, updateQualityText, manifestURL, directSource, initialLevelForThroughput, preventiveLevel, playbackPreferences, prefersHEVC, bufferSeconds };
+    module.exports = { shortEdge, initialLevel, qualityText, updateQualityText, manifestURL, directSource, initialLevelForThroughput, preventiveLevel, directBufferRisk, playbackPreferences, prefersHEVC, bufferSeconds };
     return;
   }
   if (!/\/apps\/memories(?:\/|$)/.test(location.pathname)) return;
