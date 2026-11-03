@@ -281,11 +281,51 @@
     else if (list) list.append(entry);
     else navigation.append(entry);
   }
+
+  function installViewerControls() {
+    const bars = new Set(document.querySelectorAll('.memories-viewer.fully-opened.is-video > .inner > .top-bar'));
+    for (const launch of document.querySelectorAll('.memories-playback-viewer-button')) {
+      if (!bars.has(launch.parentElement)) launch.remove();
+    }
+    for (const bar of bars) {
+      if ([...bar.children].some((child) => child.classList.contains('memories-playback-viewer-button'))) continue;
+      const launch = button('', 'memories-playback-viewer-button', (event) => {
+        event.preventDefault(); event.stopPropagation(); launch.focus(); open();
+      });
+      launch.setAttribute('aria-label', 'Playback settings');
+      launch.setAttribute('title', 'Playback settings');
+      launch.setAttribute('aria-haspopup', 'dialog');
+      launch.setAttribute('aria-controls', 'memories-playback-dialog');
+      const icon = element('span', '', '\u2699\uFE0E');
+      icon.setAttribute('aria-hidden', 'true'); launch.append(icon);
+      // Keep PhotoSwipe and video gestures from interpreting a toolbar press.
+      for (const name of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'touchstart', 'touchend', 'dblclick']) {
+        launch.addEventListener(name, (event) => event.stopPropagation());
+      }
+      for (const name of ['keydown', 'keyup']) {
+        launch.addEventListener(name, (event) => {
+          if (event.key === 'Enter' || event.key === ' ') event.stopPropagation();
+        });
+      }
+      // This is our own toolbar sibling, outside Vue's action-items children.
+      bar.append(launch);
+    }
+  }
+
+  function changesViewer(record) {
+    if (record.type === 'attributes') return record.target.matches?.('.memories-viewer');
+    const target = record.target.nodeType === 1 ? record.target : record.target.parentElement;
+    return target?.closest?.('.memories-viewer') || [...record.addedNodes, ...record.removedNodes].some((node) =>
+      node.nodeType === 1 && (node.matches('.memories-viewer') || node.querySelector('.memories-viewer')));
+  }
+
   function mount() {
     installNavigation();
-    new MutationObserver(() => {
+    installViewerControls();
+    new MutationObserver((records) => {
       if (!document.getElementById('memories-playback-settings-entry')) installNavigation();
-    }).observe(document.documentElement, { childList: true, subtree: true });
+      if (records.some(changesViewer)) installViewerControls();
+    }).observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['class'] });
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', mount, { once: true });
   else mount();

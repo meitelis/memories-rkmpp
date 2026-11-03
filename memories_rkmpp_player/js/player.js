@@ -81,7 +81,7 @@
   const marker = Symbol.for('memories-rkmpp-player');
   if (window[marker]) return;
   window[marker] = true;
-  console.info('[Memories RKMPP] Player helper 0.3.0 active');
+  console.info('[Memories RKMPP] Player helper 0.3.1 active');
 
   const seen = new WeakSet();
   const players = new WeakSet();

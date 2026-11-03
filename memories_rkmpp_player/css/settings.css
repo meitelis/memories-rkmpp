@@ -64,6 +64,17 @@
   color: var(--color-main-text, #222); font: inherit; font-weight: 500; cursor: pointer;
 }
 .memories-playback-nav-button:hover { background: var(--color-background-hover, #eee); }
+.memories-viewer.is-video > .inner > .top-bar > .memories-playback-viewer-button {
+  display: inline-flex; align-items: center; justify-content: center; align-self: center;
+  box-sizing: border-box; flex: 0 0 44px; width: 44px; height: 44px; min-width: 44px; min-height: 44px;
+  margin: 0 4px; padding: 0; border: 0; border-radius: 50%; background: transparent;
+  color: #fff; font: inherit; font-size: 26px; line-height: 1; cursor: pointer;
+  pointer-events: auto; touch-action: manipulation;
+}
+.memories-viewer.is-video > .inner > .top-bar > .memories-playback-viewer-button:hover { background: #ffffff26; }
+.memories-viewer.is-video > .inner > .top-bar > .memories-playback-viewer-button:focus-visible {
+  outline: 2px solid #fff; outline-offset: 2px;
+}
 @media (max-width: 480px) {
   .memories-playback-content { padding: 20px; }
   .memories-playback-header h2 { font-size: 21px; }
