@@ -1,7 +1,6 @@
 package core
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"hash/fnv"
@@ -563,38 +562,11 @@ func (m *Manager) ServeFullVideo(w http.ResponseWriter, r *http.Request, quality
 }
 
 func (m *Manager) ffprobe() error {
-	if probe, ok := LoadCachedProbe(m.c.CacheDir(), m.fileid, m.etag); ok {
-		log.Printf("%s: probe cache hit", m.id)
-		m.probe = probe
-	} else {
-		log.Printf("%s: probe cache miss", m.id)
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-
-		info, err := ffmpeg.Probe(ctx, m.c.FFprobe, m.ffmpegInput(), m.inputHeaders())
-		if err != nil {
-			return err
-		}
-
-		m.probe = &ProbeVideoData{
-			Width:          info.Width,
-			Height:         info.Height,
-			Duration:       info.Duration,
-			FrameRate:      info.FrameRate,
-			FrameRateExact: info.FrameRateExact,
-			PixelFormat:    info.PixelFormat,
-			CodecName:      info.CodecName,
-			BitRate:        info.BitRate,
-			Rotation:       info.Rotation,
-			HDR:            info.HDR,
-			BitDepth:       info.BitDepth,
-			Audio:          info.Audio,
-		}
-
-		if err := StoreCachedProbe(m.c.CacheDir(), m.fileid, m.etag, m.probe); err != nil {
-			log.Printf("%s: probe cache store failed: %v", m.id, err)
-		}
+	probe, err := m.probeVideo()
+	if err != nil {
+		return err
 	}
+	m.probe = probe
 
 	// Copy eligibility is cheap (codec + rotation); keyframes come later
 	// via EnsureCopySegments on direct.m3u8, so creation stays fast.
@@ -617,23 +589,9 @@ func (m *Manager) ffprobe() error {
 // probeCopy extracts keyframes and derives the copy grid.
 // Lock-free; EnsureCopySegments publishes the result under copyMu.
 func (m *Manager) probeCopy() ([]ffmpeg.Segment, error) {
-	cachePath := KeyframeCachePath(m.c.CacheDir(), m.fileid)
-	if keys, ok := LoadCachedKeyframes(m.c.CacheDir(), m.fileid, m.etag); ok {
-		log.Printf("%s: keyframe cache hit %s", m.id, cachePath)
-		segs := ffmpeg.CopySegments(keys, m.probe.Duration, m.tc.ChunkSize)
-		if len(segs) == 0 {
-			return nil, fmt.Errorf("no keyframe grid for file %d", m.fileid)
-		}
-		return segs, nil
-	}
-	log.Printf("%s: keyframe cache miss %s", m.id, cachePath)
-
-	keys, err := ffmpeg.Keyframes(context.Background(), m.c.FFprobe, m.ffmpegInput(), m.inputHeaders())
+	keys, err := m.probeKeyframes()
 	if err != nil {
 		return nil, err
-	}
-	if err := StoreCachedKeyframes(m.c.CacheDir(), m.fileid, m.etag, keys); err != nil {
-		log.Printf("%s: keyframe cache store failed: %v", m.id, err)
 	}
 	segs := ffmpeg.CopySegments(keys, m.probe.Duration, m.tc.ChunkSize)
 	if len(segs) == 0 {

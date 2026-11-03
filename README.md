@@ -10,6 +10,8 @@ Supported SDR sources use MPP decoding and RGA scaling/rotation. The default out
 
 The backend retains the shared rendition clock, independently decodable HLS segments, bounded bitrate, six-second startup fragment, three-second later fragments, direct cold seeks, and hardware-safe buffering from the previous custom build. Inactive encoders are released after 15 seconds. Audio timestamps are preserved; a video-only tail is valid when its audio has already ended.
 
+R5 shares cold source and keyframe analysis across viewers while keeping their playback state and credentials separate. Concurrent requests for the same cold fragment share one encoder start. Startup fragments are validated before sending and read once when delivered. A failed shared probe is retried with the waiting viewer's own credentials.
+
 The `memories_rkmpp_player` companion app checks HEVC MediaSource support before requesting the master playlist, starts Auto at the highest available short edge up to 1080p, and leaves adaptive quality enabled. Auto respects the display’s actual pixel density without an artificial 1.5× ceiling; available quality still depends on player size, measured bandwidth, and dropped frames. It corrects portrait quality labels using the shorter displayed edge, without altering HLS dimensions or quality selection. Manual quality changes preserve buffered video and apply to newly loaded fragments, so the displayed resolution may change after the existing buffer plays. It retries once with AVC if a fatal codec error contradicts the browser's support report. It does not modify or rebuild signed Memories assets. Without the helper, negotiation uses Memories' file-playback capability report, which can differ from MSE support.
 
 ## Build and connect
@@ -25,7 +27,7 @@ cd memories-rkmpp
 2. Build on the ARM64 Docker host:
 
    ```sh
-   docker build -f go-vod/Dockerfile.rkmpp -t local/memories-go-vod:rkmpp-10.2.0-v0.6.3-r4 go-vod
+   docker build -f go-vod/Dockerfile.rkmpp -t local/memories-go-vod:rkmpp-10.2.0-v0.6.3-r5 go-vod
    docker compose up -d
    ```
 

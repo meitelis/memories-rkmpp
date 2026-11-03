@@ -124,36 +124,51 @@ func (s *Stream) Stop() {
 }
 
 func (s *Stream) ServeChunk(w http.ResponseWriter, id int) error {
+	status, err := s.ensureChunkReady(id)
+	if err != nil {
+		http.Error(w, "Could not start transcoder", http.StatusBadGateway)
+		return nil
+	}
+	if status != http.StatusOK {
+		w.WriteHeader(status)
+		return nil
+	}
+	s.returnChunk(w, id)
+	return nil
+}
+
+// ensureChunkReady chooses and starts an encoder under the same lock. Requests
+// for the same cold chunk then share its encoder and completion signal.
+func (s *Stream) ensureChunkReady(id int) (int, error) {
 	s.mutex.Lock()
 	s.inactive = 0
 	s.checkGoal(id)
 
 	chunk, ok := s.chunks[id]
-	if s.coderFailed && (!ok || !chunk.done) {
-		s.mutex.Unlock()
-		s.restartAtChunk(w, id)
-		return nil
-	}
+	restart := s.coderFailed && (!ok || !chunk.done)
 	if !ok {
 		// Restart unless a nearby chunk shows the transcode is close
-		restart := true
+		restart = true
 		for i := id - 1; i >= id-s.c.LookBehind && i >= 0; i-- {
-			if _, ok := s.chunks[i]; ok {
+			if _, ok := s.chunks[i]; ok && !s.coderFailed {
 				restart = false
 				break
 			}
 		}
-		if restart {
+	}
+	if restart {
+		var err error
+		chunk, err = s.restartAtChunkLocked(id)
+		if err != nil {
 			s.mutex.Unlock()
-			s.restartAtChunk(w, id)
-			return nil
+			return http.StatusBadGateway, err
 		}
+	} else if !ok {
 		chunk = s.createChunk(id)
 	}
 	s.mutex.Unlock()
 
-	s.waitForChunk(w, chunk)
-	return nil
+	return s.waitForChunkReady(chunk), nil
 }
 
 func (s *Stream) ServeFullVideo(w http.ResponseWriter, r *http.Request) error {
@@ -245,24 +260,39 @@ func (s *Stream) pruneChunk(id int) {
 }
 
 func (s *Stream) returnChunk(w http.ResponseWriter, id int) {
-	filename := s.getTsPath(id)
-	f, err := os.Open(filename)
-	if err != nil {
-		log.Println(err)
-		w.WriteHeader(http.StatusInternalServerError)
+	f, status := s.openChunk(id)
+	if status != http.StatusOK {
+		w.WriteHeader(status)
 		return
 	}
 	defer f.Close()
-	info, err := f.Stat()
-	if err != nil || info.Size() == 0 {
-		w.WriteHeader(http.StatusBadGateway)
-		return
-	}
 	w.Header().Set("Content-Type", "video/MP2T")
 	io.Copy(w, f)
 }
 
+func (s *Stream) openChunk(id int) (*os.File, int) {
+	f, err := os.Open(s.getTsPath(id))
+	if err != nil {
+		log.Println(err)
+		return nil, http.StatusInternalServerError
+	}
+	info, err := f.Stat()
+	if err != nil || info.Size() == 0 {
+		f.Close()
+		return nil, http.StatusBadGateway
+	}
+	return f, http.StatusOK
+}
+
 func (s *Stream) waitForChunk(w http.ResponseWriter, chunk *Chunk) {
+	if status := s.waitForChunkReady(chunk); status != http.StatusOK {
+		w.WriteHeader(status)
+		return
+	}
+	s.returnChunk(w, chunk.id)
+}
+
+func (s *Stream) waitForChunkReady(chunk *Chunk) int {
 	s.mutex.Lock()
 	done := chunk.done
 	doneCh := chunk.doneCh
@@ -270,8 +300,7 @@ func (s *Stream) waitForChunk(w http.ResponseWriter, chunk *Chunk) {
 	s.mutex.Unlock()
 
 	if done {
-		s.returnChunk(w, chunk.id)
-		return
+		return http.StatusOK
 	}
 
 	select {
@@ -289,26 +318,23 @@ func (s *Stream) waitForChunk(w http.ResponseWriter, chunk *Chunk) {
 	s.mutex.Unlock()
 
 	if finished {
-		s.returnChunk(w, chunk.id)
-		return
+		return http.StatusOK
 	}
 
 	// Check if coder was changed
 	if restarted {
-		w.WriteHeader(http.StatusConflict)
-		return
+		return http.StatusConflict
 	}
 	if failed {
-		w.WriteHeader(http.StatusBadGateway)
-		return
+		return http.StatusBadGateway
 	}
 
 	// Return timeout error
-	w.WriteHeader(http.StatusRequestTimeout)
+	return http.StatusRequestTimeout
 }
 
-func (s *Stream) restartAtChunk(w http.ResponseWriter, id int) {
-	s.mutex.Lock()
+// restartAtChunkLocked requires s.mutex and leaves it held.
+func (s *Stream) restartAtChunkLocked(id int) (*Chunk, error) {
 	// Stop current transcoder
 	s.clear()
 
@@ -319,13 +345,9 @@ func (s *Stream) restartAtChunk(w http.ResponseWriter, id int) {
 	if err := s.transcode(id); err != nil {
 		delete(s.chunks, id)
 		chunk.signal(false)
-		s.mutex.Unlock()
-		http.Error(w, "Could not start transcoder", http.StatusBadGateway)
-		return
+		return nil, err
 	}
-	s.mutex.Unlock()
-
-	s.waitForChunk(w, chunk) // this is also a request
+	return chunk, nil
 }
 
 func (s *Stream) spec(startAt float64, isHls bool) ffmpeg.Spec {
@@ -557,31 +579,42 @@ func (s *Stream) monitorExit(coder *exec.Cmd, done chan struct{}) {
 	}
 }
 
-// Readiness checks discard the body so no partial startup fragment is sent.
-// Files stay on disk; the joined response is streamed without a video-sized buffer.
-type readinessWriter struct {
-	header http.Header
-	status int
-}
-
-func (w *readinessWriter) Header() http.Header         { return w.header }
-func (w *readinessWriter) WriteHeader(status int)      { w.status = status }
-func (w *readinessWriter) Write(p []byte) (int, error) { return len(p), nil }
-
 func (s *Stream) ServeStartupChunk(w http.ResponseWriter) {
 	parts := 1
 	if s.m.Duration().Seconds() > float64(s.m.tc.ChunkSize) {
 		parts = 2
 	}
 	for i := 0; i < parts; i++ {
-		ready := &readinessWriter{header: make(http.Header), status: http.StatusOK}
-		s.ServeChunk(ready, i)
-		if ready.status != http.StatusOK {
-			w.WriteHeader(ready.status)
+		status, err := s.ensureChunkReady(i)
+		if err != nil {
+			http.Error(w, "Could not start transcoder", http.StatusBadGateway)
+			return
+		}
+		if status != http.StatusOK {
+			w.WriteHeader(status)
 			return
 		}
 	}
+	// Open and validate every part before writing a response. Holding the files
+	// open also keeps them readable if supervision prunes their paths meanwhile.
+	files := make([]*os.File, 0, parts)
+	defer func() {
+		for _, f := range files {
+			f.Close()
+		}
+	}()
 	for i := 0; i < parts; i++ {
-		s.returnChunk(w, i)
+		f, status := s.openChunk(i)
+		if status != http.StatusOK {
+			w.WriteHeader(status)
+			return
+		}
+		files = append(files, f)
+	}
+	w.Header().Set("Content-Type", "video/MP2T")
+	for _, f := range files {
+		if _, err := io.Copy(w, f); err != nil {
+			return
+		}
 	}
 }
