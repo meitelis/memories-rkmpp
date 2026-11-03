@@ -32,6 +32,19 @@
     return best >= 0 ? best : lowest;
   }
 
+  // A conservative, buffer-aware downshift: avoid waiting for an actual
+  // stall before lowering the next requested HLS rendition.
+  function preventiveLevel(levels, currentIndex, throughputBps, bufferSeconds) {
+    if (!Array.isArray(levels) || !levels.length || currentIndex < 0 ||
+        currentIndex >= levels.length || !Number.isFinite(throughputBps) ||
+        throughputBps <= 0) return currentIndex;
+    const current = Number(levels[currentIndex].maxBitrate || levels[currentIndex].bitrate);
+    if (!Number.isFinite(current) || current <= 0) return currentIndex;
+    const margin = bufferSeconds < 5 ? 0.6 : bufferSeconds < 10 ? 0.7 : 0.8;
+    if (current <= throughputBps * margin) return currentIndex;
+    return initialLevelForThroughput(levels, throughputBps, margin);
+  }
+
   // Vidstack 1.x labels quality by height. Change presentation only: HLS
   // dimensions, quality IDs, selection, and aspect ratio remain untouched.
   function qualityText(text, level) {
@@ -201,7 +214,7 @@
   }
 
   if (typeof document === 'undefined' && typeof module === 'object' && module.exports) {
-    module.exports = { shortEdge, initialLevel, qualityText, updateQualityText, manifestURL, directSource, initialLevelForThroughput, playbackPreferences, prefersHEVC, bufferSeconds };
+    module.exports = { shortEdge, initialLevel, qualityText, updateQualityText, manifestURL, directSource, initialLevelForThroughput, preventiveLevel, playbackPreferences, prefersHEVC, bufferSeconds };
     return;
   }
   if (!/\/apps\/memories(?:\/|$)/.test(location.pathname)) return;
@@ -433,6 +446,30 @@
     if (events.FRAG_LOADED) hls.on(events.FRAG_LOADED, () => {
       if (preferences.buffer === 'auto') budget(hls, hls.currentLevel >= 0 ? hls.currentLevel : 0);
     });
+    // Evaluate before buffer exhaustion, not after a fatal stall.
+    // This only downshifts: let hls.js ABR decide when upgrades are safe.
+    const preventStarvation = () => {
+      if (active?.hls !== hls || !hls.autoLevelEnabled) return;
+      const media = player.querySelector?.('video');
+      let buffered = 0;
+      if (media?.buffered && Number.isFinite(media.currentTime)) {
+        for (let i = 0; i < media.buffered.length; i++) {
+          if (media.buffered.start(i) <= media.currentTime &&
+              media.buffered.end(i) >= media.currentTime) {
+            buffered = media.buffered.end(i) - media.currentTime;
+            break;
+          }
+        }
+      }
+      const index = hls.loadLevel >= 0 ? hls.loadLevel : hls.currentLevel;
+      const safe = preventiveLevel(hls.levels, index, hls.bandwidthEstimate, buffered);
+      if (safe >= 0 && safe !== index) {
+        hls.nextAutoLevel = safe;
+        console.info('[Memories RKMPP] Predictive HLS downshift', index, '->', safe);
+      }
+    };
+    if (events.FRAG_LOADED) hls.on(events.FRAG_LOADED, preventStarvation);
+    if (events.LEVEL_LOADED) hls.on(events.LEVEL_LOADED, preventStarvation);
     hls.on(events.LEVEL_SWITCHED, (_, data) => {
       if (active?.hls === hls) {
         active.quality = hls.levels[data.level];
