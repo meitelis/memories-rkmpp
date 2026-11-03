@@ -48,6 +48,18 @@
     return initialLevelForThroughput(levels, throughputBps, margin);
   }
 
+  // Estimate seconds until starvation from both delivery rate and actual
+  // buffer trend. The latter is authoritative for variable bitrate files.
+  function starvationSeconds(buffer, bitrate, throughput, drainPerSecond) {
+    if (!(Number.isFinite(buffer) && buffer > 0)) return 0;
+    const measuredDrain = Number.isFinite(drainPerSecond) && drainPerSecond > 0.05 ? drainPerSecond : 0;
+    const estimatedDrain = Number.isFinite(bitrate) && bitrate > 0 &&
+      Number.isFinite(throughput) && throughput > 0 ?
+      Math.max(0, 1 - throughput / bitrate) : 0;
+    const drain = Math.max(measuredDrain, estimatedDrain);
+    return drain > 0 ? buffer / drain : Infinity;
+  }
+
   // Vidstack 1.x labels quality by height. Change presentation only: HLS
   // dimensions, quality IDs, selection, and aspect ratio remain untouched.
   function qualityText(text, level) {
@@ -109,6 +121,16 @@
   // playable; real decoder errors or sustained buffer starvation switch back
   // to the same authenticated HLS master with RKMPP adaptive fallback.
   const directPlayback = new WeakMap();
+  const bandwidthSamples = new Map();
+  const BANDWIDTH_TTL_MS = 15000;
+  function rememberBandwidth(value) {
+    if (!Number.isFinite(value) || value <= 0) return;
+    bandwidthSamples.set(location.origin, { value, time: Date.now() });
+  }
+  function recentBandwidth() {
+    const entry = bandwidthSamples.get(location.origin);
+    return entry && Date.now() - entry.time < BANDWIDTH_TTL_MS ? entry.value : 0;
+  }
   const DIRECT_STALL_MS = 6000;
   const DIRECT_CHECK_MS = 1000;
 
@@ -261,7 +283,7 @@
   }
 
   if (typeof document === 'undefined' && typeof module === 'object' && module.exports) {
-    module.exports = { shortEdge, initialLevel, qualityText, updateQualityText, manifestURL, directSource, initialLevelForThroughput, preventiveLevel, directBufferRisk, playbackPreferences, prefersHEVC, bufferSeconds };
+    module.exports = { shortEdge, initialLevel, qualityText, updateQualityText, manifestURL, directSource, initialLevelForThroughput, preventiveLevel, directBufferRisk, starvationSeconds, playbackPreferences, prefersHEVC, bufferSeconds };
     return;
   }
   if (!/\/apps\/memories(?:\/|$)/.test(location.pathname)) return;
@@ -478,7 +500,7 @@
       if (player.qualities) player.qualities.switch = hls.audioTracks?.some((track) => track.url) ? 'next' : 'load';
       const resume = pendingRestore.get(player);
       if (hls.levels.length && (resume || !player.currentTime)) {
-        const index = initialLevelForThroughput(hls.levels, hls.bandwidthEstimate);
+        const index = initialLevelForThroughput(hls.levels, recentBandwidth() || hls.bandwidthEstimate);
         hls.startLevel = index;
         hls.nextAutoLevel = index;
         budget(hls, index);
@@ -491,6 +513,7 @@
     hls.on(events.MANIFEST_PARSED, initialize);
     hls.on(events.LEVEL_SWITCHING, (_, data) => budget(hls, data.level));
     if (events.FRAG_LOADED) hls.on(events.FRAG_LOADED, () => {
+      rememberBandwidth(hls.bandwidthEstimate);
       if (preferences.buffer === 'auto') budget(hls, hls.currentLevel >= 0 ? hls.currentLevel : 0);
     });
     // Evaluate before buffer exhaustion, not after a fatal stall.
@@ -509,7 +532,12 @@
         }
       }
       const index = hls.loadLevel >= 0 ? hls.loadLevel : hls.currentLevel;
-      const safe = preventiveLevel(hls.levels, index, hls.bandwidthEstimate, buffered);
+      const throughput = hls.bandwidthEstimate;
+      const level = hls.levels[index];
+      const bitrate = Number(level?.maxBitrate || level?.bitrate);
+      const secondsToEmpty = starvationSeconds(buffered, bitrate, throughput, 0);
+      const safe = preventiveLevel(hls.levels, index, throughput,
+        secondsToEmpty < 12 ? Math.min(buffered, 4) : buffered);
       if (safe >= 0 && safe !== index) {
         hls.nextAutoLevel = safe;
         console.info('[Memories RKMPP] Predictive HLS downshift', index, '->', safe);
