@@ -16,6 +16,22 @@
     return index;
   }
 
+  // Select the highest actual advertised rendition bitrate that fits a
+  // measured bandwidth budget. Do not infer bitrate from resolution.
+  function initialLevelForThroughput(levels, throughputBps, safety = 0.7) {
+    if (!Array.isArray(levels) || !levels.length) return 0;
+    if (!(Number.isFinite(throughputBps) && throughputBps > 0)) return initialLevel(levels);
+    const budget = throughputBps * safety;
+    let best = -1, bestRate = -1, lowest = 0, lowestRate = Infinity;
+    levels.forEach((level, index) => {
+      const rate = Number(level.maxBitrate || level.bitrate);
+      if (!Number.isFinite(rate) || rate <= 0) return;
+      if (rate < lowestRate) { lowestRate = rate; lowest = index; }
+      if (rate <= budget && rate > bestRate) { bestRate = rate; best = index; }
+    });
+    return best >= 0 ? best : lowest;
+  }
+
   // Vidstack 1.x labels quality by height. Change presentation only: HLS
   // dimensions, quality IDs, selection, and aspect ratio remain untouched.
   function qualityText(text, level) {
@@ -185,7 +201,7 @@
   }
 
   if (typeof document === 'undefined' && typeof module === 'object' && module.exports) {
-    module.exports = { shortEdge, initialLevel, qualityText, updateQualityText, manifestURL, directSource, playbackPreferences, prefersHEVC, bufferSeconds };
+    module.exports = { shortEdge, initialLevel, qualityText, updateQualityText, manifestURL, directSource, initialLevelForThroughput, playbackPreferences, prefersHEVC, bufferSeconds };
     return;
   }
   if (!/\/apps\/memories(?:\/|$)/.test(location.pathname)) return;
@@ -402,7 +418,7 @@
       if (player.qualities) player.qualities.switch = hls.audioTracks?.some((track) => track.url) ? 'next' : 'load';
       const resume = pendingRestore.get(player);
       if (hls.levels.length && (resume || !player.currentTime)) {
-        const index = initialLevel(hls.levels);
+        const index = initialLevelForThroughput(hls.levels, hls.bandwidthEstimate);
         hls.startLevel = index;
         hls.nextAutoLevel = index;
         budget(hls, index);
