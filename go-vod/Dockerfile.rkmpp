@@ -45,4 +45,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["/ap
 ENTRYPOINT ["/app/go-vod"]
 CMD ["-version-monitor"]
 
-LABEL org.opencontainers.image.version="memories-10.2.0-govod-0.6.3-rkmpp-r5"
+LABEL org.opencontainers.image.version="memories-10.2.0-govod-0.6.3-rkmpp-r6"

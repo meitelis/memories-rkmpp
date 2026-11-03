@@ -195,7 +195,9 @@ func NewManager(a NewManagerArgs) (*Manager, error) {
 	}
 
 	rkmpp := m.c.RKMPP
+	minRKMPPBitrate := 0
 	if rkmpp {
+		minRKMPPBitrate = ffmpeg.RKMPPMinBitrate(m.probe.Audio)
 		refBitrate = m.probe.BitRate
 		if m.probe.CodecName != CODEC_H264 {
 			refBitrate *= 2
@@ -212,6 +214,7 @@ func NewManager(a NewManagerArgs) (*Manager, error) {
 		if m.OutputCodec() == "hevc" {
 			refBitrate = max(256000, refBitrate*2/3)
 		}
+		refBitrate = max(refBitrate, minRKMPPBitrate)
 	}
 
 	// Get the multiplier for the reference bitrate.
@@ -248,7 +251,7 @@ func NewManager(a NewManagerArgs) (*Manager, error) {
 			// Round to the nearest even width instead of dropping the rendition
 			// whenever its aspect ratio happens to produce an odd pixel count.
 			stream.width = int(math.Round(float64(lgDim)*float64(stream.height)/float64(smDim)/2)) * 2
-			stream.bitrate = min(stream.bitrate, balancedRKMPPBitrate(stream.width, stream.height, m.FrameRate()))
+			stream.bitrate = max(minRKMPPBitrate, min(stream.bitrate, balancedRKMPPBitrate(stream.width, stream.height, m.FrameRate())))
 		}
 
 		// remove invalid streams

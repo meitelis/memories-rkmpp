@@ -1,6 +1,7 @@
 package core
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -101,6 +102,7 @@ func TestProbeCacheRoundtrip(t *testing.T) {
 		Rotation: 90, HDR: true, BitDepth: 10,
 		Audio: ffmpeg.AudioInfo{
 			CodecName:  "aac",
+			Profile:    "LC",
 			Channels:   2,
 			SampleRate: 48000,
 			BitRate:    128000,
@@ -112,6 +114,51 @@ func TestProbeCacheRoundtrip(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, probe, got)
 	require.Equal(t, ProbeCacheFile, filepath.Base(ProbeCachePath(dir, 7)))
+}
+
+func TestProbeSchemaUpgradePreservesUnchangedSiblingCaches(t *testing.T) {
+	dir := t.TempDir()
+	keys := []float64{0, 4, 8}
+	require.NoError(t, StoreCachedKeyframes(dir, 7, "same-etag", keys))
+	siblings := map[string][]byte{
+		StoryboardPlanFile:   []byte(`{"etag":"same-etag","plan":{}}`),
+		ffmpeg.SpriteName(0): []byte("existing sprite"),
+	}
+	for name, data := range siblings {
+		require.NoError(t, os.WriteFile(filepath.Join(FileCacheDir(dir, 7), name), data, 0644))
+	}
+	legacy, err := json.Marshal(probePlan{V: probeCacheVersion - 1, Etag: "same-etag", Probe: ProbeVideoData{Width: 640, Height: 480}})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(ProbeCachePath(dir, 7), legacy, 0644))
+
+	_, ok := LoadCachedProbe(dir, 7, "same-etag")
+	require.False(t, ok, "old audio metadata needs a new source probe")
+	gotKeys, ok := LoadCachedKeyframes(dir, 7, "same-etag")
+	require.True(t, ok)
+	require.Equal(t, keys, gotKeys)
+	for name, expected := range siblings {
+		got, err := os.ReadFile(filepath.Join(FileCacheDir(dir, 7), name))
+		require.NoError(t, err)
+		require.Equal(t, expected, got)
+	}
+
+	updated := &ProbeVideoData{Width: 640, Height: 480, Audio: ffmpeg.AudioInfo{CodecName: "aac", Profile: "LC", Channels: 2, SampleRate: 48000, BitRate: 166915}}
+	require.NoError(t, StoreCachedProbe(dir, 7, "same-etag", updated))
+	got, ok := LoadCachedProbe(dir, 7, "same-etag")
+	require.True(t, ok)
+	require.Equal(t, updated, got)
+}
+
+func TestProbeEtagMismatchStillEvictsSiblingsOnOldSchema(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, StoreCachedKeyframes(dir, 7, "old-etag", []float64{0, 4}))
+	legacy, err := json.Marshal(probePlan{V: probeCacheVersion - 1, Etag: "old-etag"})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(ProbeCachePath(dir, 7), legacy, 0644))
+	_, ok := LoadCachedProbe(dir, 7, "new-etag")
+	require.False(t, ok)
+	_, err = os.Stat(FileCacheDir(dir, 7))
+	require.True(t, os.IsNotExist(err), "changed media invalidates every sibling artifact")
 }
 
 func TestManagerProbeCache(t *testing.T) {

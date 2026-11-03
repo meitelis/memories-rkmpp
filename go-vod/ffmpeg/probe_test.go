@@ -71,11 +71,11 @@ func TestParseProbeJSONBitDepth(t *testing.T) {
 func TestParseProbeJSONAudio(t *testing.T) {
 	withAudio, err := ParseProbeJSON([]byte(`{"streams":[` +
 		`{"codec_type":"video","codec_name":"h264","width":64,"height":64},` +
-		`{"codec_type":"audio","codec_name":"aac","channels":2,` +
+		`{"codec_type":"audio","codec_name":"aac","profile":"LC","channels":2,` +
 		`"sample_rate":"48000","bit_rate":"128000"}]}`))
 	require.NoError(t, err)
 	require.Equal(t, "h264", withAudio.CodecName)
-	require.Equal(t, AudioInfo{CodecName: "aac", Channels: 2, SampleRate: 48000, BitRate: 128000}, withAudio.Audio)
+	require.Equal(t, AudioInfo{CodecName: "aac", Profile: "LC", Channels: 2, SampleRate: 48000, BitRate: 128000}, withAudio.Audio)
 
 	silent, err := ParseProbeJSON([]byte(`{"streams":[` +
 		`{"codec_type":"video","codec_name":"h264","width":64,"height":64}]}`))
@@ -85,6 +85,19 @@ func TestParseProbeJSONAudio(t *testing.T) {
 	_, err = ParseProbeJSON([]byte(`{"streams":[` +
 		`{"codec_type":"audio","codec_name":"aac"}]}`))
 	require.Error(t, err)
+}
+
+func TestParseProbeJSONPreservesAudioProfileWithoutAssumingLC(t *testing.T) {
+	for _, profile := range []string{"LC", "HE-AAC", "HE-AACv2", ""} {
+		t.Run(profile, func(t *testing.T) {
+			info, err := ParseProbeJSON([]byte(`{"streams":[` +
+				`{"codec_type":"video","codec_name":"h264"},` +
+				`{"codec_type":"audio","codec_name":"aac","profile":"` + profile +
+				`","channels":2,"sample_rate":"48000","bit_rate":"166915"}]}`))
+			require.NoError(t, err)
+			require.Equal(t, profile, info.Audio.Profile)
+		})
+	}
 }
 
 func TestParseKeyframes(t *testing.T) {
