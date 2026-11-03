@@ -411,3 +411,12 @@ test('initial rendition uses actual advertised bitrate, not fixed resolution', (
   assert.equal(initialLevelForThroughput([{ height: 720, bitrate: 3000000, maxBitrate: 7000000 },
     { height: 1080, bitrate: 5000000, maxBitrate: 9000000 }], 11000000), 0);
 });
+
+const { preventiveLevel } = require('./player.js');
+test('predictive quality reduces bitrate before buffer exhaustion', () => {
+  const levels = [{ bitrate: 12000000 }, { bitrate: 6000000 }, { bitrate: 2000000 }];
+  assert.equal(preventiveLevel(levels, 0, 9000000, 4), 1);
+  assert.equal(preventiveLevel(levels, 1, 9000000, 12), 1);
+  assert.equal(preventiveLevel(levels, 0, 2000000, 3), 2);
+  assert.equal(preventiveLevel(levels, 0, 0, 3), 0);
+});
