@@ -1,6 +1,9 @@
 (() => {
   'use strict';
 
+  const DIRECT_MIN_BUFFER = 4;
+  const DIRECT_RISK_HORIZON = 8;
+
   function shortEdge(level) {
     const { width, height } = level;
     return width > 0 && height > 0 ? Math.min(width, height) : 0;
@@ -108,8 +111,6 @@
   const directPlayback = new WeakMap();
   const DIRECT_STALL_MS = 6000;
   const DIRECT_CHECK_MS = 1000;
-  const DIRECT_MIN_BUFFER = 4;
-  const DIRECT_RISK_HORIZON = 8;
 
   function stopDirectTimer(state) {
     if (state?.monitorTimer != null) { clearInterval(state.monitorTimer); state.monitorTimer = null; }
