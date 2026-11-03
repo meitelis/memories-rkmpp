@@ -10,7 +10,7 @@ Real-video comparison found a 384 kbps AAC source that required normalization, u
 
 Four synthetic shared-audio scenarios passed: full-length and short PCM audio with both video codecs. Startup, middle, cold audio seeks, silent tails, strict decoding, unchanged audio across 480p/4K changes and eight concurrent audio requests were checked. A real high-bitrate AAC source also passed shared-track and strict-decoding checks across 480p/4K in both codecs. Authentication and codec queries remain on the audio playlist and its segments.
 
-Twenty-four JavaScript regressions and six PHP connection-test contract checks pass. Twelve Linux mock-Docker deployment tests cover first install, updates, backups, cleanup, failures and locks. The updater also passed inspection against the running Nextcloud 35 API; real activation remains a deployment check.
+Twenty-four JavaScript regressions and six PHP connection-test contract checks pass. Twelve Linux mock-Docker deployment tests cover first install, updates, backups, cleanup, failures and locks. GitHub's ARM64 source-check workflow also passed the complete Go, player, PHP and deployment checks. The updater passed inspection and real activation against the running Nextcloud 35 installation.
 
 Live R6/helper 0.3.2 browser checks reached every quality through true 3840×2160. In timed manual samples the media clock advanced normally and readyState stayed at 4. The connection test worked through the authenticated Nextcloud route. The top-right gear and closing the dialog were checked after correcting Nextcloud’s native-dialog style override.
 
@@ -18,7 +18,11 @@ Helper 0.3.3 additionally preserves a seek that has not yet reached reactive pla
 
 The release image bundles the connector and updater without adding a runtime process, Docker socket or Nextcloud write mount. Runtime test files are excluded. The one-command host deployment waits for engine health before installing the bundled connector. Log rotation bounds container logs to three 10 MB files. The connector uses persistent Nextcloud app storage and currently declares Nextcloud 35 compatibility.
 
-R7 live rollout and audible Windows Chrome verification are still pending. The user reported intermittent clicks on Windows Chrome with laptop speakers in R6, especially 480p-to-4K, and almost none on Android. Packet/decoder tests do not establish an audible result on that laptop. Native HLS buffering remains controlled by the browser and upstream player. No universal click-free, zero-lag or 100% VPU-utilization claim is made.
+R7 and helper 0.3.3 are deployed and healthy. The host deployment installed the connector from the running image, with a retained backup; a subsequent preflight found both versions equal. The effective Compose configuration changed only the image, retaining existing log rotation, cache, devices and security settings. The transcoder retains a read-only root, dropped capabilities and only its cache volume.
+
+Live R7 checks confirmed the gear at the top-right, closed dialog dimensions of zero, and Escape closing the panel without closing the video. A paused format change retained an in-flight seek at 20.001 seconds and remained paused; a playing format change resumed normally. A real high-bitrate AAC source exposed the shared audio track and reached both 480p and true 3840×2160 without a media error at the sampled points. These browser observations supplement the complete hardware rendition matrix; they are not frame-drop measurements.
+
+After refreshing R7, the user explicitly reported no clicks on the Windows Chrome laptop test that previously clicked. This confirms that user's listening sample, not every device or video. Native HLS buffering remains controlled by the browser and upstream player. No universal click-free, zero-lag or 100% VPU-utilization claim is made.
 ## R5 performance and recovery checks
 
 These completed checks refer to R5 revision `6c24d65d5108328dedc9cc141a72a635e0b95f03`, before the current audio/settings candidate.
@@ -54,7 +58,7 @@ R3 transition checks measured video boundaries within 21.333 ms and audio bounda
 
 The 0.2.4 player removed an artificial display-density ceiling. Android playback was confirmed above 720p after reloading. The 0.2.5 helper retains that behavior and fixes URL-path matching when query strings are present.
 
-With the 0.2.5 helper, manual quality changes retained buffered video and applied to newly loaded fragments. A visible change could take up to the buffered duration, normally about 12 seconds. This describes the earlier `loadLevel` policy; the current helper uses the fragment-preserving `nextLevel` policy described above.
+With the 0.2.5 helper, manual quality changes retained buffered video and applied to newly loaded fragments. A visible change could take up to the buffered duration, normally about 12 seconds. The current helper chooses `loadLevel` for muxed audio and `nextLevel` for a separate audio track, with the configurable shorter buffer described above.
 
 ## Limits
 

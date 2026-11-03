@@ -46,7 +46,9 @@
     "matchingAudioPayloadAndTimestamps": true
   },
   "deployment": {
-    "state": "candidate validated; live rollout pending",
+    "state": "deployed and healthy",
+    "bundledConnectorActivationVerified": true,
+    "rollbackBackupRetained": true,
     "customRuntimeContainers": 1,
     "connectorBundledInImage": true,
     "additionalRuntimeProcesses": 0,
@@ -60,12 +62,17 @@
     "topRightGearAndDialogCloseCheckedInHelper032": true,
     "authenticatedConnectionTestChecked": true,
     "frameDropsMeasured": false,
-    "r7AudibleWindowsChromeVerification": "pending"
+    "r7ObservedShortEdges": [480, 2160],
+    "r7SharedAudioTrackVisible": true,
+    "r7DialogCloseEscapeAndGearVerified": true,
+    "r7PausedFormatChangeRetainedSeekSeconds": 20.00118,
+    "r7PlayingFormatChangeResumed": true,
+    "r7AudibleWindowsChromeVerification": "user reported no clicks after refresh"
   },
   "limits": [
     "These are validation results, not a before/after throughput benchmark.",
     "Server packet and decode checks do not prove an audible result on every client.",
-    "Windows Chrome clicks were reported in R6; R7 listening verification remains necessary.",
+    "The user reported no clicks in the R7 Windows Chrome listening sample; this does not establish an audible result on every client or video.",
     "Not every HDR profile, device, browser, frame rate or network combination was revalidated.",
     "The driver does not expose a reliable VPU utilization percentage on this host."
   ]
