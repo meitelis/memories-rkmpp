@@ -112,6 +112,11 @@ type ProbeVideoData struct {
 	BitRate        int
 	Rotation       int
 	HDR            bool
+	DolbyVision    bool
+	ColorTransfer  string
+	ColorPrimaries string
+	ColorSpace     string
+	ColorRange     string
 	BitDepth       int
 	Audio          ffmpeg.AudioInfo
 }
@@ -644,6 +649,11 @@ func (m *Manager) ffprobe() error {
 			BitRate:        info.BitRate,
 			Rotation:       info.Rotation,
 			HDR:            info.HDR,
+			DolbyVision:    info.DolbyVision,
+			ColorTransfer:  info.ColorTransfer,
+			ColorPrimaries: info.ColorPrimaries,
+			ColorSpace:     info.ColorSpace,
+			ColorRange:     info.ColorRange,
 			BitDepth:       info.BitDepth,
 			Audio:          info.Audio,
 		}
@@ -651,6 +661,9 @@ func (m *Manager) ffprobe() error {
 		StoreCachedProbe(m.c.CacheDir(), m.fileid, m.etag, m.probe)
 	}
 
+	if m.c.RKMPP && m.probe.DolbyVision {
+		return fmt.Errorf("Dolby Vision is not supported by the v11 RKMPP pipeline")
+	}
 	if m.probe.Width <= 0 || m.probe.Height <= 0 || m.probe.Duration <= 0 ||
 		(m.c.RKMPP && (m.probe.Width < 2 || m.probe.Height < 2)) {
 		return fmt.Errorf("invalid video dimensions or duration for file %d", m.fileid)

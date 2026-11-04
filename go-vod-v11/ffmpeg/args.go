@@ -54,6 +54,12 @@ type Spec struct {
 	Rotation int `hwprobe:"key"`
 	// HDR marks sources needing SDR tonemapping.
 	HDR bool `hwprobe:"key"`
+	// Source colour tags may exist only on the container. Reapply them after
+	// RGA/OpenCL mapping, whose hardware frames can lose those properties.
+	ColorTransfer  string `hwprobe:"key"`
+	ColorPrimaries string `hwprobe:"key"`
+	ColorSpace     string `hwprobe:"key"`
+	ColorRange     string `hwprobe:"key"`
 	// BitDepth is the source sample depth, 8 when unknown.
 	BitDepth int `hwprobe:"key"`
 	// PixelFormat helps gate Rockchip hardware decoding to supported surfaces.

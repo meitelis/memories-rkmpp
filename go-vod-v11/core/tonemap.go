@@ -29,7 +29,9 @@ func (s *Stream) transcodeSpec(startAt float64, isHLS bool) ffmpeg.Spec {
 
 	if ffmpeg.IsRKMPPEncoder(ffmpeg.Encoder(spec)) && spec.HDR && s.c.RKMPPOpenCL {
 		s.tonemapOnce.Do(func() {
-			if err := probeTonemap(spec, ffmpeg.ProbeRKMPPOpenCL); err != nil {
+			// MPP/OpenCL import depends on the actual source surfaces and HDR
+			// metadata. A different file's success cannot validate this source.
+			if err := ffmpeg.ProbeRKMPPOpenCL(context.Background(), spec); err != nil {
 				log.Printf("%s-%s: Mali HDR probe failed; using CPU tone mapping: %v", s.m.id, s.quality, err)
 				return
 			}

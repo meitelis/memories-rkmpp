@@ -90,8 +90,7 @@ func usesRKMPPFrames(s Spec) bool {
 		return false
 	}
 	if s.CodecName != "mjpeg" && s.PixelFormat != "" &&
-		!strings.HasPrefix(s.PixelFormat, "yuv420p") && s.PixelFormat != "yuvj420p" &&
-		s.PixelFormat != "nv12" && s.PixelFormat != "nv15" && !strings.HasPrefix(s.PixelFormat, "p010") {
+		!slices.Contains([]string{"yuv420p", "yuv420p10le", "yuvj420p", "nv12", "nv15", "p010le"}, s.PixelFormat) {
 		return false
 	}
 	return slices.Contains([]string{
@@ -102,8 +101,7 @@ func usesRKMPPFrames(s Spec) bool {
 
 // Build the v11 encoder prefix only; SegmentArgs remains the official
 // go-vod 0.7.0 fMP4 muxer, so init and timeline semantics are unchanged.
-// This path is not enabled by the v11 server until runtime integration,
-// hardware probing and real-device tests have been added.
+// The v11 server enables it only when MEMORIES_RKMPP=1.
 func buildRKMPPArgs(s Spec) []string {
 	args := []string{"-hide_banner", "-loglevel", "warning"}
 	if s.StartAt > 0 {
@@ -144,8 +142,9 @@ func buildRKMPPArgs(s Spec) []string {
 		}
 		filters = append(filters, "scale_rkrga=force_divisible_by=2:format="+format+dims)
 		if maliHDR {
+			filters = append(filters, "hwmap=derive_device=opencl:mode=read")
+			filters = append(filters, rkmppSourceColor(s)...)
 			filters = append(filters,
-				"hwmap=derive_device=opencl:mode=read",
 				"tonemap_opencl=tonemap=hable:desat=0:format=nv12:primaries=bt709:transfer=bt709:matrix=bt709:range=tv",
 				"hwmap=derive_device=rkmpp:mode=write:reverse=1",
 				"format=drm_prime",
@@ -154,6 +153,7 @@ func buildRKMPPArgs(s Spec) []string {
 	} else {
 		filters = append(filters, "scale=force_divisible_by=2"+dims)
 		if s.HDR {
+			filters = append(filters, rkmppSourceColor(s)...)
 			filters = append(filters,
 				"zscale=t=linear:npl=100", "format=gbrpf32le", "zscale=p=bt709",
 				"tonemap=hable:desat=0", "zscale=t=bt709:m=bt709:range=tv")
@@ -219,4 +219,22 @@ func buildRKMPPArgs(s Spec) []string {
 		args = append(args, "-an")
 	}
 	return args
+}
+
+// setparams changes metadata only; it keeps the imported OpenCL surfaces on
+// the GPU. Do not invent PQ/HLG tags when the source does not identify them.
+func rkmppSourceColor(s Spec) []string {
+	var tags []string
+	for _, field := range []struct{ key, value string }{
+		{"color_trc", s.ColorTransfer}, {"color_primaries", s.ColorPrimaries},
+		{"colorspace", s.ColorSpace}, {"range", s.ColorRange},
+	} {
+		if field.value != "" && field.value != "unknown" && field.value != "unspecified" {
+			tags = append(tags, field.key+"="+field.value)
+		}
+	}
+	if len(tags) == 0 {
+		return nil
+	}
+	return []string{"setparams=" + strings.Join(tags, ":")}
 }

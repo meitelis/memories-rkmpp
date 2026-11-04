@@ -42,6 +42,11 @@ type VideoInfo struct {
 	BitRate        int
 	Rotation       int
 	HDR            bool
+	DolbyVision    bool
+	ColorTransfer  string
+	ColorPrimaries string
+	ColorSpace     string
+	ColorRange     string
 	BitDepth       int
 	Audio          AudioInfo
 }
@@ -67,6 +72,7 @@ type videoStream struct {
 	SideDataList     []sideData `json:"side_data_list"`
 	ColorTransfer    string     `json:"color_transfer"`
 	ColorPrimaries   string     `json:"color_primaries"`
+	ColorRange       string     `json:"color_range"`
 }
 
 type probeOutput struct {
@@ -147,9 +153,23 @@ func ParseProbeJSON(data []byte) (VideoInfo, error) {
 		BitRate:        bitRate,
 		Rotation:       probeRotation(*s),
 		HDR:            probeHDR(*s),
+		DolbyVision:    probeDolbyVision(*s),
+		ColorTransfer:  s.ColorTransfer,
+		ColorPrimaries: s.ColorPrimaries,
+		ColorSpace:     s.ColorSpace,
+		ColorRange:     s.ColorRange,
 		BitDepth:       probeBitDepth(s.PixFmt),
 		Audio:          probeAudio(out.Streams),
 	}, nil
+}
+
+func probeDolbyVision(s videoStream) bool {
+	for _, sd := range s.SideDataList {
+		if sd.SideDataType == "DOVI configuration record" {
+			return true
+		}
+	}
+	return false
 }
 
 // probeAudio describes the first audio stream; empty when silent.
@@ -217,7 +237,11 @@ func probeRotation(s videoStream) int {
 // probeBitDepth reads sample depth from the pix_fmt name, 8 when unknown.
 // Matched on explicit suffixes since Contains "12" would match nv12.
 func probeBitDepth(pixFmt string) int {
-	for _, depth := range []int{10, 12, 14, 16} {
+	switch pixFmt {
+	case "nv15", "p010", "p010le", "p010be":
+		return 10
+	}
+	for _, depth := range []int{9, 10, 12, 14, 16} {
 		d := strconv.Itoa(depth)
 		if strings.HasSuffix(pixFmt, d+"le") || strings.HasSuffix(pixFmt, d+"be") {
 			return depth

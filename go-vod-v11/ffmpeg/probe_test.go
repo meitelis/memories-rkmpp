@@ -42,6 +42,9 @@ func TestParseProbeJSONHDR(t *testing.T) {
 			`"side_data_list":[{"side_data_type":"DOVI configuration record","dv_profile":5` + compat + `}]}`
 	}
 	require.True(t, probe(dovi(`,"dv_bl_signal_compatibility_id":0`)))
+	info, err := ParseProbeJSON([]byte(`{"streams":[` + dovi(`,"dv_bl_signal_compatibility_id":0`) + `]}`))
+	require.NoError(t, err)
+	require.True(t, info.DolbyVision)
 	require.True(t, probe(dovi(``)))
 	require.False(t, probe(dovi(`,"dv_bl_signal_compatibility_id":2`)))
 	require.False(t, probe(`{"codec_type":"video","codec_name":"dvvideo","pix_fmt":"yuv411p"}`))
@@ -55,7 +58,7 @@ func TestParseProbeJSONBitDepth(t *testing.T) {
 	}
 
 	for pix, depth := range map[string]int{
-		"yuv420p10le": 10, "p010le": 10, "p010be": 10,
+		"yuv420p10le": 10, "p010le": 10, "p010be": 10, "nv15": 10, "yuv420p9le": 9,
 		"yuv420p12be": 12, "p012le": 12, "gray16le": 16, "p016le": 16,
 	} {
 		require.Equal(t, depth, probe(pix), pix)

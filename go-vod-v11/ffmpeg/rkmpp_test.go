@@ -68,6 +68,8 @@ func TestRKMPPv11HardwareDecodeFallsBackForUnsupportedFormats(t *testing.T) {
 		{"hevc", "yuv444p10le", 10, false},
 		{"hevc", "yuv420p12le", 12, false},
 		{"hevc", "p010le", 10, true},
+		{"hevc", "yuv420p9le", 9, false},
+		{"hevc", "yuv420p10be", 10, false},
 	} {
 		s := Spec{RKMPP: true, Input: "/tmp/video.mp4", CodecName: tc.codec, PixelFormat: tc.pixel,
 			BitDepth: tc.depth, HDR: tc.hdr, Width: 1280, Height: 720}

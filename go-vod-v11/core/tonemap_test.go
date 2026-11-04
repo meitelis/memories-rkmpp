@@ -195,5 +195,14 @@ func TestRKMPPTonemapSelection(t *testing.T) {
 		} else {
 			require.Contains(t, args, "tonemap_opencl=")
 		}
+		// Reuse on seeks within this stream, but never share a successful
+		// MPP surface import with a different source file of the same shape.
+		require.Equal(t, !fail, s.transcodeSpec(6, true).RKMPPOpenCL)
+		otherManager := Manager{c: c, url: "http://localhost/another-hdr.mp4", probe: m.probe}
+		other := &Stream{c: c, m: &otherManager, quality: "720p", width: 1280, height: 720}
+		require.Equal(t, !fail, other.transcodeSpec(0, true).RKMPPOpenCL)
+		calls, err := os.ReadFile(count)
+		require.NoError(t, err)
+		require.Equal(t, "call\ncall\n", string(calls))
 	}
 }
