@@ -3,7 +3,7 @@ package main
 import "testing"
 
 func TestTargetDimensions(t *testing.T) {
-	for _, tc := range []struct { w, h, wantW, wantH int } {
+	for _, tc := range []struct{ w, h, wantW, wantH int }{
 		{3840, 2160, 1280, 720},
 		{2160, 3840, 720, 1280},
 		{1280, 720, 1280, 720},

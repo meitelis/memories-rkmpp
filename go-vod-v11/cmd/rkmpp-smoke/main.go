@@ -32,7 +32,7 @@ func targetDimensions(width, height int) (int, int) {
 	long := max(width, height)
 	short := min(width, height)
 	ratio := math.Min(1, math.Min(1280/float64(long), 720/float64(short)))
-	return evenDimension(int(float64(width)*ratio)), evenDimension(int(float64(height)*ratio))
+	return evenDimension(int(float64(width) * ratio)), evenDimension(int(float64(height) * ratio))
 }
 
 func hasFlagValue(args []string, flag, want string) bool {
