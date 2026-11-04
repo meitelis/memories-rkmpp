@@ -25,11 +25,13 @@ jobs:
           go-version-file: go-vod-v11/go.mod
           cache-dependency-path: go-vod-v11/go.sum
       - name: Assert upstream protocol
-        run: |
-          grep -F 'const VERSION = "0.7.0"' main.go
-          test -z "$(gofmt -l .)"
+        run: grep -F 'const VERSION = "0.7.0"' main.go
       - name: Test and vet
         run: |
           go test ./...
           go vet ./...
           go build ./...
+      - name: Check Go formatting
+        run: |
+          gofmt -d ffmpeg/args.go ffmpeg/rkmpp.go ffmpeg/rkmpp_test.go
+          test -z "$(gofmt -l .)"
