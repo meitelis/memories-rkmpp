@@ -33,5 +33,5 @@ jobs:
           go build ./...
       - name: Check Go formatting
         run: |
-          gofmt -d ffmpeg/args.go ffmpeg/rkmpp.go ffmpeg/rkmpp_test.go
+          gofmt -l .
           test -z "$(gofmt -l .)"
