@@ -1,6 +1,6 @@
 # Experimental, offline hardware validation only. Not the Memories 11
 # production image; do not connect it to the running Nextcloud 10.2 stack.
-FROM golang:1.27-bookworm AS build
+FROM golang:1.27-bookworm@sha256:d9b6a1beb9474adc2a1ce842573639b44b2a0dd49b6669f51d3821baf9ec37c9 AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
@@ -8,6 +8,9 @@ COPY . .
 RUN test -z "$(gofmt -l .)" && go test ./... && go vet ./...
 RUN CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags="-s -w" -o /out/go-vod .
 RUN CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags="-s -w" -o /out/rkmpp-smoke ./cmd/rkmpp-smoke
+RUN CGO_ENABLED=0 go test -c -o /out/ffmpeg.test ./ffmpeg && \
+    CGO_ENABLED=0 go test -c -o /out/core.test ./core && \
+    CGO_ENABLED=0 go test -c -o /out/api.test ./api
 
 # Use the SAME pinned multimedia base image as the previously verified
 # Memories 10.2 / go-vod 0.6.3 R7 RK3588 Dockerfile.
@@ -33,6 +36,7 @@ FROM scratch
 COPY --from=media /rootfs/ /
 COPY --from=build /out/go-vod /app/go-vod
 COPY --from=build /out/rkmpp-smoke /app/rkmpp-smoke
+COPY --from=build /out/ffmpeg.test /out/core.test /out/api.test /app/
 COPY LICENSE /usr/share/licenses/go-vod/LICENSE
 ENV PATH=/usr/local/bin:/app \
     LD_LIBRARY_PATH=/usr/lib/jellyfin-ffmpeg/lib \

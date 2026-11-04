@@ -33,6 +33,9 @@ func TestFMP4SeekRestart(t *testing.T) {
 		{"transcode", "libx265", QUALITY_MAX, 8, 24},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			// A packaged runtime sets CACHE_DIR. These fixtures reuse file ID 1
+			// without an etag, so each source needs its own probe/keyframe cache.
+			t.Setenv("CACHE_DIR", t.TempDir())
 			dir := t.TempDir()
 			src := filepath.Join(dir, "src.mp4")
 			out, err := exec.Command(ffmpegBin, "-hide_banner", "-loglevel", "error",

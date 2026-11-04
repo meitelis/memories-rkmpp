@@ -1,68 +1,83 @@
 # Isolated RK3588 test: Memories 11.0.2 / go-vod 0.7.0
 
-**NOT A DEPLOYMENT.** This tests the new 0.7.0 FFmpeg path against the pinned
-MPP/RGA/Mali runtime that powered the tested 10.2 R7 image. The code on this
-branch is experimental and must not replace the running 10.2 installation,
-Nextcloud app, proxy or Docker Compose stack.
+This is a separate development image and runner. It does not change Nextcloud,
+Portainer, the running transcoder, production Compose or the old player helper.
+Both the Go builder and the MPP/RGA/Mali multimedia image are pinned by digest.
 
-## What this stage proves
+## Generated hardware matrix
 
-The image compiles the actual v11 Go server and an independent offline smoke
-binary. The smoke binary reuses the **same** `ffmpeg.SegmentArgs` and RKMPP
-argument builder used by the v11 server. It checks the expected FFmpeg encoders,
-RGA filters, and `rkmpp` hwaccel, then runs real FFmpeg jobs and validates
-the resulting fMP4 HLS playlist and init segments by decoding the output.
-
-It does **not** establish Nextcloud 11 handshake/authentication, Memories 11
-player compatibility, multi-quality ABR switching, clock continuity across
-renditions, or a full HDR tone-map matrix. This is the first hardware gate.
-
-## Run on your ROCK 5B+ only
-
-Choose a disposable H.264 SDR or HEVC SDR sample video **outside** the production
-Nextcloud data directory. Run the following in a clone of the GitHub
-`import/laptop-2026-11-04` branch:
+On the ROCK 5B+, from a checkout containing these changes:
 
 ```bash
-git fetch origin import/laptop-2026-11-04
-git switch import/laptop-2026-11-04
-bash scripts/test-v11-rkmpp.sh /absolute/path/to/test-video.mp4
+RKMPP_SMOKE_OUTPUT="$PWD/hardware-results" bash scripts/test-v11-rkmpp.sh --matrix
 ```
 
-The script builds **local/memories-rkmpp:v11-smoke**, mounts only the
-specified sample read-only and a dedicated output folder, isolates networking,
-drops capabilities, runs as your host UID, and never contacts Nextcloud.
-It automatically adds the device groups for `/dev/mpp_service`, `/dev/rga`,
-`/dev/dma_heap`, `/dev/dri`, and optionally `/dev/mali0`.
+This builds the ARM64 image and generates disposable fixtures inside its cache.
+No original media or Nextcloud credentials are needed. It runs:
 
-To test a seek, run the same command with `-start 6`. To exercise a single
-encoder: add `-codec h264` or `-codec hevc`. The output folder is
-`~/memories-v11-smoke` unless `RKMPP_SMOKE_OUTPUT` is set.
+- `ffmpeg.test`: H.264/HEVC hardware output at two resolutions from a 29.97 fps
+  source, cold restarts at 6 seconds, byte-identical init segments, independent
+  segment decoding and exact 3-second video packet boundaries. Generated 4K PQ
+  and HLG HEVC Main10 sources exercise the full MPP/RGA/Mali/MPP path and check
+  8-bit BT.709 output. The upstream software fMP4 restart regression also runs.
+- `core.test`: real manager/stream publication, cached init use, cold video and
+  shared AAC seeks, and video-quality requests that leave the audio encoder
+  running. The upstream HTTP copy/transcode restart regression also runs.
+- `api.test`: go-vod 0.7.0 ping and Memories 11 POST envelope, authenticated
+  Range callbacks to a local fixture server, codec negotiation, a single audio
+  group, token propagation and decoding of served init/seek segments. The
+  callback server is inside the isolated test process, not your Nextcloud.
 
-For 10-bit HEVC HDR samples, run **separately**, and opt into the experimental
-Mali HDR path with `-opencl`. The SDR run is the first gate; HDR often needs
-additional driver and pixel-format fixes.
+Tests return a nonzero status on failure. Hardware tests skip during ordinary
+`go test ./...`; the matrix explicitly enables them with
+`MEMORIES_RKMPP_HW_TEST=1`. Feature listings alone cannot pass this gate.
 
-## PASS / FAIL interpretation
+`environment.txt` records UTC time, kernel, Git revision, a hash of source files
+(including untracked changes), image ID, architecture and protocol version.
+Each suite retains its own log. Keep these with any failure report.
 
-A valid PASS has two independent results per selected output codec:
+## Test an existing sample
 
-1. Rockchip encoder and RGA run to completion, creating a nonempty fMP4 init
-   and one or more `.m4s` segments from the actual sample.
-2. FFmpeg independently decodes the generated local `.m3u8` playlist.
+Use a disposable sample outside the production Nextcloud data directory:
 
-If the helper prints `source needs CPU decode`, the test has **not** validated
-MPP decoding even if hardware encoding succeeded. For the initial full
-hardware gate, use an 8-bit 4:2:0 SDR H.264 input and confirm there is no
-such warning. Stop and report the exact stderr if a test fails.
+```bash
+bash scripts/test-v11-rkmpp.sh /absolute/path/to/test-video.mp4
+bash scripts/test-v11-rkmpp.sh /absolute/path/to/test-video.mp4 -start 6
+bash scripts/test-v11-rkmpp.sh /absolute/path/to/hdr10-video.mkv -opencl
+```
 
-Share the command output and source format reported by the helper. Do not
-send original private media; send only sanitized logs. A passing smoke check
-does NOT authorize upgrading Memories, merging this PR or deployment.
+The default output is `~/memories-v11-smoke`; override it with
+`RKMPP_SMOKE_OUTPUT`. `-codec h264` or `-codec hevc` selects one output codec.
+The helper creates a new run directory, preserves the server's stdout HLS
+settings, stores the final playlist and decodes the entire output, including
+audio. Seek cutoffs use the absolute source clock required by `-copyts`.
 
-## CI
+If it prints `source needs CPU decode`, only hardware encoding has been tested.
+Use SDR AVC 4:2:0 for the first full MPP decode gate. Unsupported surfaces use
+CPU decoding; `-opencl` explicitly selects the experimental Mali graph for HDR.
+Dolby Vision is rejected by this port rather than treated as ordinary HDR10.
 
-GitHub Actions checks `go test ./...`, `go vet ./...`, formatting, image
-build on ARM64, the go-vod 0.7.0 version and whether both FFmpeg RKMPP
-encoders and RGA filters are available **in the image**. CI runners have
-no Rockchip VPU or Mali; **only the ROCK 5B+ can validate hardware execution**.
+To reuse an image you just built, set `RKMPP_SMOKE_SKIP_BUILD=1`. Leave this
+unset after changing any source or Dockerfile.
+
+## Docker runtime requirements
+
+The runner uses no network, read-only rootfs and sample mounts, dropped
+capabilities, no-new-privileges and the invoking user's UID/GID. Only a dedicated
+cache is writable. It passes the MPP, RGA, DMA heap, DRM and optional Mali
+devices, adding their **numeric** group IDs for the scratch image.
+
+It also uses `--security-opt systempaths=unconfined`. Docker's normal mask hides
+`/sys/firmware`, which is the target of `/proc/device-tree`. MPP then identifies
+the SoC as `unknown` and HEVC initialization fails. Read-only bind mounts under
+the masked path alone did not resolve this on the tested Docker daemon. This
+setting follows the [Jellyfin Rockchip runtime guidance](https://jellyfin.org/docs/general/post-install/transcoding/hardware-acceleration/rockchip/).
+It does not grant privileged mode or add capabilities.
+
+## What remains outside this gate
+
+The API fixture checks the v11 protocol, not a live PHP/bridge deployment.
+It does not prove real share-link authentication, Safari/native HLS, hls.js ABR
+or audible quality switching in a browser. Generated HDR patterns validate
+execution and metadata, not perceptual tone-map quality. See
+`PLAYER_INTEGRATION_V11.md` before planning a staging deployment.

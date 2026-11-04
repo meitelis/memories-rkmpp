@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"flag"
@@ -91,6 +92,9 @@ func run(ctx context.Context, input, output, codec string, start, seconds float6
 	if err != nil {
 		return fmt.Errorf("probe sample: %w", err)
 	}
+	if info.DolbyVision {
+		return errors.New("Dolby Vision is not supported by the v11 RKMPP pipeline")
+	}
 	if info.Width < 2 || info.Height < 2 || info.Duration <= 0 {
 		return fmt.Errorf("unsupported video dimensions/duration: %dx%d %s", info.Width, info.Height, info.Duration)
 	}
@@ -110,6 +114,12 @@ func run(ctx context.Context, input, output, codec string, start, seconds float6
 	if err := os.MkdirAll(output, 0755); err != nil {
 		return err
 	}
+	// Never allow leftovers from an earlier run to satisfy this run's checks.
+	output, err = os.MkdirTemp(output, "run-")
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Run directory: %s\n", output)
 	codecs := []string{"h264", "hevc"}
 	if codec != "both" {
 		codecs = []string{codec}
@@ -124,6 +134,8 @@ func run(ctx context.Context, input, output, codec string, start, seconds float6
 			CodecName: info.CodecName, PixelFormat: info.PixelFormat,
 			FrameRate: info.FrameRate, FrameRateExact: info.FrameRateExact,
 			Rotation: info.Rotation, HDR: info.HDR, BitDepth: info.BitDepth,
+			ColorTransfer: info.ColorTransfer, ColorPrimaries: info.ColorPrimaries,
+			ColorSpace: info.ColorSpace, ColorRange: info.ColorRange,
 			Width: width, Height: height, QF: 24,
 			Bitrate: 3_500_000, HLS: true, ChunkSize: 3,
 			StartAt: start, Audio: info.Audio, RKMPPOpenCL: opencl,
@@ -145,16 +157,29 @@ func run(ctx context.Context, input, output, codec string, start, seconds float6
 		if !hasFlagValue(args, "-hwaccel", "rkmpp") {
 			fmt.Println("WARNING: source needs CPU decode (unsupported surface or HDR CPU fallback). This test does NOT validate hardware decoding.")
 		}
-		// Re-use production go-vod 0.7.0 segment settings. Limit the offline
-		// test output duration but otherwise keep its exact FFmpeg graph.
-		args = append(args[:len(args)-1], "-t", fmt.Sprintf("%.3f", seconds), playlist)
+		// Keep the production stdout playlist: FFmpeg resolves an absolute
+		// init path differently when the playlist itself is a filesystem path.
+		// With -copyts the output cutoff is on the absolute source clock.
+		args = append(args[:len(args)-1], "-to", fmt.Sprintf("%.6f", start+seconds), "-")
 		fmt.Printf("Encoding %s into %s (%.1fs)\n", outCodec, dst, seconds)
+		fmt.Printf("FFmpeg: %s\n", ffmpeg.QuoteForLog(ffmpeg.RedactArgs(args)))
 		c, cancel := context.WithTimeout(ctx, 3*time.Minute)
 		cmd := exec.CommandContext(c, ffbin, args...)
-		out, e := cmd.CombinedOutput()
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		out, e := cmd.Output()
 		cancel()
 		if e != nil {
-			return fmt.Errorf("%s RKMPP pipeline failed: %w\n%s", outCodec, e, out)
+			return fmt.Errorf("%s RKMPP pipeline failed: %w\n%s", outCodec, e, stderr.String())
+		}
+		// The HLS muxer republishes its growing playlist on stdout. Retain
+		// only the final complete snapshot for independent decode validation.
+		final, e := finalPlaylist(out)
+		if e != nil {
+			return e
+		}
+		if e = os.WriteFile(playlist, final, 0644); e != nil {
+			return e
 		}
 		entries, e := filepath.Glob(filepath.Join(dst, "test-*.m4s"))
 		if e != nil || len(entries) == 0 {
@@ -167,7 +192,7 @@ func run(ctx context.Context, input, output, codec string, start, seconds float6
 		// are consumable, not just that FFmpeg exited with status 0.
 		c, cancel = context.WithTimeout(ctx, time.Minute)
 		check := exec.CommandContext(c, ffbin, "-hide_banner", "-v", "error",
-			"-xerror", "-i", playlist, "-map", "0:v:0", "-frames:v", "15",
+			"-xerror", "-i", playlist, "-map", "0:v:0", "-map", "0:a:0?",
 			"-f", "null", "-")
 		verifyOutput, e := check.CombinedOutput()
 		cancel()
@@ -178,6 +203,14 @@ func run(ctx context.Context, input, output, codec string, start, seconds float6
 	}
 	fmt.Println("Offline smoke successful. This does NOT test the Nextcloud 11 player or real HLS switching.")
 	return nil
+}
+
+func finalPlaylist(output []byte) ([]byte, error) {
+	i := bytes.LastIndex(output, []byte("#EXTM3U"))
+	if i < 0 || !bytes.Contains(output[i:], []byte("#EXT-X-ENDLIST")) {
+		return nil, errors.New("FFmpeg did not finish a VOD playlist")
+	}
+	return output[i:], nil
 }
 
 func main() {
@@ -192,7 +225,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "invalid -codec; choose h264, hevc or both")
 		os.Exit(2)
 	}
-	if *seconds <= 0 || *start < 0 {
+	if *seconds <= 0 || *start < 0 || math.IsNaN(*seconds) || math.IsInf(*seconds, 0) || math.IsNaN(*start) || math.IsInf(*start, 0) {
 		fmt.Fprintln(os.Stderr, "invalid -seconds or -start")
 		os.Exit(2)
 	}
