@@ -54,6 +54,16 @@ type Spec struct {
 	HDR bool `hwprobe:"key"`
 	// BitDepth is the source sample depth, 8 when unknown.
 	BitDepth int `hwprobe:"key"`
+	// PixelFormat helps gate Rockchip hardware decoding to supported surfaces.
+	PixelFormat string `hwprobe:"key"`
+	// Bitrate is the target total rendition bitrate, including audio.
+	Bitrate int
+	// RKMPP enables Rockchip MPP/RGA encoding (experimental v11 port).
+	RKMPP bool `hwprobe:"key"`
+	// RKMPPOutputCodec selects h264 or hevc output.
+	RKMPPOutputCodec string `hwprobe:"key"`
+	// RKMPPOpenCL enables the Mali HDR graph only after a successful frame probe.
+	RKMPPOpenCL bool
 	// Audio is the first audio stream; empty when silent.
 	Audio AudioInfo
 	// ChunkSize is the target segment length in whole seconds. Drives
@@ -113,6 +123,11 @@ func Encoder(s Spec) string {
 	switch {
 	case s.Copy:
 		return EncoderCopy
+	case s.RKMPP:
+		if s.RKMPPOutputCodec == "hevc" {
+			return EncoderRKMPPHEVC
+		}
+		return EncoderRKMPP
 	case s.VAAPI:
 		return EncoderVAAPI
 	case s.NVENC:
@@ -183,6 +198,9 @@ func reconnectArgs() []string {
 // Ladder bitrates appear only in playlists, never here. With Copy set, the
 // offload, filter graph and rate control collapse to "-c:v copy".
 func BuildArgs(s Spec) []string {
+	if IsRKMPPEncoder(Encoder(s)) {
+		return buildRKMPPArgs(s)
+	}
 	args := []string{"-hide_banner", "-loglevel", "warning"}
 
 	if s.StartAt > 0 {
@@ -371,6 +389,12 @@ const copyHLSTime = "0.001"
 //   - The playlist goes to stdout ("-"), where the segment watcher reads
 //     finished segment names from it.
 func SegmentArgs(s Spec, startID int, pattern, init string) []string {
+	// Rockchip's hardware encoders obey GOP sizing more reliably than
+	// forced-keyframe expressions. Preserve v11's fMP4 muxer and timeline.
+	if s.RKMPP && !s.Copy {
+		s.UseGopSize = true
+		s.FrameRate = RKMPPFrameRate(s)
+	}
 	hlsTime := fmt.Sprintf("%d", s.ChunkSize)
 	if s.Copy {
 		hlsTime = copyHLSTime
