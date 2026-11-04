@@ -40,7 +40,7 @@ func TestStreamFailureRestartsOnRetry(t *testing.T) {
 	for i := 1; i <= 3; i++ {
 		w := httptest.NewRecorder()
 		start := time.Now()
-		require.True(t, m.ServeChunk(w, QUALITY_MAX, 5))
+		require.True(t, m.ServeChunk(w, QUALITY_MAX, 2))
 		require.Equal(t, http.StatusRequestTimeout, w.Code)
 		require.Less(t, time.Since(start), chunkWait)
 
@@ -100,7 +100,7 @@ func TestStreamStartFailure(t *testing.T) {
 	defer func() { chunkWait = old }()
 
 	// Advancing the goal used to signal a nil Process with the mutex held.
-	for _, id := range []int{0, 1, 4} {
+	for _, id := range []int{0, 1, 2} {
 		w := httptest.NewRecorder()
 		require.True(t, m.ServeChunk(w, QUALITY_MAX, id))
 		require.Equal(t, http.StatusRequestTimeout, w.Code)
@@ -148,7 +148,7 @@ func TestStreamStopKillsCoder(t *testing.T) {
 
 	// A request racing teardown can't start an unsupervised ffmpeg.
 	w = httptest.NewRecorder()
-	require.True(t, m.ServeChunk(w, QUALITY_MAX, 5))
+	require.True(t, m.ServeChunk(w, QUALITY_MAX, 2))
 	require.Equal(t, http.StatusConflict, w.Code)
 	require.Equal(t, 1, countRuns(t, runs))
 }

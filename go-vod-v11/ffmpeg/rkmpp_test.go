@@ -31,7 +31,7 @@ func TestRKMPPv11FMP4ColdSeekKeepsV11Muxer(t *testing.T) {
 		RKMPP: true, HLS: true, StartAt: 12, Input: "/tmp/video.mp4",
 		CodecName: "hevc", PixelFormat: "yuv420p10le", BitDepth: 10,
 		FrameRate: 30, Width: 1280, Height: 720, ChunkSize: 3,
-		Bitrate: 6000000, Audio: AudioInfo{CodecName: "aac", Channels: 2, BitRate: 160000},
+		Bitrate: 6000000, Audio: AudioInfo{CodecName: "aac", Profile: "LC", SampleRate: 48000, Channels: 2, BitRate: 160000},
 	}
 	args := SegmentArgs(s, 3, "/tmp/720p-%06d.m4s", "/tmp/720p-init.m4s")
 	joined := strings.Join(args, " ")
