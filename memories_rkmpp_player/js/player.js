@@ -134,12 +134,29 @@
   const DIRECT_STALL_MS = 6000;
   const DIRECT_CHECK_MS = 1000;
 
-  function stopDirectTimer(state) {
-    if (state?.monitorTimer != null) { clearInterval(state.monitorTimer); state.monitorTimer = null; }
+  function clearDirectStall(state) {
     if (state?.stallTimer !== null && state?.stallTimer !== undefined) {
       clearTimeout(state.stallTimer);
       state.stallTimer = null;
     }
+  }
+
+  function resetDirectSamples(state) {
+    if (!state) return;
+    state.lastBuffer = null;
+    state.lastSample = 0;
+    state.riskCount = 0;
+  }
+
+  function stopDirectTimer(state) {
+    if (state?.monitorTimer != null) { clearInterval(state.monitorTimer); state.monitorTimer = null; }
+    clearDirectStall(state);
+    resetDirectSamples(state);
+  }
+
+  function forgetDirectPlayback(player) {
+    stopDirectTimer(directPlayback.get(player));
+    directPlayback.delete(player);
   }
 
   function playbackTime(player) {
@@ -177,6 +194,11 @@
     return 0;
   }
 
+  function bufferedToEnd(media, ahead) {
+    return Number.isFinite(media.duration) && media.duration > 0 &&
+      media.currentTime + ahead >= media.duration - 0.25;
+  }
+
   // Observe the actual playable buffer, rather than trusting a connection
   // speed estimate. Falling buffer predicts starvation even for variable
   // bitrate originals; two consecutive samples avoid reacting to jitter.
@@ -189,15 +211,20 @@
   }
 
   function monitorDirectPlayback(player, state) {
-    if (state.monitorTimer != null) return;
+    if (!state || state.mode !== 'direct' || state.monitorTimer != null) return;
     state.monitorTimer = setInterval(() => {
       if (directPlayback.get(player) !== state || state.mode !== 'direct' ||
           !player.isConnected) { stopDirectTimer(state); return; }
-      if (player.paused || player.seeking) { state.lastBuffer = null; state.riskCount = 0; return; }
       const media = player.querySelector?.('video');
-      if (!media || media.readyState < 2) return;
+      if (player.ended || media?.ended) { stopDirectTimer(state); return; }
+      if (player.paused || player.seeking || !media || media.readyState < 2) {
+        resetDirectSamples(state);
+        return;
+      }
       const now = performance.now();
       const ahead = bufferedAhead(media);
+      // A fully downloaded tail naturally drains to zero without needing HLS.
+      if (bufferedToEnd(media, ahead)) { resetDirectSamples(state); return; }
       const risk = state.lastBuffer !== null &&
         directBufferRisk(state.lastBuffer, ahead, (now - state.lastSample) / 1000);
       state.riskCount = risk ? state.riskCount + 1 : 0;
@@ -209,20 +236,15 @@
 
   function scheduleDirectStall(player) {
     const state = directPlayback.get(player);
-    if (!state || state.mode !== 'direct' || player.paused || state.stallTimer !== null) return;
+    if (!state || state.mode !== 'direct' || !player.isConnected || player.paused ||
+        player.seeking || player.ended || state.stallTimer !== null) return;
     state.stallTimer = setTimeout(() => {
       state.stallTimer = null;
-      if (directPlayback.get(player) !== state || state.mode !== 'direct' || player.paused) return;
+      if (directPlayback.get(player) !== state || state.mode !== 'direct' ||
+          !player.isConnected || player.paused || player.seeking || player.ended) return;
       const media = player.querySelector?.('video');
-      let forward = 0;
-      if (media?.buffered) {
-        for (let i = 0; i < media.buffered.length; i++) {
-          if (media.buffered.start(i) <= media.currentTime && media.buffered.end(i) >= media.currentTime) {
-            forward = media.buffered.end(i) - media.currentTime;
-            break;
-          }
-        }
-      }
+      const forward = bufferedAhead(media);
+      if (media?.ended || (media && bufferedToEnd(media, forward))) return;
       if (!media || media.readyState < 3 || forward < 1) {
         fallbackToHLS(player, state, 'buffer starvation');
       }
@@ -231,10 +253,18 @@
 
   function maybeDirectPlay(player, value) {
     const candidate = directSource(value, location.href);
-    if (!candidate) return;
     const previous = directPlayback.get(player);
+    if (!candidate) {
+      const source = typeof value === 'string' ? value : value?.src;
+      let url;
+      try { url = typeof source === 'string' ? new URL(source, location.href).href : null; } catch {}
+      // Our own original-source event retains its monitor. Any unrelated
+      // source must discard the old fallback target and pending timers.
+      if (previous && url !== previous.original) forgetDirectPlayback(player);
+      return;
+    }
     if (previous?.key === candidate.key) return; // Never loop after fallback.
-    if (previous) stopDirectTimer(previous);
+    if (previous) forgetDirectPlayback(player);
     // An explicit H.264 compatibility preference requests the HLS encoder,
     // because the original codec isn't known from the media-player source.
     if (preferences.codec === 'h264') return;
@@ -250,7 +280,7 @@
       if (shouldPlay) player.play?.()?.catch?.(() => {});
       else player.pause?.();
     }, { once: true });
-    console.info('[Memories RKMPP] Trying original file before HLS:', candidate.original);
+    console.info('[Memories RKMPP] Trying original file before HLS');
     player.src = { src: candidate.original, type: 'video/mp4' };
     monitorDirectPlayback(player, state);
   }
@@ -451,6 +481,13 @@
   // and unrelated Nextcloud mutations before querying the quality menu.
   new MutationObserver((records) => {
     for (const record of records) {
+      for (const node of record.removedNodes || []) {
+        if (node.nodeType !== 1) continue;
+        if (node.matches('media-player') && !node.isConnected) forgetDirectPlayback(node);
+        for (const player of node.querySelectorAll('media-player')) {
+          if (!player.isConnected) forgetDirectPlayback(player);
+        }
+      }
       for (const node of record.addedNodes) {
         if (node.nodeType !== 1) continue;
         if (node.matches('media-player')) watchPlayer(node);
@@ -606,9 +643,22 @@
       }, true);
       player.addEventListener('waiting', () => scheduleDirectStall(player));
       player.addEventListener('stalled', () => scheduleDirectStall(player));
-      player.addEventListener('playing', () => stopDirectTimer(directPlayback.get(player)));
-      player.addEventListener('can-play', () => stopDirectTimer(directPlayback.get(player)));
+      const continueDirectMonitoring = () => {
+        const state = directPlayback.get(player);
+        clearDirectStall(state);
+        if (state?.mode === 'direct' && player.isConnected && !player.paused && !player.ended) {
+          monitorDirectPlayback(player, state);
+        }
+      };
+      player.addEventListener('playing', continueDirectMonitoring);
+      player.addEventListener('can-play', continueDirectMonitoring);
       player.addEventListener('pause', () => stopDirectTimer(directPlayback.get(player)));
+      player.addEventListener('ended', () => stopDirectTimer(directPlayback.get(player)));
+      player.addEventListener('seeking', () => {
+        const state = directPlayback.get(player);
+        clearDirectStall(state);
+        resetDirectSamples(state);
+      });
       // ready() decides autoplay after dispatching can-play and awaiting
       // storage. Keep it suppressed for an explicitly paused asset until an
       // intentional play or another asset, rather than restoring it too early.
@@ -636,3 +686,4 @@
   connectSettings();
   for (const player of document.querySelectorAll('media-player')) watchPlayer(player);
 })();
+

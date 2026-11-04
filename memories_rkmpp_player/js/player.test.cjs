@@ -415,8 +415,182 @@ test('initial rendition uses actual advertised bitrate, not fixed resolution', (
 const { preventiveLevel } = require('./player.js');
 test('predictive quality reduces bitrate before buffer exhaustion', () => {
   const levels = [{ bitrate: 12000000 }, { bitrate: 6000000 }, { bitrate: 2000000 }];
-  assert.equal(preventiveLevel(levels, 0, 9000000, 4), 1);
+  // A four-second buffer uses a 60% safety budget: 5.4 Mbps excludes 6 Mbps.
+  assert.equal(preventiveLevel(levels, 0, 9000000, 4), 2);
   assert.equal(preventiveLevel(levels, 1, 9000000, 12), 1);
   assert.equal(preventiveLevel(levels, 0, 2000000, 3), 2);
   assert.equal(preventiveLevel(levels, 0, 0, 3), 0);
 });
+
+function directPlayer() {
+  const hub = eventHub();
+  const intervals = new Map();
+  const timeouts = new Map();
+  let timerId = 0, now = 0, mutation;
+  const master = 'https://cloud.example/apps/memories/api/video/transcode/abcdef123456/123/index.m3u8?token=keep';
+  let source = { src: master };
+  const media = {
+    readyState: 4, currentTime: 10, duration: 120, ended: false, bufferEnd: 30,
+    buffered: { length: 1, start: () => 0, end: () => media.bufferEnd },
+  };
+  const player = {
+    nodeType: 1, isConnected: true, paused: false, seeking: false, ended: false,
+    currentTime: 10, autoPlay: false, autoplay: false, sources: [],
+    querySelector: () => media, querySelectorAll: () => [], matches: name => name === 'media-player',
+    addEventListener: (name, callback, options) => hub.add(name, callback, !!options?.once),
+    get src() { return source; },
+    set src(value) { source = value; this.sources.push(value); hub.emit('source-change', { detail: value }); },
+    play() { this.paused = false; hub.emit('playing'); return Promise.resolve(); },
+    pause() { this.paused = true; hub.emit('pause'); },
+  };
+  vm.runInNewContext(fs.readFileSync(require.resolve('./player.js'), 'utf8'), {
+    URL, WeakMap, WeakSet, Map, Symbol, Date, console: {info() {}, warn() {}},
+    performance: {now: () => now},
+    setInterval: fn => { const id = ++timerId; intervals.set(id, fn); return id; },
+    clearInterval: id => intervals.delete(id),
+    setTimeout: (fn, delay) => { const id = ++timerId; timeouts.set(id, {fn, deadline: now + delay}); return id; },
+    clearTimeout: id => timeouts.delete(id),
+    location: {origin: 'https://cloud.example', href: 'https://cloud.example/apps/memories/', pathname: '/apps/memories/'},
+    window: {addEventListener() {}},
+    document: {documentElement: {}, addEventListener() {}, querySelectorAll: name => name === 'media-player' ? [player] : []},
+    MutationObserver: class {constructor(callback) {mutation = callback;} observe() {}},
+  });
+  return {
+    player, media, master, intervals, timeouts, emit: hub.emit,
+    remove() {
+      player.isConnected = false;
+      mutation([{removedNodes: [player], addedNodes: [], target: {nodeType: 1, closest() {}}}]);
+    },
+    tick(seconds = 1) {
+      now += seconds * 1000;
+      for (const fn of [...intervals.values()]) fn();
+      for (const [id, timer] of [...timeouts]) {
+        if (timer.deadline <= now) { timeouts.delete(id); timer.fn(); }
+      }
+    },
+  };
+}
+
+test('direct playback keeps monitoring after can-play/playing and falls back before starvation once', () => {
+  const h = directPlayer();
+  assert.equal(h.intervals.size, 1);
+  h.emit('can-play');
+  h.emit('playing');
+  assert.equal(h.intervals.size, 1);
+  h.media.bufferEnd = 17; h.tick();
+  h.media.bufferEnd = 16; h.tick();
+  h.media.bufferEnd = 15; h.tick();
+  assert.equal(h.player.src.src, h.master);
+  assert.equal(h.intervals.size, 0);
+  assert.equal(h.timeouts.size, 0);
+  const loads = h.player.sources.length;
+  h.emit('waiting'); h.emit('error', {stopImmediatePropagation() {}}); h.tick(10);
+  assert.equal(h.player.sources.length, loads);
+});
+
+test('pause clears direct work; resume starts one monitor with fresh buffer samples', () => {
+  const h = directPlayer();
+  h.media.bufferEnd = 17; h.tick();
+  h.media.bufferEnd = 16; h.tick();
+  h.emit('waiting');
+  assert.equal(h.timeouts.size, 1);
+  h.player.pause();
+  assert.equal(h.intervals.size, 0);
+  assert.equal(h.timeouts.size, 0);
+  h.tick(10);
+  h.player.play(); h.emit('playing');
+  assert.equal(h.intervals.size, 1);
+  h.media.bufferEnd = 15; h.tick();
+  assert.notEqual(h.player.src.src, h.master);
+  h.media.bufferEnd = 14; h.tick();
+  assert.notEqual(h.player.src.src, h.master);
+  h.media.bufferEnd = 13; h.tick();
+  assert.equal(h.player.src.src, h.master);
+});
+
+test('a fully buffered tail and ended event do not trigger unnecessary transcoding', () => {
+  const h = directPlayer();
+  h.media.bufferEnd = h.media.duration;
+  for (const time of [113, 114, 115, 116, 117, 118]) {
+    h.media.currentTime = time; h.tick();
+  }
+  assert.notEqual(h.player.src.src, h.master);
+  h.player.ended = h.media.ended = true;
+  h.emit('ended'); h.emit('waiting'); h.tick(10);
+  assert.equal(h.intervals.size, 0);
+  assert.equal(h.timeouts.size, 0);
+  assert.notEqual(h.player.src.src, h.master);
+});
+
+test('seeking cancels a pending stall and clears old risk samples', () => {
+  const h = directPlayer();
+  h.media.bufferEnd = 17; h.tick();
+  h.media.bufferEnd = 16; h.tick();
+  h.emit('waiting');
+  h.player.seeking = true; h.emit('seeking'); h.emit('waiting');
+  assert.equal(h.timeouts.size, 0);
+  h.tick(10);
+  h.player.seeking = false;
+  h.media.bufferEnd = 15; h.tick();
+  assert.notEqual(h.player.src.src, h.master);
+});
+
+test('healthy playback cancels the stall deadline without stopping buffer monitoring', () => {
+  const h = directPlayer();
+  h.emit('waiting');
+  assert.equal(h.timeouts.size, 1);
+  h.emit('playing');
+  assert.equal(h.timeouts.size, 0);
+  assert.equal(h.intervals.size, 1);
+  h.tick(10);
+  assert.notEqual(h.player.src.src, h.master);
+});
+
+test('sustained waiting falls back after its deadline and preserves the current position', () => {
+  const h = directPlayer();
+  h.media.bufferEnd = h.media.currentTime;
+  h.emit('waiting'); h.tick(5);
+  assert.notEqual(h.player.src.src, h.master);
+  h.tick();
+  assert.equal(h.player.src.src, h.master);
+  h.player.currentTime = 0;
+  h.emit('can-play');
+  assert.equal(h.player.currentTime, h.media.currentTime);
+  assert.equal(h.player.paused, false);
+});
+
+test('another direct-play asset cancels the previous stall and targets only its own fallback', () => {
+  const h = directPlayer();
+  h.emit('waiting');
+  const nextMaster = h.master.replace('/123/', '/456/');
+  h.player.src = {src: nextMaster};
+  assert.equal(h.timeouts.size, 0);
+  assert.equal(h.intervals.size, 1);
+  assert.ok(h.player.src.src.includes('/stream/456'));
+  h.emit('can-play'); h.tick(10);
+  assert.ok(h.player.src.src.includes('/stream/456'));
+  h.emit('error', {stopImmediatePropagation() {}});
+  assert.equal(h.player.src.src, nextMaster);
+});
+
+test('unrelated source replacement discards timers and cannot fall back to the previous asset', () => {
+  const h = directPlayer();
+  h.emit('waiting');
+  h.player.src = {src: 'https://cloud.example/unrelated.mp4', type: 'video/mp4'};
+  assert.equal(h.intervals.size, 0);
+  assert.equal(h.timeouts.size, 0);
+  h.emit('error', {stopImmediatePropagation() { throw new Error('old direct handler intercepted unrelated error'); }});
+  h.tick(10);
+  assert.equal(h.player.src.src, 'https://cloud.example/unrelated.mp4');
+});
+
+test('removed players release timers and ignore late direct errors', () => {
+  const h = directPlayer();
+  h.emit('waiting'); h.remove();
+  assert.equal(h.intervals.size, 0);
+  assert.equal(h.timeouts.size, 0);
+  h.emit('error', {stopImmediatePropagation() { throw new Error('removed player intercepted error'); }});
+  h.tick(10);
+  assert.notEqual(h.player.src.src, h.master);
+});
+
