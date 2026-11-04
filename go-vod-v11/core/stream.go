@@ -382,7 +382,11 @@ func (s *Stream) spec(startAt float64, isHls bool) ffmpeg.Spec {
 	// fine without keyframes, so it always copies.
 	_, grid := s.m.CopySegments()
 	width, height := s.width, s.height
-	if s.c.RKMPP && ffmpeg.SwapsAxes(s.m.probe.Rotation) && (s.quality == QUALITY_MAX || s.quality == QUALITY_DIRECT) {
+	// The ladder stores low qualities as long-edge x short-edge, but FFmpeg
+	// scales *before* applying display-matrix rotation. Feed RGA dimensions
+	// in the source's raw orientation. Max/direct already use raw dimensions.
+	if s.c.RKMPP && s.quality != QUALITY_MAX && s.quality != QUALITY_DIRECT &&
+		s.quality != QUALITY_AUDIO && s.m.probe.Width < s.m.probe.Height {
 		width, height = height, width
 	}
 

@@ -58,7 +58,7 @@ func TestRKMPPMaxDimensionsAreEven(t *testing.T) {
 
 func TestOutOfRangeChunksDoNotStartAnEncoder(t *testing.T) {
 	m := &Manager{c: &config.Config{RKMPP: true}, tc: config.TCfg{ChunkSize: 3}, probe: &ProbeVideoData{Duration: 10 * time.Second}, streams: map[string]*Stream{"720p": {quality: "720p"}, "max": {quality: "max"}}}
-	for _, id := range []int{-1, 999999} {
+	for _, id := range []int{-1, 4, 999999} {
 		require.False(t, m.ServeChunk(nil, "720p", id))
 	}
 }

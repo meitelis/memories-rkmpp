@@ -556,16 +556,38 @@ func (m *Manager) HasStream(quality string) bool {
 }
 
 func (m *Manager) ServeChunk(w http.ResponseWriter, quality string, id int) bool {
+	// Reject impossible segment requests before they can start an encoder.
+	// In particular, a negative id must never be passed to Stream.ServeChunk.
+	if id < 0 {
+		return false
+	}
 	stream, ok := m.streams[quality]
 	if !ok {
 		return false
 	}
 	if quality == QUALITY_DIRECT {
-		// Trigger the probe; on empty grid the stream re-encodes.
+		// Stream-copy direct uses its own keyframe grid, which may contain
+		// more segments than the fixed-duration transcode ladder.
 		m.EnsureCopySegments()
+		if segs, copied := m.CopySegments(); copied {
+			if id >= len(segs) {
+				return false
+			}
+		} else if m.chunkOutsideDuration(id) {
+			return false
+		}
+	} else if m.chunkOutsideDuration(id) {
+		return false
 	}
 	stream.ServeChunk(w, id)
 	return true
+}
+
+// chunkOutsideDuration bounds fixed-length rendition requests; unlike
+// stream-copy direct, these segments follow the configured ChunkSize grid.
+func (m *Manager) chunkOutsideDuration(id int) bool {
+	return m.probe != nil && m.tc.ChunkSize > 0 && m.probe.Duration > 0 &&
+		float64(id)*float64(m.tc.ChunkSize) >= m.probe.Duration.Seconds()
 }
 
 func (m *Manager) ServeInit(w http.ResponseWriter, quality string) bool {
