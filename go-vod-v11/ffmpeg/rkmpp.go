@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	EncoderRKMPP = "h264_rkmpp"
+	EncoderRKMPP     = "h264_rkmpp"
 	EncoderRKMPPHEVC = "hevc_rkmpp"
 )
 
@@ -64,7 +64,7 @@ func buildRKMPPArgs(s Spec) []string {
 	if hardwareFrames {
 		args = append(args, "-hwaccel", "rkmpp", "-hwaccel_output_format", "drm_prime")
 	}
-	rotation := ((s.Rotation%360)+360)%360
+	rotation := ((s.Rotation % 360) + 360) % 360
 	if rotation != 0 {
 		args = append(args, "-noautorotate")
 	}
@@ -177,5 +177,5 @@ func RKMPPMinBitrate(audio AudioInfo) int {
 			audioRate = int(math.Min(float64(audio.BitRate), 256000))
 		}
 	}
-	return (128000+audioRate)*10/9
+	return (128000 + audioRate) * 10 / 9
 }
