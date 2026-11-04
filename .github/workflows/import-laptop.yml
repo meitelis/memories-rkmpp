@@ -1,0 +1,45 @@
+name: One-time laptop code import
+on:
+  push:
+    branches:
+      - import/laptop-2026-11-04
+    paths:
+      - '.github/workflows/import-laptop.yml'
+permissions:
+  contents: write
+jobs:
+  apply:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Verify and apply laptop patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .github/import/laptop-patch.part{1..4} | base64 -d > /tmp/laptop.patch.xz
+          echo "25ac6f64baa37bf22e3803b99634e636ba0eb737c211ee36494cd4868231dc66  /tmp/laptop.patch.xz" | sha256sum -c -
+          xz -dc /tmp/laptop.patch.xz > /tmp/laptop.patch
+          git apply --check /tmp/laptop.patch
+          git apply /tmp/laptop.patch
+          rm .github/import/laptop-patch.part{1..4}
+          rmdir .github/import
+          rm .github/workflows/import-laptop.yml
+          git add -A
+          git diff --cached --check
+          git diff --cached --name-only
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m "wip: import 20 laptop RKMPP v11 source files"
+          git push origin HEAD:refs/heads/import/laptop-2026-11-04
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go-vod-v11/go.mod
+          cache-dependency-path: go-vod-v11/go.sum
+      - name: Compile, test, vet and format the imported code
+        working-directory: go-vod-v11
+        run: |
+          go test ./...
+          go vet ./...
+          go build ./...
+          test -z "$(gofmt -l .)"
