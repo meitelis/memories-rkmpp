@@ -59,7 +59,11 @@ func TestRKMPPv11HEVCHasHVC1Tag(t *testing.T) {
 }
 
 func TestRKMPPv11HardwareDecodeFallsBackForUnsupportedFormats(t *testing.T) {
-	for _, tc := range []struct{ codec, pixel string; depth int; hdr bool }{
+	for _, tc := range []struct {
+		codec, pixel string
+		depth        int
+		hdr          bool
+	}{
 		{"prores", "yuv422p10le", 10, false},
 		{"hevc", "yuv444p10le", 10, false},
 		{"hevc", "yuv420p12le", 12, false},
