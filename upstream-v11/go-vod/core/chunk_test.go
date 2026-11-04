@@ -1,0 +1,202 @@
+package core
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/pulsejet/memories/go-vod/config"
+	"github.com/stretchr/testify/require"
+)
+
+func TestChunkSignal(t *testing.T) {
+	c := NewChunk(3)
+	select {
+	case <-c.doneCh:
+		t.Fatal("signaled before signal")
+	default:
+	}
+
+	c.signal(true)
+	require.True(t, c.done)
+	select {
+	case <-c.doneCh:
+	default:
+		t.Fatal("not woken on completion")
+	}
+
+	require.NotPanics(t, func() { c.signal(true) })
+
+	abandoned := NewChunk(4)
+	abandoned.signal(false)
+	require.False(t, abandoned.done)
+	select {
+	case <-abandoned.doneCh:
+	default:
+		t.Fatal("not woken on abandon")
+	}
+}
+
+func testStream(t *testing.T) (*Stream, string) {
+	t.Helper()
+	dir := t.TempDir()
+	return &Stream{
+		c:       &config.Config{},
+		m:       &Manager{tempDir: dir, id: "t"},
+		quality: "480p",
+		chunks:  make(map[int]*Chunk),
+	}, dir
+}
+
+func TestWaitForChunkDone(t *testing.T) {
+	s, dir := testStream(t)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "480p-000000.m4s"), []byte("segment"), 0644))
+
+	chunk := NewChunk(0)
+	chunk.signal(true)
+	s.chunks[0] = chunk
+
+	w := httptest.NewRecorder()
+	s.waitForChunk(w, chunk)
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Equal(t, "segment", w.Body.String())
+}
+
+func TestWaitForChunkAbandoned(t *testing.T) {
+	s, _ := testStream(t)
+	oldWait := chunkWait
+	chunkWait = time.Second
+	defer func() { chunkWait = oldWait }()
+
+	chunk := NewChunk(1)
+	s.chunks[1] = chunk
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		s.mutex.Lock()
+		s.coder = &exec.Cmd{}
+		s.mutex.Unlock()
+		chunk.signal(false)
+	}()
+
+	w := httptest.NewRecorder()
+	s.waitForChunk(w, chunk)
+	require.Equal(t, http.StatusConflict, w.Code)
+}
+
+func TestWaitForChunkTimeout(t *testing.T) {
+	s, _ := testStream(t)
+	oldWait := chunkWait
+	chunkWait = 20 * time.Millisecond
+	defer func() { chunkWait = oldWait }()
+
+	chunk := NewChunk(2)
+	s.chunks[2] = chunk
+
+	w := httptest.NewRecorder()
+	s.waitForChunk(w, chunk)
+	require.Equal(t, http.StatusRequestTimeout, w.Code)
+}
+
+func TestServeInitReady(t *testing.T) {
+	s, dir := testStream(t)
+	s.initPath = filepath.Join(dir, "480p-init-1.m4s")
+	require.NoError(t, os.WriteFile(s.initPath, []byte("init"), 0644))
+
+	w := httptest.NewRecorder()
+	s.ServeInit(w)
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Equal(t, "video/mp4", w.Header().Get("Content-Type"))
+	require.Equal(t, "init", w.Body.String())
+}
+
+func TestServeInitWaitsForRun(t *testing.T) {
+	s, dir := testStream(t)
+	s.coder = &exec.Cmd{}
+	s.initChunk = NewChunk(-1)
+	path := filepath.Join(dir, "480p-init-1.m4s")
+	require.NoError(t, os.WriteFile(path, []byte("init"), 0644))
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		s.mutex.Lock()
+		s.initPath = path
+		s.initChunk.signal(true)
+		s.mutex.Unlock()
+	}()
+
+	w := httptest.NewRecorder()
+	s.ServeInit(w)
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Equal(t, "init", w.Body.String())
+}
+
+func TestServeInitFollowsRestart(t *testing.T) {
+	s, dir := testStream(t)
+	s.coder = &exec.Cmd{}
+	s.initChunk = NewChunk(-1)
+	path := filepath.Join(dir, "480p-init-2.m4s")
+	require.NoError(t, os.WriteFile(path, []byte("init"), 0644))
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		s.mutex.Lock()
+		old := s.initChunk
+		s.coder = &exec.Cmd{}
+		s.initChunk = NewChunk(-1)
+		old.signal(false)
+		next := s.initChunk
+		s.mutex.Unlock()
+
+		time.Sleep(10 * time.Millisecond)
+		s.mutex.Lock()
+		s.initPath = path
+		next.signal(true)
+		s.mutex.Unlock()
+	}()
+
+	w := httptest.NewRecorder()
+	s.ServeInit(w)
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Equal(t, "init", w.Body.String())
+}
+
+func TestServeInitRunFailed(t *testing.T) {
+	s, _ := testStream(t)
+	s.coder = &exec.Cmd{}
+	s.initChunk = NewChunk(-1)
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		s.mutex.Lock()
+		s.exited = true
+		s.failChunks()
+		s.mutex.Unlock()
+	}()
+
+	w := httptest.NewRecorder()
+	s.ServeInit(w)
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+}
+
+func TestServeInitTimeout(t *testing.T) {
+	s, _ := testStream(t)
+	oldWait := chunkWait
+	chunkWait = 20 * time.Millisecond
+	defer func() { chunkWait = oldWait }()
+	s.coder = &exec.Cmd{}
+	s.initChunk = NewChunk(-1)
+
+	w := httptest.NewRecorder()
+	s.ServeInit(w)
+	require.Equal(t, http.StatusRequestTimeout, w.Code)
+}
+
+func TestServeInitClosed(t *testing.T) {
+	s, _ := testStream(t)
+	s.closed = true
+
+	w := httptest.NewRecorder()
+	s.ServeInit(w)
+	require.Equal(t, http.StatusConflict, w.Code)
+}

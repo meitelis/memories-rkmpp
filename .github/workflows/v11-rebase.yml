@@ -1,0 +1,35 @@
+name: Memories 11.0.2 upstream rebase baseline
+on:
+  push:
+    paths:
+      - 'go-vod-v11/**'
+      - '.github/workflows/v11-rebase.yml'
+  pull_request:
+    paths:
+      - 'go-vod-v11/**'
+      - '.github/workflows/v11-rebase.yml'
+permissions:
+  contents: read
+jobs:
+  upstream-v11:
+    name: Go 0.7.0 baseline (not RKMPP)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: go-vod-v11
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go-vod-v11/go.mod
+          cache-dependency-path: go-vod-v11/go.sum
+      - name: Assert upstream protocol
+        run: |
+          grep -F 'const VERSION = "0.7.0"' main.go
+          test -z "$(gofmt -l .)"
+      - name: Test and vet
+        run: |
+          go test ./...
+          go vet ./...
+          go build ./...

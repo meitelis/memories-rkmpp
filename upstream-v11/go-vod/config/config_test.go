@@ -1,0 +1,158 @@
+package config
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+)
+
+func TestDefaultsValid(t *testing.T) {
+	c := Defaults("test")
+	c.FFmpeg, c.FFprobe, c.TempDir = "/bin/ffmpeg", "/bin/ffprobe", t.TempDir()
+	c.CacheDir_ = t.TempDir()
+	c.NextcloudURL = "http://localhost"
+	require.NoError(t, c.Validate())
+}
+
+func TestFileURL(t *testing.T) {
+	c := Defaults("test")
+	c.NextcloudURL = "https://cloud.example.com/"
+	require.Equal(t, "https://cloud.example.com/index.php/apps/memories/api/stream/7", c.FileURL(7))
+}
+
+func TestLiveURL(t *testing.T) {
+	c := Defaults("test")
+	c.NextcloudURL = "https://cloud.example.com/"
+	require.Equal(t,
+		"https://cloud.example.com/index.php/apps/memories/api/video/livephoto/7?liveid=self__trailer",
+		c.LiveURL(7, "self__trailer"))
+	require.Equal(t,
+		"https://cloud.example.com/index.php/apps/memories/api/video/livephoto/7?liveid=self__exifbin%3DEmbeddedVideoFile",
+		c.LiveURL(7, "self__exifbin=EmbeddedVideoFile"))
+}
+
+func TestNextcloudEnvPriority(t *testing.T) {
+	c := Defaults("test")
+	c.FFmpeg, c.FFprobe, c.TempDir = "/bin/ffmpeg", "/bin/ffprobe", t.TempDir()
+	c.CacheDir_ = t.TempDir()
+	c.NextcloudURL = "http://file"
+
+	t.Setenv("NEXTCLOUD_HOST", "http://env")
+	t.Setenv("GO_VOD_FFMPEG_PATH", "/env/ffmpeg")
+	t.Setenv("GO_VOD_FFPROBE_PATH", "/env/ffprobe")
+	t.Setenv("GO_VOD_TEMP_DIR", "/env/tmp")
+	require.NoError(t, c.AutoDetect())
+	require.Equal(t, "http://env", c.NextcloudURL)
+	require.Equal(t, "/env/ffmpeg", c.FFmpeg)
+	require.Equal(t, "/env/ffprobe", c.FFprobe)
+	require.Equal(t, "/env/tmp", c.TempDir)
+	require.NoError(t, c.Validate())
+}
+
+func TestBridgeEnv(t *testing.T) {
+	c := Defaults("test")
+	c.FFmpeg, c.FFprobe, c.TempDir = "/bin/ffmpeg", "/bin/ffprobe", t.TempDir()
+
+	t.Setenv("GO_VOD_BRIDGE_ENABLED", "0")
+	t.Setenv("GO_VOD_BRIDGE_MAX_WORKERS", "8")
+	t.Setenv("GO_VOD_BRIDGE_MIN_WORKERS", "2")
+	t.Setenv("GO_VOD_BRIDGE_WORKER_TTL", "45")
+	t.Setenv("GO_VOD_BRIDGE_IDLE_TIME", "")
+	require.NoError(t, c.AutoDetect())
+	require.Equal(t, Bridge{Enabled: false, MaxWorkers: 8, MinWorkers: 2, WorkerTTL: 45, IdleTime: 5}, c.Bridge)
+
+	t.Setenv("GO_VOD_BRIDGE_MAX_WORKERS", "many")
+	require.ErrorContains(t, c.AutoDetect(), "GO_VOD_BRIDGE_MAX_WORKERS")
+}
+
+func TestLoadFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "valid.json")
+	require.NoError(t, os.WriteFile(path, []byte(
+		`{"bind": ":49999", "lookBehind": 5}`,
+	), 0644))
+
+	c := Defaults("test")
+	require.NoError(t, c.LoadFile(path))
+	require.Equal(t, ":49999", c.Bind)
+	require.Equal(t, 5, c.LookBehind)
+}
+
+func TestLoadFileMissing(t *testing.T) {
+	c := Defaults("test")
+	require.Error(t, c.LoadFile(filepath.Join(t.TempDir(), "does-not-exist.json")))
+}
+
+func TestLoadFileBadJSON(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bad.json")
+	require.NoError(t, os.WriteFile(path, []byte("{oops"), 0644))
+	require.Error(t, Defaults("test").LoadFile(path))
+}
+
+func TestConfigCacheDir(t *testing.T) {
+	var c Config
+	require.NoError(t, json.Unmarshal([]byte(`{"cacheDir":"/from-php"}`), &c))
+
+	t.Setenv("CACHE_DIR", "/from-env")
+	require.Equal(t, "/from-env", c.CacheDir())
+
+	t.Setenv("CACHE_DIR", "")
+	require.Equal(t, "/from-php", c.CacheDir())
+
+	var empty Config
+	require.NoError(t, json.Unmarshal([]byte(`{}`), &empty))
+	require.Equal(t, "", empty.CacheDir())
+}
+
+func TestValidate(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*Config)
+		ok     bool
+	}{
+		{"valid", func(*Config) {}, true},
+		{"bad buffers", func(c *Config) { c.GoalBufferMax = 0 }, false},
+		{"negative lookbehind", func(c *Config) { c.LookBehind = -1 }, false},
+		{"missing paths", func(c *Config) { c.FFmpeg, c.FFprobe, c.TempDir = "", "", "" }, false},
+		{"missing nextcloud", func(c *Config) { c.NextcloudURL = "" }, false},
+		{"bad nextcloud url", func(c *Config) { c.NextcloudURL = "notaurl" }, false},
+		{"missing cachedir", func(c *Config) { c.CacheDir_ = "" }, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("CACHE_DIR", "")
+			c := Defaults("test")
+			c.FFmpeg, c.FFprobe, c.TempDir = "/bin/ffmpeg", "/bin/ffprobe", t.TempDir()
+			c.CacheDir_ = t.TempDir()
+			c.NextcloudURL = "http://localhost"
+			tc.mutate(c)
+			if tc.ok {
+				require.NoError(t, c.Validate())
+			} else {
+				require.Error(t, c.Validate())
+			}
+		})
+	}
+}
+
+func TestAutoDetect(t *testing.T) {
+	dir := t.TempDir()
+	for _, bin := range []string{"ffmpeg", "ffprobe"} {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, bin), []byte("#!/bin/sh\n"), 0755))
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	c := Defaults("test")
+	require.NoError(t, c.AutoDetect())
+	require.Equal(t, filepath.Join(dir, "ffmpeg"), c.FFmpeg)
+	require.Equal(t, filepath.Join(dir, "ffprobe"), c.FFprobe)
+	require.NotEmpty(t, c.TempDir)
+
+	preset := Defaults("test")
+	preset.FFmpeg = "/custom/ffmpeg"
+	require.NoError(t, preset.AutoDetect())
+	require.Equal(t, "/custom/ffmpeg", preset.FFmpeg)
+}
