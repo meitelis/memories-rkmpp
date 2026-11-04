@@ -360,7 +360,7 @@ func BuildArgs(s Spec) []string {
 		)
 	}
 
-	if s.Audio.CodecName != "" {
+	if s.Audio.CodecName != "" && !s.SeparateAudio {
 		args = append(args, "-map", "0:a:0?")
 		if s.Audio.CodecName == "aac" && s.Audio.Channels >= 1 && s.Audio.Channels <= 2 {
 			args = append(args, "-c:a", "copy")
@@ -374,6 +374,9 @@ func BuildArgs(s Spec) []string {
 		}
 	}
 
+	if s.SeparateAudio {
+		args = append(args, "-an")
+	}
 	return args
 }
 

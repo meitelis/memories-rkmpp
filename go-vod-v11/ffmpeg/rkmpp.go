@@ -38,6 +38,18 @@ func buildRKMPPAudioArgs(s Spec) []string {
 		args = append(args, "-ss", fmt.Sprintf("%.6f", s.StartAt))
 	}
 	args = append(args, remoteInputArgs(s.Headers)...)
+	// A complete compatible AAC source can keep its original packets. It
+	// still has one separate audio playlist shared by every video quality.
+	if copyRKMPPAudio(s.Audio) && s.Audio.DurationSeconds > 0 && s.Audio.DurationSeconds >= s.EndAt-0.03 {
+		args = append(args, "-i", s.Input, "-copyts", "-fflags", "+genpts", "-vn", "-map", "0:a:0", "-c:a", "copy")
+		if s.StartAt > 0 {
+			args = append(args, "-copypriorss:a", "0")
+		}
+		if s.EndAt > s.StartAt {
+			args = append(args, "-to", fmt.Sprintf("%.6f", s.EndAt))
+		}
+		return args
+	}
 	filter := fmt.Sprintf("aresample=async=1:first_pts=%d", int64(math.Round(s.StartAt*48000)))
 	if remaining := s.EndAt - s.StartAt; remaining > 0 {
 		// A shorter audio source must not make HLS wait for nonexistent tail
@@ -97,6 +109,12 @@ func usesRKMPPFrames(s Spec) bool {
 		"h264", "hevc", "vp8", "vp9", "av1", "h263", "mpeg1video",
 		"mpeg2video", "mpeg4", "mjpeg",
 	}, s.CodecName)
+}
+
+// SupportsRKMPPDecode checks source support independently of HDR mapping.
+func SupportsRKMPPDecode(s Spec) bool {
+	s.RKMPP, s.HDR = true, false
+	return usesRKMPPFrames(s)
 }
 
 // Build the v11 encoder prefix only; SegmentArgs remains the official

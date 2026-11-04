@@ -1,0 +1,13 @@
+.mr-v11-status {
+  position: absolute;
+  top: 64px;
+  left: 14px;
+  z-index: 12;
+  padding: 5px 9px;
+  border-radius: 5px;
+  background: rgba(0, 0, 0, .72);
+  color: #fff;
+  font: 12px/1.4 system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}

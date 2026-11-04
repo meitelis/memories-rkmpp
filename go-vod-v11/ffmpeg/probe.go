@@ -53,11 +53,12 @@ type VideoInfo struct {
 
 // AudioInfo describes the first audio stream; empty when silent.
 type AudioInfo struct {
-	CodecName  string
-	Profile    string
-	Channels   int
-	SampleRate int
-	BitRate    int
+	DurationSeconds float64
+	CodecName       string
+	Profile         string
+	Channels        int
+	SampleRate      int
+	BitRate         int
 }
 
 type sideData struct {
@@ -181,12 +182,14 @@ func probeAudio(streams []videoStream) AudioInfo {
 		}
 		rate, _ := strconv.Atoi(st.SampleRate)
 		br, _ := strconv.Atoi(st.BitRate)
+		duration, _ := strconv.ParseFloat(st.Duration, 64)
 		return AudioInfo{
-			CodecName:  st.CodecName,
-			Profile:    st.Profile,
-			Channels:   st.Channels,
-			SampleRate: rate,
-			BitRate:    br,
+			DurationSeconds: duration,
+			CodecName:       st.CodecName,
+			Profile:         st.Profile,
+			Channels:        st.Channels,
+			SampleRate:      rate,
+			BitRate:         br,
 		}
 	}
 	return AudioInfo{}

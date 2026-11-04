@@ -299,15 +299,28 @@ func NewManager(a NewManagerArgs) (*Manager, error) {
 		}
 	}
 
-	if rkmpp && m.IsCopyEligible() && len(m.streams) > 1 {
+	if rkmpp && m.IsCopyEligible() {
 		m.streams[QUALITY_MAX] = &Stream{c: m.c, m: m, quality: QUALITY_MAX, height: maxHeight, width: maxWidth, bitrate: refBitrate, order: 1}
+		// Keep the original as the highest same-codec quality. Re-encoding
+		// an already compatible HEVC source loses detail for no benefit.
+		direct := m.streams[QUALITY_DIRECT]
+		audioRate := 0
+		if m.probe.Audio.CodecName != "" {
+			audioRate = max(128000, m.probe.Audio.BitRate)
+		}
+		direct.bitrate = (m.probe.BitRate + audioRate) * 11 / 10
+		for _, stream := range m.streams {
+			if stream != direct {
+				stream.bitrate = min(stream.bitrate, direct.bitrate*85/100)
+			}
+		}
 	}
 
 	// Add a shared audio-only stream so all video renditions can mute their
 	// own audio and the player switches quality without audio gaps.
 	// Only create it when audio needs normalization; copyable AAC-LC is
 	// handled inline by each rendition's -c:a copy path instead.
-	if rkmpp && ffmpeg.NormalizeRKMPPAudio(m.probe.Audio) {
+	if rkmpp && m.probe.Audio.CodecName != "" {
 		m.streams[QUALITY_AUDIO] = &Stream{
 			c:       m.c,
 			m:       m,
@@ -388,7 +401,7 @@ func (m *Manager) Renditions() []Rendition {
 		if s.quality == QUALITY_AUDIO {
 			continue
 		}
-		if m.c.RKMPP && s.quality == QUALITY_DIRECT && len(m.streams) > 1 {
+		if m.c.RKMPP && m.IsCopyEligible() && s.quality == QUALITY_MAX {
 			continue
 		}
 		width, height := s.width, s.height
@@ -401,11 +414,11 @@ func (m *Manager) Renditions() []Rendition {
 			width, height = height, width
 		}
 		codecs := ""
-		if m.OutputCodec() == "hevc" && s.quality != QUALITY_DIRECT {
+		if m.OutputCodec() == "hevc" {
 			codecs = ffmpeg.HEVCCodecs(width, height, m.FrameRate(), m.probe.Audio.CodecName != "")
 		}
 		// Video renditions link to the shared audio group when present.
-		separateAudio := hasAudio && s.quality != QUALITY_DIRECT
+		separateAudio := hasAudio
 		out = append(out, Rendition{
 			Quality:       s.quality,
 			Width:         width,
@@ -664,6 +677,14 @@ func (m *Manager) ffprobe() error {
 	if m.c.RKMPP && m.probe.DolbyVision {
 		return fmt.Errorf("Dolby Vision is not supported by the v11 RKMPP pipeline")
 	}
+	if m.c.RKMPP && m.c.RKMPPStrict {
+		if !ffmpeg.SupportsRKMPPDecode(ffmpeg.Spec{CodecName: m.probe.CodecName, PixelFormat: m.probe.PixelFormat, BitDepth: m.probe.BitDepth}) {
+			return fmt.Errorf("source %s/%s cannot use RKMPP hardware decoding; software video fallback is disabled", m.probe.CodecName, m.probe.PixelFormat)
+		}
+		if m.probe.HDR && !m.c.RKMPPOpenCL {
+			return fmt.Errorf("HDR requires Mali OpenCL; CPU video fallback is disabled")
+		}
+	}
 	if m.probe.Width <= 0 || m.probe.Height <= 0 || m.probe.Duration <= 0 ||
 		(m.c.RKMPP && (m.probe.Width < 2 || m.probe.Height < 2)) {
 		return fmt.Errorf("invalid video dimensions or duration for file %d", m.fileid)
@@ -675,10 +696,8 @@ func (m *Manager) ffprobe() error {
 		IsCodecFMP4(m.probe.CodecName)
 
 	if m.c.RKMPP {
-		m.copyEligible = m.copyEligible && m.probe.CodecName == CODEC_H264 && !m.probe.HDR && m.probe.BitDepth <= 8
-		if m.OutputCodec() == "hevc" {
-			m.copyEligible = false
-		}
+		m.copyEligible = m.copyEligible && m.probe.CodecName == m.OutputCodec() &&
+			!m.probe.HDR && m.probe.BitDepth <= 8
 	}
 
 	return nil

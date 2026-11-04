@@ -1,0 +1,34 @@
+# Build Dockerfile.rkmpp-test first. Reuse its validated server and media
+# runtime exactly, excluding the offline helper and Go test executables.
+ARG VERIFIED_IMAGE=local/memories-rkmpp:v11-smoke
+FROM ${VERIFIED_IMAGE} AS verified
+
+FROM golang:1.27-bookworm@sha256:d9b6a1beb9474adc2a1ce842573639b44b2a0dd49b6669f51d3821baf9ec37c9 AS health
+WORKDIR /src
+COPY cmd/govod-health/main.go ./main.go
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/govod-health main.go
+
+FROM scratch
+COPY --from=verified /usr/ /usr/
+COPY --from=verified /lib/ /lib/
+COPY --from=verified /etc/ /etc/
+COPY --from=verified /cache/ /cache/
+COPY --from=verified /tmp/ /tmp/
+COPY --from=verified /app/go-vod /app/go-vod
+COPY --from=health /out/govod-health /app/govod-health
+ENV PATH=/usr/local/bin:/app \
+    LD_LIBRARY_PATH=/usr/lib/jellyfin-ffmpeg/lib \
+    MEMORIES_RKMPP=1 \
+    MEMORIES_RKMPP_CODEC=hevc \
+    MEMORIES_RKMPP_OPENCL=true \
+    CACHE_DIR=/cache \
+    TMPDIR=/cache/tmp \
+    GO_VOD_TEMP_DIR=/cache/tmp/go-vod \
+    HOME=/tmp
+USER 1000:1000
+WORKDIR /app
+EXPOSE 47788
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 CMD ["/app/govod-health"]
+ENTRYPOINT ["/app/go-vod"]
+LABEL org.opencontainers.image.version="memories-11.0.2-govod-0.7.0-r1" \
+      cc.memories-rkmpp.stage="memories-11-runtime"

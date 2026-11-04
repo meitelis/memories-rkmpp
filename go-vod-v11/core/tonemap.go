@@ -32,6 +32,10 @@ func (s *Stream) transcodeSpec(startAt float64, isHLS bool) ffmpeg.Spec {
 			// MPP/OpenCL import depends on the actual source surfaces and HDR
 			// metadata. A different file's success cannot validate this source.
 			if err := ffmpeg.ProbeRKMPPOpenCL(context.Background(), spec); err != nil {
+				if s.c.RKMPPStrict {
+					s.hardwareError = err
+					return
+				}
 				log.Printf("%s-%s: Mali HDR probe failed; using CPU tone mapping: %v", s.m.id, s.quality, err)
 				return
 			}

@@ -33,6 +33,10 @@ func TestRKMPPUnusualAspectRatiosKeepLowerRenditions(t *testing.T) {
 					width, height = height, width
 				}
 				args := strings.Join(ffmpeg.BuildArgs(spec), " ")
+				if spec.Copy {
+					require.Contains(t, args, "-c:v copy")
+					continue
+				}
 				require.Contains(t, args, fmt.Sprintf("w=%d:h=%d", width, height))
 			}
 		})

@@ -57,10 +57,11 @@ type Stream struct {
 	// initChunk signals the current run's init, like a segment chunk.
 	initChunk *Chunk
 
-	tonemapOnce sync.Once
-	vaapiOpenCL bool
-	nvencCUDA   bool
-	rkmppOpenCL bool
+	tonemapOnce   sync.Once
+	vaapiOpenCL   bool
+	nvencCUDA     bool
+	rkmppOpenCL   bool
+	hardwareError error
 
 	inactive int
 	stop     chan bool
@@ -227,7 +228,12 @@ func (s *Stream) ServeFullVideo(w http.ResponseWriter, r *http.Request) error {
 		w.WriteHeader(http.StatusNoContent)
 		return nil
 	}
-	args := ffmpeg.MP4Args(s.transcodeSpec(0, false))
+	spec := s.transcodeSpec(0, false)
+	if s.hardwareError != nil {
+		w.WriteHeader(http.StatusUnsupportedMediaType)
+		return s.hardwareError
+	}
+	args := ffmpeg.MP4Args(spec)
 
 	coder := ffmpeg.Command(context.Background(), s.c.FFmpeg, args...)
 	log.Printf("%s-%s: %s", s.m.id, s.quality, strings.Join(ffmpeg.RedactArgs(coder.Args), " "))
@@ -400,6 +406,10 @@ func (s *Stream) spec(startAt float64, isHls bool) ffmpeg.Spec {
 	if audioOnly {
 		endAt = s.m.probe.Duration.Seconds()
 	}
+	forceSwTranspose := s.m.tc.ForceSwTranspose
+	if s.c.RKMPP && s.c.RKMPPStrict {
+		forceSwTranspose = false
+	}
 
 	return ffmpeg.Spec{
 		Bin:     s.c.FFmpeg,
@@ -442,7 +452,7 @@ func (s *Stream) spec(startAt float64, isHls bool) ffmpeg.Spec {
 		NVENCScale:      s.m.tc.NVENCScale,
 
 		UseTranspose:     s.m.tc.UseTranspose,
-		ForceSwTranspose: s.m.tc.ForceSwTranspose,
+		ForceSwTranspose: forceSwTranspose,
 		UseGopSize:       s.m.tc.UseGopSize,
 	}
 }
@@ -474,7 +484,14 @@ func (s *Stream) transcode(startId int) {
 	initPath := ffmpeg.InitPath(s.m.tempDir, s.quality, s.run)
 	s.initChunk = NewChunk(-1)
 
-	args := ffmpeg.SegmentArgs(s.transcodeSpec(startAt, true), startNumber, s.getSegmentPath(-1), initPath)
+	spec := s.transcodeSpec(startAt, true)
+	if s.hardwareError != nil {
+		log.Printf("%s-%s: hardware video required: %v", s.m.id, s.quality, s.hardwareError)
+		s.exited = true
+		s.failChunks()
+		return
+	}
+	args := ffmpeg.SegmentArgs(spec, startNumber, s.getSegmentPath(-1), initPath)
 	coder := ffmpeg.Command(context.Background(), s.c.FFmpeg, args...)
 
 	// Log command, quoting the args as needed

@@ -13,7 +13,7 @@ const KeyframeCacheFile = "keyframes.json"
 
 const ProbeCacheFile = "probe.json"
 
-const probeCacheVersion = 3
+const probeCacheVersion = 4
 
 // FileCacheDir is the file's cache home, sharded by hashed fileid.
 // Empty when caching is unavailable (no cache dir or fileid).

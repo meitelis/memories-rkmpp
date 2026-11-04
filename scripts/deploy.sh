@@ -5,7 +5,7 @@ usage() {
 }
 fail() { echo "Error: $*" >&2; exit 1; }
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
-compose_file=$script_dir/../compose.yml
+compose_file=$script_dir/../compose.10.2.yml
 project= image= nextcloud= app_path= backup_dir=
 docroot=/app/www/public
 web_user=abc

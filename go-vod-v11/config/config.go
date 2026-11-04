@@ -38,6 +38,7 @@ type Config struct {
 	Version          string `json:"-"`
 	VersionMonitor   bool   `json:"-"`
 	RKMPP            bool   `json:"-"`
+	RKMPPStrict      bool   `json:"rkmppStrict"`
 	RKMPPOpenCL      bool   `json:"rkmppOpenCL"`
 	RKMPPOutputCodec string `json:"rkmppOutputCodec" validate:"omitempty,oneof=h264 hevc"`
 }
@@ -67,6 +68,7 @@ func Defaults(version string) *Config {
 		ManagerIdleTime:  60,
 		RKMPP:            os.Getenv("MEMORIES_RKMPP") == "1",
 		RKMPPOpenCL:      true,
+		RKMPPStrict:      true,
 		RKMPPOutputCodec: "hevc",
 		Bridge: Bridge{
 			Enabled:    true,
@@ -162,6 +164,7 @@ func (c *Config) AutoDetect() error {
 
 	// Detect general configuration
 	if err := c.loadEnv(map[string]any{
+		"MEMORIES_RKMPP_STRICT":    &c.RKMPPStrict,
 		"NEXTCLOUD_HOST":           &c.NextcloudURL,
 		"NEXTCLOUD_ALLOW_INSECURE": &c.AllowInsecure,
 		"GO_VOD_FFMPEG_PATH":       &c.FFmpeg,
