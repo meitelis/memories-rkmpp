@@ -19,6 +19,15 @@ func ProbeNVENCCUDA(ctx context.Context, s Spec) error {
 	return probeTonemap(ctx, s, "NVENC/CUDA")
 }
 
+// ProbeRKMPPOpenCL verifies a complete MPP/RGA/Mali/MPP frame pipeline.
+func ProbeRKMPPOpenCL(ctx context.Context, s Spec) error {
+	s.RKMPPOpenCL = true
+	if !usesRKMPPFrames(s) {
+		return fmt.Errorf("source profile requires software decoding")
+	}
+	return probeTonemap(ctx, s, "RKMPP/OpenCL")
+}
+
 func probeTonemap(ctx context.Context, s Spec, backend string) error {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()

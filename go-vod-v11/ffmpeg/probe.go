@@ -32,21 +32,24 @@ const (
 )
 
 type VideoInfo struct {
-	Width     int
-	Height    int
-	Duration  time.Duration
-	FrameRate int
-	CodecName string
-	BitRate   int
-	Rotation  int
-	HDR       bool
-	BitDepth  int
-	Audio     AudioInfo
+	Width          int
+	Height         int
+	Duration       time.Duration
+	FrameRate      int
+	FrameRateExact float64
+	PixelFormat    string
+	CodecName      string
+	BitRate        int
+	Rotation       int
+	HDR            bool
+	BitDepth       int
+	Audio          AudioInfo
 }
 
 // AudioInfo describes the first audio stream; empty when silent.
 type AudioInfo struct {
 	CodecName  string
+	Profile    string
 	Channels   int
 	SampleRate int
 	BitRate    int
@@ -60,9 +63,10 @@ type sideData struct {
 
 type videoStream struct {
 	ffprobe.Stream
-	SideDataList   []sideData `json:"side_data_list"`
-	ColorTransfer  string     `json:"color_transfer"`
-	ColorPrimaries string     `json:"color_primaries"`
+	NominalFrameRate string     `json:"r_frame_rate"`
+	SideDataList     []sideData `json:"side_data_list"`
+	ColorTransfer    string     `json:"color_transfer"`
+	ColorPrimaries   string     `json:"color_primaries"`
 }
 
 type probeOutput struct {
@@ -133,16 +137,18 @@ func ParseProbeJSON(data []byte) (VideoInfo, error) {
 	}
 
 	return VideoInfo{
-		Width:     s.Width,
-		Height:    s.Height,
-		Duration:  duration,
-		FrameRate: parseFrameRate(s.AvgFrameRate),
-		CodecName: s.CodecName,
-		BitRate:   bitRate,
-		Rotation:  probeRotation(*s),
-		HDR:       probeHDR(*s),
-		BitDepth:  probeBitDepth(s.PixFmt),
-		Audio:     probeAudio(out.Streams),
+		Width:          s.Width,
+		Height:         s.Height,
+		Duration:       duration,
+		FrameRate:      parseFrameRate(s.AvgFrameRate),
+		FrameRateExact: exactFrameRate(s.NominalFrameRate, s.AvgFrameRate),
+		PixelFormat:    s.PixFmt,
+		CodecName:      s.CodecName,
+		BitRate:        bitRate,
+		Rotation:       probeRotation(*s),
+		HDR:            probeHDR(*s),
+		BitDepth:       probeBitDepth(s.PixFmt),
+		Audio:          probeAudio(out.Streams),
 	}, nil
 }
 
@@ -157,6 +163,7 @@ func probeAudio(streams []videoStream) AudioInfo {
 		br, _ := strconv.Atoi(st.BitRate)
 		return AudioInfo{
 			CodecName:  st.CodecName,
+			Profile:    st.Profile,
 			Channels:   st.Channels,
 			SampleRate: rate,
 			BitRate:    br,
@@ -179,14 +186,32 @@ func parseFrameRate(frac string) int {
 	return int(float64(num) / float64(den))
 }
 
+// exactFrameRate parses nominal or average frame rate to a float64.
+func exactFrameRate(values ...string) float64 {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		num, den, ok := strings.Cut(value, "/")
+		if !ok {
+			num, den = value, "1"
+		}
+		n, e1 := strconv.ParseFloat(num, 64)
+		d, e2 := strconv.ParseFloat(den, 64)
+		if e1 == nil && e2 == nil && d > 0 && n/d >= 1 && n/d <= 240 {
+			return n / d
+		}
+	}
+	return 30
+}
+
 // probeRotation reads rotation from display-matrix side data, else tags.
 func probeRotation(s videoStream) int {
 	for _, sd := range s.SideDataList {
-		if sd.SideDataType == "Display Matrix" {
-			return sd.Rotation
+		if strings.EqualFold(sd.SideDataType, "Display Matrix") {
+			return NormalizeRotation(sd.Rotation)
 		}
 	}
-	return s.Tags.Rotate
+	// Legacy rotate tags are clockwise; display matrices are counterclockwise.
+	return NormalizeRotation(-s.Tags.Rotate)
 }
 
 // probeBitDepth reads sample depth from the pix_fmt name, 8 when unknown.

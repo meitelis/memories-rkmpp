@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -23,6 +24,7 @@ import (
 const (
 	QUALITY_MAX    = "max"
 	QUALITY_DIRECT = "direct"
+	QUALITY_AUDIO  = "audio"
 )
 
 // ErrCopyPending means the keyframe probe is still running; answer 409
@@ -100,24 +102,28 @@ type Manager struct {
 }
 
 type ProbeVideoData struct {
-	Width     int
-	Height    int
-	Duration  time.Duration
-	FrameRate int
-	CodecName string
-	BitRate   int
-	Rotation  int
-	HDR       bool
-	BitDepth  int
-	Audio     ffmpeg.AudioInfo
+	Width          int
+	Height         int
+	Duration       time.Duration
+	FrameRate      int
+	FrameRateExact float64
+	PixelFormat    string
+	CodecName      string
+	BitRate        int
+	Rotation       int
+	HDR            bool
+	BitDepth       int
+	Audio          ffmpeg.AudioInfo
 }
 
 type Rendition struct {
-	Quality string
-	Width   int
-	Height  int
-	Bitrate int
-	Order   int
+	Quality       string
+	Width         int
+	Height        int
+	Bitrate       int
+	Order         int
+	Codecs        string
+	SeparateAudio bool
 }
 
 // NewManagerArgs bundles NewManager construction args.
@@ -188,9 +194,27 @@ func NewManager(a NewManagerArgs) (*Manager, error) {
 		refBitrate *= 2
 	}
 
+	rkmpp := m.c.RKMPP
+	minRKMPPBitrate := 0
+	if rkmpp {
+		minRKMPPBitrate = ffmpeg.RKMPPMinBitrate(m.probe.Audio)
+		refBitrate = m.probe.BitRate
+		if m.probe.CodecName != CODEC_H264 {
+			refBitrate *= 2
+		}
+	}
+
 	// If bitrate could not be read, use 10Mbps
 	if refBitrate == 0 {
 		refBitrate = 10000000
+	}
+
+	if rkmpp {
+		refBitrate = min(refBitrate, balancedRKMPPBitrate(m.probe.Width, m.probe.Height, m.FrameRate()))
+		if m.OutputCodec() == "hevc" {
+			refBitrate = max(256000, refBitrate*2/3)
+		}
+		refBitrate = max(refBitrate, minRKMPPBitrate)
 	}
 
 	// Get the multiplier for the reference bitrate.
@@ -223,15 +247,28 @@ func NewManager(a NewManagerArgs) (*Manager, error) {
 		// now store the width of the stream as the larger dimension
 		stream.width = int(math.Ceil(float64(lgDim) * float64(stream.height) / float64(smDim)))
 
+		if rkmpp {
+			// Round to the nearest even width instead of dropping the rendition
+			// whenever its aspect ratio happens to produce an odd pixel count.
+			stream.width = int(math.Round(float64(lgDim)*float64(stream.height)/float64(smDim)/2)) * 2
+			stream.bitrate = max(minRKMPPBitrate, min(stream.bitrate, balancedRKMPPBitrate(stream.width, stream.height, m.FrameRate())))
+		}
+
 		// remove invalid streams
-		// Odd dimensions are fine: the scaler rounds to even (force_divisible_by).
 		if (stream.height > smDim || stream.width > lgDim) || // no upscaling; we're not AI
-			(float64(stream.bitrate) > float64(m.probe.BitRate)*0.8) { // no more than 80% of original bitrate
+			(!rkmpp && float64(stream.bitrate) > float64(m.probe.BitRate)*0.8) ||
+			(rkmpp && stream.height == smDim/2*2 && stream.width == lgDim/2*2) || // avoid duplicating max
+			(rkmpp && (stream.height%2 != 0 || stream.width%2 != 0)) { // no odd dimensions for RGA
 
 			// remove stream
 			delete(m.streams, k)
 			continue
 		}
+	}
+
+	maxWidth, maxHeight := m.probe.Width, m.probe.Height
+	if rkmpp {
+		maxWidth, maxHeight = maxWidth/2*2, maxHeight/2*2
 	}
 
 	// Original: stream copy as direct when eligible. Keyframes are not
@@ -250,10 +287,27 @@ func NewManager(a NewManagerArgs) (*Manager, error) {
 		m.streams[QUALITY_MAX] = &Stream{
 			c: m.c, m: m,
 			quality: QUALITY_MAX,
-			height:  m.probe.Height,
-			width:   m.probe.Width,
+			height:  maxHeight,
+			width:   maxWidth,
 			bitrate: refBitrate,
 			order:   1,
+		}
+	}
+
+	if rkmpp && m.IsCopyEligible() && len(m.streams) > 1 {
+		m.streams[QUALITY_MAX] = &Stream{c: m.c, m: m, quality: QUALITY_MAX, height: maxHeight, width: maxWidth, bitrate: refBitrate, order: 1}
+	}
+
+	// Add a shared audio-only stream so all video renditions can mute their
+	// own audio and the player switches quality without audio gaps.
+	// Only create it when audio needs normalization; copyable AAC-LC is
+	// handled inline by each rendition's -c:a copy path instead.
+	if rkmpp && ffmpeg.NormalizeRKMPPAudio(m.probe.Audio) {
+		m.streams[QUALITY_AUDIO] = &Stream{
+			c:       m.c,
+			m:       m,
+			quality: QUALITY_AUDIO,
+			bitrate: 128000,
 		}
 	}
 
@@ -321,14 +375,40 @@ func (m *Manager) Destroy() {
 }
 
 func (m *Manager) Renditions() []Rendition {
+	hasAudio := m.HasStream(QUALITY_AUDIO)
 	out := make([]Rendition, 0, len(m.streams))
 	for _, s := range m.streams {
+		// The audio stream appears in the master playlist as an EXT-X-MEDIA
+		// group referenced by video variants; it is not itself a variant.
+		if s.quality == QUALITY_AUDIO {
+			continue
+		}
+		if m.c.RKMPP && s.quality == QUALITY_DIRECT && len(m.streams) > 1 {
+			continue
+		}
+		width, height := s.width, s.height
+		rotated := m.probe != nil && ffmpeg.SwapsAxes(m.probe.Rotation)
+		if s.quality == QUALITY_MAX || s.quality == QUALITY_DIRECT {
+			if rotated {
+				width, height = height, width
+			}
+		} else if m.probe != nil && ((m.probe.Width < m.probe.Height) != rotated) {
+			width, height = height, width
+		}
+		codecs := ""
+		if m.OutputCodec() == "hevc" && s.quality != QUALITY_DIRECT {
+			codecs = ffmpeg.HEVCCodecs(width, height, m.FrameRate(), m.probe.Audio.CodecName != "")
+		}
+		// Video renditions link to the shared audio group when present.
+		separateAudio := hasAudio && s.quality != QUALITY_DIRECT
 		out = append(out, Rendition{
-			Quality: s.quality,
-			Width:   s.width,
-			Height:  s.height,
-			Bitrate: s.bitrate,
-			Order:   s.order,
+			Quality:       s.quality,
+			Width:         width,
+			Height:        height,
+			Bitrate:       s.bitrate,
+			Order:         s.order,
+			Codecs:        codecs,
+			SeparateAudio: separateAudio,
 		})
 	}
 	return out
@@ -464,6 +544,9 @@ func (m *Manager) EnsureCopySegments() ([]ffmpeg.Segment, bool) {
 }
 
 func (m *Manager) FrameRate() int {
+	if m.c.RKMPP {
+		return ffmpeg.RKMPPFrameRate(ffmpeg.Spec{FrameRate: m.probe.FrameRate, FrameRateExact: m.probe.FrameRateExact})
+	}
 	return m.probe.FrameRate
 }
 
@@ -529,25 +612,39 @@ func (m *Manager) ffprobe() error {
 		}
 
 		m.probe = &ProbeVideoData{
-			Width:     info.Width,
-			Height:    info.Height,
-			Duration:  info.Duration,
-			FrameRate: info.FrameRate,
-			CodecName: info.CodecName,
-			BitRate:   info.BitRate,
-			Rotation:  info.Rotation,
-			HDR:       info.HDR,
-			BitDepth:  info.BitDepth,
-			Audio:     info.Audio,
+			Width:          info.Width,
+			Height:         info.Height,
+			Duration:       info.Duration,
+			FrameRate:      info.FrameRate,
+			FrameRateExact: info.FrameRateExact,
+			PixelFormat:    info.PixelFormat,
+			CodecName:      info.CodecName,
+			BitRate:        info.BitRate,
+			Rotation:       info.Rotation,
+			HDR:            info.HDR,
+			BitDepth:       info.BitDepth,
+			Audio:          info.Audio,
 		}
 
 		StoreCachedProbe(m.c.CacheDir(), m.fileid, m.etag, m.probe)
+	}
+
+	if m.probe.Width <= 0 || m.probe.Height <= 0 || m.probe.Duration <= 0 ||
+		(m.c.RKMPP && (m.probe.Width < 2 || m.probe.Height < 2)) {
+		return fmt.Errorf("invalid video dimensions or duration for file %d", m.fileid)
 	}
 
 	// Copy eligibility is cheap (codec + rotation); keyframes come later
 	// via EnsureCopySegments on direct.m3u8, so creation stays fast.
 	m.copyEligible = m.probe.Rotation == 0 && IsCodecPlayable(m.probe.CodecName, m.playableCodecs) &&
 		IsCodecFMP4(m.probe.CodecName)
+
+	if m.c.RKMPP {
+		m.copyEligible = m.copyEligible && m.probe.CodecName == CODEC_H264 && !m.probe.HDR && m.probe.BitDepth <= 8
+		if m.OutputCodec() == "hevc" {
+			m.copyEligible = false
+		}
+	}
 
 	return nil
 }
@@ -648,4 +745,17 @@ func (m *Manager) ffmpegInput() string {
 		return m.input
 	}
 	return m.url
+}
+
+// OutputCodec keeps the entire adaptive ladder on one codec. Missing or
+// negative client capability reports always select the H.264 fallback.
+func (m *Manager) OutputCodec() string {
+	if m.c.RKMPP && m.c.RKMPPOutputCodec != "h264" && slices.Contains(m.playableCodecs, "hevc") {
+		return "hevc"
+	}
+	return "h264"
+}
+
+func balancedRKMPPBitrate(width, height, fps int) int {
+	return max(256000, int(float64(width)*float64(height)*2.4*math.Sqrt(float64(max(1, fps))/30)))
 }

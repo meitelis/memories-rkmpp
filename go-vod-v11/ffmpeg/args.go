@@ -47,6 +47,8 @@ type Spec struct {
 	// FrameRate is the probed source fps, truncated to int. Only sizes the
 	// GOP when UseGopSize is set.
 	FrameRate int
+	// FrameRateExact is the parsed fractional frame rate (e.g. 23.976, 29.97).
+	FrameRateExact float64
 	// Rotation is the probed source rotation (-90, 90, ±180, 0), applied as
 	// an explicit transpose filter when UseTranspose is set.
 	Rotation int `hwprobe:"key"`
@@ -66,6 +68,12 @@ type Spec struct {
 	RKMPPOpenCL bool
 	// Audio is the first audio stream; empty when silent.
 	Audio AudioInfo
+	// AudioOnly builds a shared AAC audio stream for HLS without video.
+	AudioOnly bool
+	// SeparateAudio marks video renditions paired with a shared audio stream.
+	SeparateAudio bool
+	// EndAt is the duration upper bound for audio padding/trimming.
+	EndAt float64
 	// ChunkSize is the target segment length in whole seconds. Drives
 	// -hls_time and the forced-keyframe interval.
 	ChunkSize int
@@ -121,6 +129,8 @@ func HWProbeKey(s Spec) Spec {
 // served as-is for progressive download) bypasses argument building entirely.
 func Encoder(s Spec) string {
 	switch {
+	case s.AudioOnly:
+		return "aac"
 	case s.Copy:
 		return EncoderCopy
 	case s.RKMPP:
@@ -198,6 +208,9 @@ func reconnectArgs() []string {
 // Ladder bitrates appear only in playlists, never here. With Copy set, the
 // offload, filter graph and rate control collapse to "-c:v copy".
 func BuildArgs(s Spec) []string {
+	if s.AudioOnly {
+		return buildRKMPPAudioArgs(s)
+	}
 	if IsRKMPPEncoder(Encoder(s)) {
 		return buildRKMPPArgs(s)
 	}
@@ -391,7 +404,7 @@ const copyHLSTime = "0.001"
 func SegmentArgs(s Spec, startID int, pattern, init string) []string {
 	// Rockchip's hardware encoders obey GOP sizing more reliably than
 	// forced-keyframe expressions. Preserve v11's fMP4 muxer and timeline.
-	if s.RKMPP && !s.Copy {
+	if s.RKMPP && !s.Copy && !s.AudioOnly {
 		s.UseGopSize = true
 		s.FrameRate = RKMPPFrameRate(s)
 	}
@@ -412,7 +425,7 @@ func SegmentArgs(s Spec, startID int, pattern, init string) []string {
 		"-hls_segment_filename", pattern,
 	)
 
-	if !s.Copy {
+	if !s.Copy && !s.AudioOnly {
 		// HLS may otherwise duplicate VFR frames to match the probed r_frame_rate.
 		args = append(args, "-fps_mode", "passthrough")
 
