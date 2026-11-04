@@ -33,5 +33,6 @@ jobs:
           go build ./...
       - name: Check Go formatting
         run: |
+          gofmt -d cmd/rkmpp-smoke/main.go cmd/rkmpp-smoke/main_test.go
           gofmt -l .
           test -z "$(gofmt -l .)"
