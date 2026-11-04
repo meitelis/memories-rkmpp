@@ -217,7 +217,7 @@
   }
 
   function monitorDirectPlayback(player, state) {
-    if (!state || state.mode !== 'direct' || state.monitorTimer != null) return;
+    if (!state || state.mode !== 'direct' || !state.sourceAssigned || state.monitorTimer != null) return;
     state.monitorTimer = setInterval(() => {
       if (directPlayback.get(player) !== state || state.mode !== 'direct' ||
           !player.isConnected) { stopDirectTimer(state); return; }
@@ -242,7 +242,7 @@
 
   function scheduleDirectStall(player) {
     const state = directPlayback.get(player);
-    if (!state || state.mode !== 'direct' || !player.isConnected || player.paused ||
+    if (!state || state.mode !== 'direct' || !state.sourceAssigned || !player.isConnected || player.paused ||
         player.seeking || player.ended || state.stallTimer !== null) return;
     state.stallTimer = setTimeout(() => {
       state.stallTimer = null;
@@ -278,26 +278,46 @@
     // successful MediaSource HEVC support does not guarantee MP4 playback.
     const state = {
       ...candidate, mode: 'direct', stallTimer: null, monitorTimer: null,
-      lastBuffer: null, lastSample: 0, riskCount: 0, awaitingReady: true,
+      lastBuffer: null, lastSample: 0, riskCount: 0, awaitingReady: true, sourceAssigned: false,
       resumeTime: playbackTime(player),
       shouldPlay: !player.paused || !!player.autoPlay || !!player.autoplay,
     };
     directPlayback.set(player, state);
-    player.addEventListener('can-play', () => {
-      if (directPlayback.get(player) !== state || state.mode !== 'direct') return;
-      state.awaitingReady = false;
-      if (state.resumeTime > 0) player.currentTime = state.resumeTime;
-      if (state.shouldPlay) player.play?.()?.catch?.(() => {});
-      else {
-        // Vidstack's ready() decides autoplay after can-play and an await.
-        // Retain the public-property hold until a deliberate play request.
-        holdPausedAutoplay(player, state.original);
-        player.pause?.();
+    // Vidstack emits source-change before committing the selected provider
+    // loader. A replacement inside that event can be overwritten by the old
+    // selection's continuation. Finish that turn before selecting native video.
+    queueMicrotask(() => {
+      if (directPlayback.get(player) !== state || state.mode !== 'direct' ||
+          !player.isConnected || preferences.codec !== 'auto') {
+        if (directPlayback.get(player) === state && state.mode === 'direct') forgetDirectPlayback(player);
+        return;
       }
-    }, { once: true });
-    console.info('[Memories RKMPP] Trying original file before HLS');
-    player.src = { src: candidate.original, type: 'video/mp4' };
-    monitorDirectPlayback(player, state);
+      const configured = Array.isArray(player.src) ? player.src[0] : player.src;
+      const currentCandidate = directSource(configured, location.href);
+      const currentValue = typeof configured === 'string' ? configured : configured?.src;
+      let currentUrl;
+      try { currentUrl = typeof currentValue === 'string' ? new URL(currentValue, location.href).href : null; } catch {}
+      if (currentCandidate?.key !== state.key && currentUrl !== state.original) {
+        forgetDirectPlayback(player);
+        return;
+      }
+      player.addEventListener('can-play', () => {
+        if (directPlayback.get(player) !== state || state.mode !== 'direct') return;
+        state.awaitingReady = false;
+        if (state.resumeTime > 0) player.currentTime = state.resumeTime;
+        if (state.shouldPlay) player.play?.()?.catch?.(() => {});
+        else {
+          // Vidstack's ready() decides autoplay after can-play and an await.
+          // Retain the public-property hold until a deliberate play request.
+          holdPausedAutoplay(player, state.original);
+          player.pause?.();
+        }
+      }, { once: true });
+      console.info('[Memories RKMPP] Trying original file before HLS');
+      state.sourceAssigned = true;
+      player.src = { src: state.original, type: 'video/mp4' };
+      monitorDirectPlayback(player, state);
+    });
   }
 
   function playbackPreferences(value) {
@@ -335,7 +355,7 @@
   const marker = Symbol.for('memories-rkmpp-player');
   if (window[marker]) return;
   window[marker] = true;
-  console.info('[Memories RKMPP] Player helper 0.3.4 active');
+  console.info('[Memories RKMPP] Player helper 0.3.5 active');
 
   const seen = new WeakSet();
   const players = new WeakSet();
@@ -658,6 +678,43 @@
         const state = directPlayback.get(player);
         if (state?.mode !== 'direct') return;
         event.stopImmediatePropagation?.();
+        try {
+          const media = player.querySelector?.('video');
+          const code = value => Number.isInteger(value) && value >= 0 && value <= 4 ? value : 0;
+          const support = type => {
+            const answer = media?.canPlayType?.(type);
+            return answer === 'probably' || answer === 'maybe' ? answer : 'none';
+          };
+          const kind = value => {
+            if (typeof value !== 'string' || !value) return 'empty';
+            if (value.startsWith('blob:')) return 'blob';
+            try {
+              const url = new URL(value, location.href), original = new URL(state.original);
+              if (url.origin === original.origin && url.pathname === original.pathname) return 'original';
+              if (url.pathname.includes('/apps/memories/api/video/transcode/')) return 'hls';
+            } catch {}
+            return 'other';
+          };
+          const configured = Array.isArray(player.src) ? player.src[0] : player.src;
+          const provider = player.provider?.type;
+          console.info('[Memories RKMPP] Direct playback diagnostic', JSON.stringify({
+            assigned: state.sourceAssigned ? 1 : 0,
+            eventCode: code(event.detail?.code),
+            nativeCode: code(media?.error?.code),
+            mp4: support('video/mp4'),
+            avc: support('video/mp4; codecs="avc1.640028, mp4a.40.2"'),
+            hevc: support('video/mp4; codecs="hvc1.1.6.L120.B0, mp4a.40.2"'),
+            provider: provider === 'video' || provider === 'hls' || provider === 'audio' ? provider : 'unknown',
+            configuredSource: kind(typeof configured === 'string' ? configured : configured?.src),
+            currentSource: kind(media?.currentSrc),
+            nativeSource: kind(media?.getAttribute?.('src')),
+            childSource: kind(media?.querySelector?.('source[data-vds]')?.src),
+          }));
+        } catch {
+          console.info('[Memories RKMPP] Direct playback diagnostic unavailable');
+        }
+        // Until the queued replacement runs, this still belongs to the old HLS source.
+        if (!state.sourceAssigned) return;
         fallbackToHLS(player, state, 'decoder or file error');
       }, true);
       player.addEventListener('waiting', () => scheduleDirectStall(player));

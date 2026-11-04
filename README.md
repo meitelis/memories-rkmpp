@@ -4,7 +4,7 @@ Experimental hardware transcoder for Memories **10.2.0** and go-vod protocol **0
 
 The tested platform is a Radxa ROCK 5B+ running Armbian's 6.1 vendor kernel. Other boards and kernels need their own validation.
 
-**R8 candidate / helper 0.3.4** bundles the existing R7 engine with an original-playback trial and adaptive RKMPP fallback. The helper's 44 player/settings tests pass; live browser integration remains pending. The unchanged engine retains R7's completed Go race, vet, ARM64 rendition and shared-audio checks. See `VERIFICATION.md` for the exact coverage and release limits.
+**R9 candidate / helper 0.3.5** bundles the existing R7 engine with an original-playback trial and adaptive RKMPP fallback. It corrects the source/provider handoff and cancels a pending trial when the asset or playback choice changes. The helper's 53 player/settings tests pass; successful live original playback remains unverified. The unchanged engine retains R7's completed Go race, vet, ARM64 rendition and shared-audio checks. See `VERIFICATION.md` for the exact coverage and release limits.
 
 ## Hardware and playback
 
@@ -37,7 +37,7 @@ cd memories-rkmpp
 2. Build the combined release on the ARM64 Docker host:
 
    ```sh
-   sh scripts/build-release.sh --image local/memories-go-vod:rkmpp-10.2.0-v0.6.3-r8
+   sh scripts/build-release.sh --image local/memories-go-vod:rkmpp-10.2.0-v0.6.3-r9
    ```
 
    This builds the engine using its existing `go-vod/` context, then packages it with the companion app from this checkout. The helper version is read from `appinfo/info.xml`. To package an already tested matching engine without rebuilding it, add `--engine-image YOUR_EXISTING_ENGINE_IMAGE`.
@@ -64,7 +64,7 @@ Use a Nextcloud URL that is reachable from the transcoder and accepted by Nextcl
 
 ### Bundled Nextcloud player connector
 
-R8 is one custom container image containing the unchanged R7 engine and the matching `memories_rkmpp_player` 0.3.4 app under `/usr/share/memories-rkmpp/nextcloud-app`. The helper's app version and bundled version label both advance, allowing the updater to distinguish it from 0.3.3. The connector executes inside Nextcloud to provide the integrated UI. The transcoder runs no extra process and needs no Docker socket, Nextcloud app mount or write access to Nextcloud. The host deployment command performs the app installation using your existing Docker access.
+R9 is one custom container image containing the unchanged R7 engine and the matching `memories_rkmpp_player` 0.3.5 app under `/usr/share/memories-rkmpp/nextcloud-app`. The helper's app version and bundled version label both advance, allowing the updater and Nextcloud's asset cache to distinguish it from 0.3.4. The connector executes inside Nextcloud to provide the integrated UI. The transcoder runs no extra process and needs no Docker socket, Nextcloud app mount or write access to Nextcloud. The host deployment command performs the app installation using your existing Docker access.
 
 The installer defaults to LinuxServer Nextcloud's `/app/www/public` document root and web-server user `abc`. It discovers an existing helper's registered location, or selects a configured writable apps directory for a first installation. Use `--docroot`, `--web-user` and, if needed, `--app-path /your/writable/apps/memories_rkmpp_player` for another supported layout. The app path must belong to Nextcloud's configured writable apps paths. The helper declares Nextcloud 35 support; compatibility is checked before replacing an installed app. Its AGPL license is separate from the backend's Apache license.
 
@@ -87,7 +87,7 @@ The helper is recommended for HEVC negotiation and portrait labels. `MEMORIES_RK
 
 ### Playback settings
 
-Helper **0.3.4** provides **Playback settings** in Memories navigation and a gear beside the viewer's top-right controls. Preferences are saved for this browser. If browser storage is blocked, they apply for the current visit. The connector lives in Nextcloud's persistent app directory; its version is bundled with the engine. A future Nextcloud major upgrade still needs a compatible connector release.
+Helper **0.3.5** provides **Playback settings** in Memories navigation and a gear beside the viewer's top-right controls. Preferences are saved for this browser. If browser storage is blocked, they apply for the current visit. The connector lives in Nextcloud's persistent app directory; its version is bundled with the engine. A future Nextcloud major upgrade still needs a compatible connector release.
 
 **Video format** offers Auto, HEVC/H.265 preferred, and H.264 compatibility. Auto permits the original-playback trial, leaving the original file's codec unchanged; its HLS fallback prefers HEVC when supported. Explicit HEVC or H.264 preferences go directly to adaptive HLS. HEVC preferred still respects the browser's MediaSource support and one-time AVC recovery. Selecting either explicit format during original playback preserves position and pause state when loading HLS. Returning to Auto keeps that asset on HLS, avoiding repeated original/fallback loops. HLS buffer changes apply during playback.
 

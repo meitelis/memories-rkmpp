@@ -4,5 +4,5 @@ FROM ${ENGINE_IMAGE}
 ARG PLAYER_VERSION
 COPY memories_rkmpp_player/ /usr/share/memories-rkmpp/nextcloud-app/
 COPY scripts/update-nextcloud-player.sh scripts/nextcloud-player-control.php scripts/deploy.sh /usr/share/memories-rkmpp/
-LABEL org.opencontainers.image.version="memories-10.2.0-govod-0.6.3-rkmpp-r8" \
+LABEL org.opencontainers.image.version="memories-10.2.0-govod-0.6.3-rkmpp-r9" \
       cc.memories-rkmpp.player.version="${PLAYER_VERSION}"

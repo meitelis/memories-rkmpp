@@ -1,5 +1,17 @@
 # Verification: Memories 10.2.0 / go-vod 0.6.3
 
+## R9 candidate / helper 0.3.5
+
+Source review: 4 November 2026. All 53 player/settings tests pass, including nine queued-source handoff and cancellation cases in addition to R8's 44 checks. The engine source is unchanged from R7. JavaScript syntax is checked separately. These source checks do not establish successful native playback in a real browser.
+
+Vidstack 1.15.7's [source selection](https://github.com/vidstack/player/blob/0133da67e4f84a5aaad59c63853b12c6cda0a6a9/packages/vidstack/src/components/provider/source-select.ts) emits `source-change` before committing the selected provider loader. The helper now queues its original-source assignment until that selection turn finishes. The ordering regression models this event/loader sequence: the prior immediate replacement leaves the HLS loader selected, whereas the queued replacement finishes with the native video loader. Pending work checks session identity, connection state, format preference and the still-configured source before writing anything. Another asset, removal or an explicit format selection cancels it. An error from the old HLS source before that queued assignment does not abort the trial. Readiness restoration and monitoring begin only when the original is assigned.
+
+R8's HLS fallback remained usable during live sampling, but successful original playback was not observed. A diagnostic-only replacement under the same helper version was retained in an immutable browser asset cache, so its error details were not available. R9 advances the actual helper manifest and script version to 0.3.5, with a matching R9 release label and Compose image. This permits a normal app update and a new asset-cache identity.
+
+The candidate temporarily logs one diagnostic record on a direct-mode error: bounded numeric event/native error codes, native codec-support answers, and allowlisted provider/source categories. It never logs URL values, access tokens or freeform error messages. These records are for confirming the source handoff and distinguishing an old provider error from an actual unsupported original.
+
+Live checks remain pending: confirm helper 0.3.5 loads, observe an authenticated original request and advancing native video, exercise direct-to-HLS fallback with pause/seek preservation, and verify shared links and target browsers. The exact live cause of R8's failed original trial is not yet established. Do not merge this candidate based only on its source tests or present R7's browser/hardware results as R9 original-playback validation.
+
 ## R8 candidate / helper 0.3.4
 
 Source review: 4 November 2026. This candidate changes the player helper and its release packaging; the R7 Go engine is unchanged. The completed R7 hardware checks below describe that existing engine, not live validation of the new direct-play path.

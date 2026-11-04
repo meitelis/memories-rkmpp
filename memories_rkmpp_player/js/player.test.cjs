@@ -422,13 +422,15 @@ test('predictive quality reduces bitrate before buffer exhaustion', () => {
   assert.equal(preventiveLevel(levels, 0, 0, 3), 0);
 });
 
-function directPlayer({codec = 'auto', supported = false, autoPlay = false, autoplay = false} = {}) {
+function directPlayer({codec = 'auto', supported = false, autoPlay = false, autoplay = false,
+  deferSource = false, sourceSelection = false, initialSource = true} = {}) {
   const hub = eventHub();
   const intervals = new Map();
   const timeouts = new Map();
+  const microtasks = [];
   let timerId = 0, now = 0, mutation, started = false;
   const master = 'https://cloud.example/apps/memories/api/video/transcode/abcdef123456/123/index.m3u8?token=keep&codecs=h264';
-  let source = { src: master };
+  let source = initialSource ? { src: master, type: 'application/x-mpegurl' } : undefined;
   const store = createPreferencesStore({getItem: () => JSON.stringify({codec}), setItem() {}});
   const media = {
     readyState: 4, currentTime: 10, duration: 120, ended: false, bufferEnd: 30,
@@ -440,7 +442,14 @@ function directPlayer({codec = 'auto', supported = false, autoPlay = false, auto
     querySelector: () => media, querySelectorAll: () => [], matches: name => name === 'media-player',
     addEventListener: (name, callback, options) => hub.add(name, callback, !!options?.once),
     get src() { return source; },
-    set src(value) { source = value; started = false; this.sources.push(value); hub.emit('source-change', { detail: value }); },
+    set src(value) {
+      source = value; started = false; this.sources.push(value);
+      // Vidstack 1.15.7 SourceSelection#findNewSource emits source-change
+      // before its continuation commits the selected provider loader.
+      const selectedLoader = value.type === 'application/x-mpegurl' ? 'hls' : 'video';
+      hub.emit('source-change', { detail: value });
+      if (sourceSelection) this.provider = {type: selectedLoader};
+    },
     play() {
       this.playCalls++; this.paused = false; started = true;
       hub.emit('play', {autoPlay: false}); hub.emit('playing');
@@ -451,6 +460,7 @@ function directPlayer({codec = 'auto', supported = false, autoPlay = false, auto
   vm.runInNewContext(fs.readFileSync(require.resolve('./player.js'), 'utf8'), {
     URL, WeakMap, WeakSet, Map, Symbol, Date, console: {info() {}, warn() {}},
     performance: {now: () => now},
+    queueMicrotask: callback => microtasks.push(callback),
     setInterval: fn => { const id = ++timerId; intervals.set(id, fn); return id; },
     clearInterval: id => intervals.delete(id),
     setTimeout: (fn, delay) => { const id = ++timerId; timeouts.set(id, {fn, deadline: now + delay}); return id; },
@@ -463,8 +473,14 @@ function directPlayer({codec = 'auto', supported = false, autoPlay = false, auto
     document: {documentElement: {}, addEventListener() {}, querySelectorAll: name => name === 'media-player' ? [player] : []},
     MutationObserver: class {constructor(callback) {mutation = callback;} observe() {}},
   });
+  const flushMicrotasks = () => {
+    while (microtasks.length) microtasks.shift()();
+  };
+  if (!deferSource) flushMicrotasks();
   return {
     player, media, master, intervals, timeouts, store, emit: hub.emit,
+    flushMicrotasks,
+    configureWithoutEvent(value) {source = value;},
     async canPlay() {
       hub.emit('can-play');
       // Match Vidstack ready(): storage is awaited before its autoplay test.
@@ -580,6 +596,7 @@ test('another direct-play asset cancels the previous stall and targets only its 
   const nextMaster = h.master.replace('/123/', '/456/');
   h.player.src = {src: nextMaster};
   assert.equal(h.timeouts.size, 0);
+  h.flushMicrotasks();
   assert.equal(h.intervals.size, 1);
   assert.ok(h.player.src.src.includes('/stream/456'));
   h.emit('can-play'); h.tick(10);
@@ -676,6 +693,96 @@ test('an explicit format after an early pause retains the pending position and a
   assert.equal(new URL(h.player.src.src).searchParams.get('codecs'), 'h264,hevc');
   await h.canPlay();
   assert.equal(h.player.currentTime, 10);
+  assert.equal(h.player.paused, true);
+  assert.equal(h.player.playCalls, 0);
+  assert.equal(h.player.autoPlay, false);
+  assert.equal(h.player.autoplay, false);
+});
+
+test('queued original selection runs after the prior HLS loader commit', () => {
+  const h = directPlayer({initialSource: false, deferSource: true, sourceSelection: true});
+  h.player.src = {src: h.master, type: 'application/x-mpegurl'};
+  const loaderAtEventEnd = h.player.provider.type;
+  const sourceAtEventEnd = h.player.src.src;
+  const timersAtEventEnd = h.intervals.size;
+  h.flushMicrotasks();
+  assert.equal(h.player.provider.type, 'video');
+  assert.equal(loaderAtEventEnd, 'hls');
+  assert.equal(sourceAtEventEnd, h.master);
+  assert.equal(timersAtEventEnd, 0);
+  assert.ok(h.player.src.src.includes('/stream/123'));
+  assert.equal(h.intervals.size, 1);
+});
+
+test('queued original selection cancels when the player is removed', () => {
+  const h = directPlayer({deferSource: true});
+  h.remove(); h.flushMicrotasks();
+  assert.equal(h.player.sources.length, 0);
+  assert.equal(h.intervals.size, 0);
+});
+
+test('queued original selection releases a disconnected player before removal observers run', () => {
+  const h = directPlayer({deferSource: true});
+  h.player.isConnected = false; h.flushMicrotasks();
+  assert.equal(h.player.sources.length, 0);
+  assert.equal(h.intervals.size, 0);
+  h.player.isConnected = true;
+  h.player.src = {src: h.master, type: 'application/x-mpegurl'};
+  h.flushMicrotasks();
+  assert.ok(h.player.src.src.includes('/stream/123'));
+});
+
+test('queued original selection cancels on an explicit format preference', () => {
+  const h = directPlayer({deferSource: true, supported: true});
+  h.store.setPreferences({codec: 'hevc'});
+  h.flushMicrotasks();
+  assert.equal(new URL(h.player.src.src).searchParams.get('codecs'), 'h264,hevc');
+  assert.ok(h.player.sources.every(source => !source.src.includes('/stream/')));
+  assert.equal(h.intervals.size, 0);
+});
+
+test('queued original selection cannot overwrite another asset', () => {
+  const h = directPlayer({deferSource: true});
+  h.player.src = {src: h.master.replace('/123/', '/456/'), type: 'application/x-mpegurl'};
+  h.flushMicrotasks();
+  assert.ok(h.player.src.src.includes('/stream/456'));
+  assert.ok(h.player.sources.every(source => !source.src.includes('/stream/123')));
+  assert.equal(h.intervals.size, 1);
+});
+
+test('queued original selection cannot overwrite an unrelated source', () => {
+  const h = directPlayer({deferSource: true});
+  h.player.src = {src: 'https://cloud.example/another.mp4', type: 'video/mp4'};
+  h.flushMicrotasks();
+  assert.equal(h.player.src.src, 'https://cloud.example/another.mp4');
+  assert.equal(h.player.sources.length, 1);
+  assert.equal(h.intervals.size, 0);
+});
+
+test('queued original selection checks configured props before their source event arrives', () => {
+  const h = directPlayer({deferSource: true});
+  h.configureWithoutEvent({src: 'https://cloud.example/another.mp4', type: 'video/mp4'});
+  h.flushMicrotasks();
+  assert.equal(h.player.src.src, 'https://cloud.example/another.mp4');
+  assert.equal(h.player.sources.length, 0);
+  assert.equal(h.intervals.size, 0);
+});
+
+test('an old HLS error before queued assignment does not abort the original trial', () => {
+  const h = directPlayer({deferSource: true});
+  let intercepted = false;
+  h.emit('error', {detail: {code: 4}, stopImmediatePropagation() {intercepted = true;}});
+  assert.equal(intercepted, true);
+  assert.equal(h.player.sources.length, 0);
+  h.flushMicrotasks();
+  assert.ok(h.player.src.src.includes('/stream/123'));
+  assert.equal(h.player.sources.length, 1);
+});
+
+test('a pause while original selection is queued retains the delayed-autoplay hold', async () => {
+  const h = directPlayer({deferSource: true, autoPlay: true, autoplay: true});
+  h.player.pause(); h.flushMicrotasks();
+  await h.canPlay();
   assert.equal(h.player.paused, true);
   assert.equal(h.player.playCalls, 0);
   assert.equal(h.player.autoPlay, false);
