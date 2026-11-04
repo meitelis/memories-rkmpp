@@ -170,9 +170,15 @@
     stopDirectTimer(state);
     state.mode = 'hls';
     console.info('[Memories RKMPP] Direct playback unavailable (' + reason + '); using adaptive HLS');
-    const restore = { url: state.master, time: playbackTime(player), paused: !!player.paused };
+    const master = manifestURL(state.master, location.href,
+      prefersHEVC(preferences, supportsHEVC(), forceAVC.has(player)));
+    const restore = {
+      url: master,
+      time: state.awaitingReady ? state.resumeTime : playbackTime(player),
+      paused: state.awaitingReady ? !state.shouldPlay : !!player.paused,
+    };
     pendingRestore.set(player, restore);
-    if (restore.paused) holdPausedAutoplay(player, state.master);
+    if (restore.paused) holdPausedAutoplay(player, master);
     player.addEventListener('can-play', () => {
       if (directPlayback.get(player) !== state || pendingRestore.get(player) !== restore) return;
       pendingRestore.delete(player);
@@ -180,7 +186,7 @@
       if (restore.paused) player.pause?.();
       else player.play?.()?.catch?.(() => {});
     }, { once: true });
-    player.src = { src: state.master, type: 'application/x-mpegurl' };
+    player.src = { src: master, type: 'application/x-mpegurl' };
   }
 
   function bufferedAhead(media) {
@@ -265,20 +271,29 @@
     }
     if (previous?.key === candidate.key) return; // Never loop after fallback.
     if (previous) forgetDirectPlayback(player);
-    // An explicit H.264 compatibility preference requests the HLS encoder,
+    // An explicit output preference requests the HLS encoder,
     // because the original codec isn't known from the media-player source.
-    if (preferences.codec === 'h264') return;
+    if (preferences.codec !== 'auto') return;
     // Browser support is checked by the real media element, not MSE probing:
     // successful MediaSource HEVC support does not guarantee MP4 playback.
-    const state = { ...candidate, mode: 'direct', stallTimer: null, monitorTimer: null, lastBuffer: null, lastSample: 0, riskCount: 0 };
+    const state = {
+      ...candidate, mode: 'direct', stallTimer: null, monitorTimer: null,
+      lastBuffer: null, lastSample: 0, riskCount: 0, awaitingReady: true,
+      resumeTime: playbackTime(player),
+      shouldPlay: !player.paused || !!player.autoPlay || !!player.autoplay,
+    };
     directPlayback.set(player, state);
-    const time = playbackTime(player);
-    const shouldPlay = !player.paused || !!player.autoPlay || !!player.autoplay;
     player.addEventListener('can-play', () => {
       if (directPlayback.get(player) !== state || state.mode !== 'direct') return;
-      if (time > 0) player.currentTime = time;
-      if (shouldPlay) player.play?.()?.catch?.(() => {});
-      else player.pause?.();
+      state.awaitingReady = false;
+      if (state.resumeTime > 0) player.currentTime = state.resumeTime;
+      if (state.shouldPlay) player.play?.()?.catch?.(() => {});
+      else {
+        // Vidstack's ready() decides autoplay after can-play and an await.
+        // Retain the public-property hold until a deliberate play request.
+        holdPausedAutoplay(player, state.original);
+        player.pause?.();
+      }
     }, { once: true });
     console.info('[Memories RKMPP] Trying original file before HLS');
     player.src = { src: candidate.original, type: 'video/mp4' };
@@ -433,14 +448,18 @@
   function applyPreferences(value) {
     const previous = preferences;
     preferences = playbackPreferences(value);
-    // Honor a mid-playback explicit H.264 compatibility selection.
+    // Explicit formats leave the original trial for a negotiated HLS source.
+    const directFallbacks = new Set();
     for (const player of document.querySelectorAll('media-player')) {
-      if (preferences.codec === 'h264') {
+      if (preferences.codec !== 'auto') {
         const state = directPlayback.get(player);
-        if (state?.mode === 'direct') fallbackToHLS(player, state, 'H.264 requested');
+        if (state?.mode === 'direct') {
+          directFallbacks.add(player);
+          fallbackToHLS(player, state, preferences.codec === 'hevc' ? 'HEVC requested' : 'H.264 requested');
+        }
       }
     }
-    if (!active?.player.isConnected) return;
+    if (!active?.player.isConnected || directFallbacks.has(active.player)) return;
     const { player, hls } = active;
     budget(hls, hls.currentLevel >= 0 ? hls.currentLevel : 0);
     const supported = supportsHEVC();
@@ -652,23 +671,39 @@
       };
       player.addEventListener('playing', continueDirectMonitoring);
       player.addEventListener('can-play', continueDirectMonitoring);
-      player.addEventListener('pause', () => stopDirectTimer(directPlayback.get(player)));
+      const pauseDirectPlayback = () => {
+        const state = directPlayback.get(player);
+        if (state?.mode === 'direct' && state.awaitingReady) {
+          state.shouldPlay = false;
+          holdPausedAutoplay(player, state.original);
+        }
+        stopDirectTimer(state);
+      };
+      player.addEventListener('pause', pauseDirectPlayback);
+      player.addEventListener('media-pause-request', pauseDirectPlayback);
       player.addEventListener('ended', () => stopDirectTimer(directPlayback.get(player)));
       player.addEventListener('seeking', () => {
         const state = directPlayback.get(player);
         clearDirectStall(state);
         resetDirectSamples(state);
+        if (state?.mode === 'direct' && state.awaitingReady) state.resumeTime = playbackTime(player);
       });
       // ready() decides autoplay after dispatching can-play and awaiting
       // storage. Keep it suppressed for an explicitly paused asset until an
       // intentional play or another asset, rather than restoring it too early.
       player.addEventListener('media-play-request', () => {
+        const direct = directPlayback.get(player);
+        if (direct?.mode === 'direct' && direct.awaitingReady) direct.shouldPlay = true;
         const restore = pendingRestore.get(player);
         if (restore) restore.paused = false;
         restoreAutoplay(player);
       });
       player.addEventListener('play', (event) => {
-        if (!event.autoPlay) restoreAutoplay(player);
+        if (!event.autoPlay) {
+          const direct = directPlayback.get(player);
+          if (direct?.mode === 'direct' && direct.awaitingReady) direct.shouldPlay = true;
+          restoreAutoplay(player);
+        }
       });
       player.addEventListener('provider-change', (event) => watchProvider(player, event.detail));
       player.addEventListener('hls-instance', (event) => configureHLS(player, event.detail));

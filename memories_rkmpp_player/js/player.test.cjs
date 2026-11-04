@@ -422,25 +422,30 @@ test('predictive quality reduces bitrate before buffer exhaustion', () => {
   assert.equal(preventiveLevel(levels, 0, 0, 3), 0);
 });
 
-function directPlayer() {
+function directPlayer({codec = 'auto', supported = false, autoPlay = false, autoplay = false} = {}) {
   const hub = eventHub();
   const intervals = new Map();
   const timeouts = new Map();
-  let timerId = 0, now = 0, mutation;
-  const master = 'https://cloud.example/apps/memories/api/video/transcode/abcdef123456/123/index.m3u8?token=keep';
+  let timerId = 0, now = 0, mutation, started = false;
+  const master = 'https://cloud.example/apps/memories/api/video/transcode/abcdef123456/123/index.m3u8?token=keep&codecs=h264';
   let source = { src: master };
+  const store = createPreferencesStore({getItem: () => JSON.stringify({codec}), setItem() {}});
   const media = {
     readyState: 4, currentTime: 10, duration: 120, ended: false, bufferEnd: 30,
     buffered: { length: 1, start: () => 0, end: () => media.bufferEnd },
   };
   const player = {
     nodeType: 1, isConnected: true, paused: false, seeking: false, ended: false,
-    currentTime: 10, autoPlay: false, autoplay: false, sources: [],
+    currentTime: 10, autoPlay, autoplay, sources: [], playCalls: 0,
     querySelector: () => media, querySelectorAll: () => [], matches: name => name === 'media-player',
     addEventListener: (name, callback, options) => hub.add(name, callback, !!options?.once),
     get src() { return source; },
-    set src(value) { source = value; this.sources.push(value); hub.emit('source-change', { detail: value }); },
-    play() { this.paused = false; hub.emit('playing'); return Promise.resolve(); },
+    set src(value) { source = value; started = false; this.sources.push(value); hub.emit('source-change', { detail: value }); },
+    play() {
+      this.playCalls++; this.paused = false; started = true;
+      hub.emit('play', {autoPlay: false}); hub.emit('playing');
+      return Promise.resolve();
+    },
     pause() { this.paused = true; hub.emit('pause'); },
   };
   vm.runInNewContext(fs.readFileSync(require.resolve('./player.js'), 'utf8'), {
@@ -451,12 +456,21 @@ function directPlayer() {
     setTimeout: (fn, delay) => { const id = ++timerId; timeouts.set(id, {fn, deadline: now + delay}); return id; },
     clearTimeout: id => timeouts.delete(id),
     location: {origin: 'https://cloud.example', href: 'https://cloud.example/apps/memories/', pathname: '/apps/memories/'},
-    window: {addEventListener() {}},
+    window: {
+      addEventListener() {}, MediaSource: {isTypeSupported: () => supported},
+      [Symbol.for('memories-rkmpp-settings')]: store,
+    },
     document: {documentElement: {}, addEventListener() {}, querySelectorAll: name => name === 'media-player' ? [player] : []},
     MutationObserver: class {constructor(callback) {mutation = callback;} observe() {}},
   });
   return {
-    player, media, master, intervals, timeouts, emit: hub.emit,
+    player, media, master, intervals, timeouts, store, emit: hub.emit,
+    async canPlay() {
+      hub.emit('can-play');
+      // Match Vidstack ready(): storage is awaited before its autoplay test.
+      await Promise.resolve();
+      if (!started && (player.autoPlay || player.autoplay)) await player.play();
+    },
     remove() {
       player.isConnected = false;
       mutation([{removedNodes: [player], addedNodes: [], target: {nodeType: 1, closest() {}}}]);
@@ -548,6 +562,7 @@ test('healthy playback cancels the stall deadline without stopping buffer monito
 
 test('sustained waiting falls back after its deadline and preserves the current position', () => {
   const h = directPlayer();
+  h.emit('can-play');
   h.media.bufferEnd = h.media.currentTime;
   h.emit('waiting'); h.tick(5);
   assert.notEqual(h.player.src.src, h.master);
@@ -592,5 +607,78 @@ test('removed players release timers and ignore late direct errors', () => {
   h.emit('error', {stopImmediatePropagation() { throw new Error('removed player intercepted error'); }});
   h.tick(10);
   assert.notEqual(h.player.src.src, h.master);
+});
+
+for (const codec of ['hevc', 'h264']) {
+  test(`explicit ${codec} preference bypasses the original trial`, () => {
+    const h = directPlayer({codec, supported: true});
+    assert.equal(h.player.sources.length, 0);
+    assert.equal(h.player.src.src, h.master);
+    assert.equal(h.intervals.size, 0);
+    assert.equal(h.timeouts.size, 0);
+  });
+}
+
+for (const flags of [{autoPlay: true, autoplay: false}, {autoPlay: false, autoplay: true}, {autoPlay: true, autoplay: true}]) {
+  test(`pause before original metadata suppresses delayed autoplay: ${JSON.stringify(flags)}`, async () => {
+    const h = directPlayer(flags);
+    h.player.pause();
+    await h.canPlay();
+    assert.equal(h.player.paused, true);
+    assert.equal(h.player.playCalls, 0);
+    assert.equal(h.player.autoPlay, false);
+    assert.equal(h.player.autoplay, false);
+    assert.equal(h.intervals.size, 0);
+    h.emit('media-play-request');
+    assert.equal(h.player.autoPlay, flags.autoPlay);
+    assert.equal(h.player.autoplay, flags.autoplay);
+    await h.player.play();
+    assert.equal(h.player.paused, false);
+    assert.equal(h.intervals.size, 1);
+  });
+}
+
+test('pause request before reactive pause state prevents original autoplay', async () => {
+  const h = directPlayer({autoPlay: true});
+  h.emit('media-pause-request');
+  assert.equal(h.player.paused, false);
+  await h.canPlay();
+  assert.equal(h.player.paused, true);
+  assert.equal(h.player.playCalls, 0);
+});
+
+for (const codec of ['hevc', 'h264']) {
+  test(`switching original playback to ${codec} preserves time and stays HLS on Auto`, async () => {
+    const h = directPlayer({supported: true});
+    await h.canPlay();
+    h.media.currentTime = 37.5;
+    h.store.setPreferences({codec});
+    const replacement = h.player.src.src;
+    assert.equal(new URL(replacement).searchParams.get('codecs'), codec === 'hevc' ? 'h264,hevc' : 'h264');
+    assert.equal(new URL(replacement).searchParams.get('token'), 'keep');
+    assert.equal(h.intervals.size, 0);
+    h.player.currentTime = 0;
+    await h.canPlay();
+    assert.equal(h.player.currentTime, 37.5);
+    assert.equal(h.player.paused, false);
+    h.store.setPreferences({codec: 'auto'});
+    h.emit('source-change', {detail: {src: replacement}});
+    assert.equal(h.player.src.src, replacement);
+    assert.equal(h.intervals.size, 0);
+  });
+}
+
+test('an explicit format after an early pause retains the pending position and autoplay hold', async () => {
+  const h = directPlayer({supported: true, autoPlay: true, autoplay: true});
+  h.player.pause();
+  h.media.readyState = 0; h.media.currentTime = h.player.currentTime = 0;
+  h.store.setPreferences({codec: 'hevc'});
+  assert.equal(new URL(h.player.src.src).searchParams.get('codecs'), 'h264,hevc');
+  await h.canPlay();
+  assert.equal(h.player.currentTime, 10);
+  assert.equal(h.player.paused, true);
+  assert.equal(h.player.playCalls, 0);
+  assert.equal(h.player.autoPlay, false);
+  assert.equal(h.player.autoplay, false);
 });
 

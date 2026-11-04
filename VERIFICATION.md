@@ -1,5 +1,19 @@
 # Verification: Memories 10.2.0 / go-vod 0.6.3
 
+## R8 candidate / helper 0.3.4
+
+Source review: 4 November 2026. This candidate changes the player helper and its release packaging; the R7 Go engine is unchanged. The completed R7 hardware checks below describe that existing engine, not live validation of the new direct-play path.
+
+All 44 player/settings tests pass, including eighteen new direct-play lifecycle and preference cases. They cover monitoring after can-play/playing, pause/resume with fresh samples, seek cancellation, a fully buffered ending, sustained stalls, one-time fallback with position restoration, another asset, unrelated source replacement and removal. They also cover explicit HEVC/H.264 preferences, early pause requests, delayed autoplay and original-to-HLS format changes. Seven selected regressions fail against the original experimental PR #5 helper (`531d807`). Seven further selected cases fail before the explicit-format/early-pause correction (`a2026d9`), confirming the defects rather than only checking the new implementation. JavaScript syntax validation also passes.
+
+The original-playback monitor now survives healthy playback events. Pausing and ending stop its work; resuming starts one monitor. Seeking cancels a stale stall deadline and discards old buffer samples. Source changes and removed players clear timers and the previous fallback target. A fully downloaded tail can drain naturally without spawning an HLS encoder. Early pause requests suppress both public autoplay flags through the player's delayed ready callback, retaining the R7 hold until deliberate play. A four-second HLS buffer uses a 60% delivery budget; the corresponding rendition assertion now matches that policy. Original URLs, which may contain access tokens, are no longer logged.
+
+The helper version is 0.3.4 in its Nextcloud manifest and script; the combined release label and Compose image tag advance to R8. The builder reads that manifest version for the bundled-helper label, so a 0.3.3 installation is eligible for an update. The engine-only Dockerfile retains its R7 version because no engine source changed.
+
+Auto's original-first playback is an optimistic attempt with the real media element. The HLS URL does not expose enough codec/audio/bitrate metadata for a verified compatibility decision before playback. This can avoid re-encoding a playable original, but it does not reduce the original's network bitrate or guarantee hardware client decoding. A six-second sustained-stall deadline remains a recovery bound, not a promise of seamless switching. Explicit HEVC and H.264 preferences bypass the trial. A mid-playback explicit selection loads the negotiated HLS master with the saved position and pause state; returning to Auto does not restart the original trial for that asset.
+
+Real Memories source-change/error event ordering, shared-link authentication, pause/seek restoration through direct-to-HLS replacement, Windows Chrome, Android and Safari playback remain unverified for this candidate. The new source tests do not establish actual decoder behavior, frame-drop rates or smooth transitions on those clients. Keep the candidate under review until the required live checks pass; historical R7 observations must not be presented as R8 browser results.
+
 ## R7 / helper 0.3.3
 
 The R7 source passed the full Linux ARM64 Go race suite, go vet, formatting and image build on the ROCK 5B+. Its 40-case synthetic matrix passed across 480p, 720p, 1080p, 1440p and 2160p in HEVC and H.264, including startup, cold middle/end and eight concurrent requests for each cold startup. These tests use strict independent fragment decoding and leave the source unchanged.

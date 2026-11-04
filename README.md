@@ -4,11 +4,11 @@ Experimental hardware transcoder for Memories **10.2.0** and go-vod protocol **0
 
 The tested platform is a Radxa ROCK 5B+ running Armbian's 6.1 vendor kernel. Other boards and kernels need their own validation.
 
-**R7 / helper 0.3.3** bundles the transcoder, Nextcloud playback settings and connector updater in one image. Compatible AAC is preserved; audio that needs conversion uses one shared HLS track across video qualities. The full Go race suite, vet, ARM64 build, 40-case rendition matrix and shared-audio hardware tests pass. See `VERIFICATION.md` for the exact coverage and remaining browser limits.
+**R8 candidate / helper 0.3.4** bundles the existing R7 engine with an original-playback trial and adaptive RKMPP fallback. The helper's 44 player/settings tests pass; live browser integration remains pending. The unchanged engine retains R7's completed Go race, vet, ARM64 rendition and shared-audio checks. See `VERIFICATION.md` for the exact coverage and release limits.
 
 ## Hardware and playback
 
-Supported SDR sources use MPP decoding and RGA scaling/rotation. The default output is hardware HEVC (`hevc_rkmpp`) when the client reports support, with hardware AVC (`h264_rkmpp`) as the compatibility fallback. There is no software video-encoder fallback. Supported HDR10/PQ and HLG sources use Mali OpenCL tone mapping to SDR, between MPP decoding/RGA scaling and hardware encoding. A real-frame probe checks this pipeline per rendition; unsupported profiles or failed GPU probes retain CPU tone mapping with hardware encoding. Unsupported source formats can require CPU decoding; audio normalization and preview generation also use CPU work. Dolby Vision rendering is not validated. Compatible originals can be served without re-encoding on the AVC path.
+For HLS playback, supported SDR sources use MPP decoding and RGA scaling/rotation. The default output is hardware HEVC (`hevc_rkmpp`) when the client reports support, with hardware AVC (`h264_rkmpp`) as the compatibility fallback. There is no software video-encoder fallback. Supported HDR10/PQ and HLG sources use Mali OpenCL tone mapping to SDR, between MPP decoding/RGA scaling and hardware encoding. A real-frame probe checks this pipeline per rendition; unsupported profiles or failed GPU probes retain CPU tone mapping with hardware encoding. Unsupported source formats can require CPU decoding; audio normalization and preview generation also use CPU work. Dolby Vision rendering is not validated. Compatible originals can be served without re-encoding on the AVC path.
 
 The backend retains the shared rendition clock, independently decodable HLS segments, bounded bitrate, six-second startup fragment, three-second later fragments, direct cold seeks, and hardware-safe buffering from the previous custom build. Inactive encoders are released after 15 seconds. Audio timestamps are preserved; a video-only tail is valid when its audio has already ended.
 
@@ -18,7 +18,9 @@ The child HLS muxer explicitly preserves source timestamps. Four warm/cold audit
 
 R5 shares cold source and keyframe analysis across viewers while keeping their playback state and credentials separate. Concurrent requests for the same cold fragment share one encoder start. Startup fragments are validated before sending and read once when delivered. A failed shared probe is retried with the waiting viewer's own credentials.
 
-The `memories_rkmpp_player` companion app checks HEVC MediaSource support before requesting the master playlist, starts Auto at the highest available short edge up to 1080p, and leaves adaptive quality enabled. Auto respects the display’s actual pixel density without an artificial 1.5× ceiling; available quality still depends on player size, measured bandwidth, and dropped frames. It corrects portrait quality labels using the shorter displayed edge, without altering HLS dimensions or quality selection.
+In Auto, the `memories_rkmpp_player` companion app first tries the authenticated original through Memories' stream endpoint. This is an optimistic playback trial, not a metadata-based guarantee that the file's codec, audio or bitrate is suitable. A decoder error, sustained stall or falling playable buffer switches once to that asset's adaptive HLS master while preserving position and pause state. A fully buffered ending does not trigger an unnecessary fallback. Original playback keeps the source bitrate and uses the browser's own buffering; adaptive renditions and the HLS buffer controls apply after fallback. Explicit HEVC or H.264 preferences bypass the original trial.
+
+For HLS, the companion checks HEVC MediaSource support before requesting the master playlist and chooses an initial rendition from advertised bitrates and the available bandwidth estimate. Without a usable estimate it starts at the highest available short edge up to 1080p. Auto remains adaptive, respects actual display density, and can reduce the next rendition when its bitrate exceeds a conservative delivery budget. Available quality still depends on player size, measured bandwidth, and dropped frames. Portrait quality labels use the shorter displayed edge without altering the HLS dimensions or quality IDs.
 
 With a separate audio track, manual quality changes use hls.js's `nextLevel` policy to replace future video while retaining audio. Muxed audio uses `loadLevel`, keeping the existing buffer intact and applying the new quality after it. A short buffer gives a quicker visible change; a larger buffer prioritizes an uneven connection. The helper retries once with AVC if a fatal codec error contradicts the browser's support report. It does not modify signed Memories assets or disable the player's Chrome seek workaround.
 
@@ -35,7 +37,7 @@ cd memories-rkmpp
 2. Build the combined release on the ARM64 Docker host:
 
    ```sh
-   sh scripts/build-release.sh --image local/memories-go-vod:rkmpp-10.2.0-v0.6.3-r7
+   sh scripts/build-release.sh --image local/memories-go-vod:rkmpp-10.2.0-v0.6.3-r8
    ```
 
    This builds the engine using its existing `go-vod/` context, then packages it with the companion app from this checkout. The helper version is read from `appinfo/info.xml`. To package an already tested matching engine without rebuilding it, add `--engine-image YOUR_EXISTING_ENGINE_IMAGE`.
@@ -62,7 +64,7 @@ Use a Nextcloud URL that is reachable from the transcoder and accepted by Nextcl
 
 ### Bundled Nextcloud player connector
 
-R7 is one custom container image containing the unchanged R6 engine and the matching `memories_rkmpp_player` app under `/usr/share/memories-rkmpp/nextcloud-app`. The connector executes inside Nextcloud to provide the integrated UI. The transcoder runs no extra process and needs no Docker socket, Nextcloud app mount or write access to Nextcloud. The host deployment command performs the app installation using your existing Docker access.
+R8 is one custom container image containing the unchanged R7 engine and the matching `memories_rkmpp_player` 0.3.4 app under `/usr/share/memories-rkmpp/nextcloud-app`. The helper's app version and bundled version label both advance, allowing the updater to distinguish it from 0.3.3. The connector executes inside Nextcloud to provide the integrated UI. The transcoder runs no extra process and needs no Docker socket, Nextcloud app mount or write access to Nextcloud. The host deployment command performs the app installation using your existing Docker access.
 
 The installer defaults to LinuxServer Nextcloud's `/app/www/public` document root and web-server user `abc`. It discovers an existing helper's registered location, or selects a configured writable apps directory for a first installation. Use `--docroot`, `--web-user` and, if needed, `--app-path /your/writable/apps/memories_rkmpp_player` for another supported layout. The app path must belong to Nextcloud's configured writable apps paths. The helper declares Nextcloud 35 support; compatibility is checked before replacing an installed app. Its AGPL license is separate from the backend's Apache license.
 
@@ -85,9 +87,9 @@ The helper is recommended for HEVC negotiation and portrait labels. `MEMORIES_RK
 
 ### Playback settings
 
-Helper **0.3.3** provides **Playback settings** in Memories navigation and a gear beside the viewer's top-right controls. Preferences are saved for this browser. If browser storage is blocked, they apply for the current visit. The connector lives in Nextcloud's persistent app directory; its version is bundled with the engine. A future Nextcloud major upgrade still needs a compatible connector release.
+Helper **0.3.4** provides **Playback settings** in Memories navigation and a gear beside the viewer's top-right controls. Preferences are saved for this browser. If browser storage is blocked, they apply for the current visit. The connector lives in Nextcloud's persistent app directory; its version is bundled with the engine. A future Nextcloud major upgrade still needs a compatible connector release.
 
-**Video format** offers Auto, HEVC/H.265 preferred, and H.264 compatibility. Auto prefers HEVC when the browser reports MediaSource support. HEVC preferred still respects that support check and the one-time AVC recovery; it cannot force an unsupported decoder. Buffer changes apply during playback. Format changes keep the playback position and pause state, with a brief reload when the codec changes.
+**Video format** offers Auto, HEVC/H.265 preferred, and H.264 compatibility. Auto permits the original-playback trial, leaving the original file's codec unchanged; its HLS fallback prefers HEVC when supported. Explicit HEVC or H.264 preferences go directly to adaptive HLS. HEVC preferred still respects the browser's MediaSource support and one-time AVC recovery. Selecting either explicit format during original playback preserves position and pause state when loading HLS. Returning to Auto keeps that asset on HLS, avoiding repeated original/fallback loops. HLS buffer changes apply during playback.
 
 These format and buffer preferences integrate with hls.js. Native HLS buffering remains controlled by the browser and upstream player; the hls.js settings do not override that path.
 
