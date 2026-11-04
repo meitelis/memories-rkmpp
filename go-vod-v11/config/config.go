@@ -35,8 +35,11 @@ type Config struct {
 	StreamIdleTime  int `json:"streamIdleTime" validate:"gte=0"`
 	ManagerIdleTime int `json:"managerIdleTime" validate:"gte=0"`
 
-	Version        string `json:"-"`
-	VersionMonitor bool   `json:"-"`
+	Version          string `json:"-"`
+	VersionMonitor   bool   `json:"-"`
+	RKMPP            bool   `json:"-"`
+	RKMPPOpenCL      bool   `json:"rkmppOpenCL"`
+	RKMPPOutputCodec string `json:"rkmppOutputCodec" validate:"omitempty,oneof=h264 hevc"`
 }
 
 // Bridge configures persistent PHP workers serving file reads.
@@ -54,14 +57,17 @@ type Bridge struct {
 }
 
 func Defaults(version string) *Config {
-	return &Config{
-		Version:         version,
-		Bind:            ":47788",
-		LookBehind:      3,
-		GoalBufferMin:   1,
-		GoalBufferMax:   4,
-		StreamIdleTime:  60,
-		ManagerIdleTime: 60,
+	c := &Config{
+		Version:          version,
+		Bind:             ":47788",
+		LookBehind:       3,
+		GoalBufferMin:    1,
+		GoalBufferMax:    4,
+		StreamIdleTime:   60,
+		ManagerIdleTime:  60,
+		RKMPP:            os.Getenv("MEMORIES_RKMPP") == "1",
+		RKMPPOpenCL:      true,
+		RKMPPOutputCodec: "hevc",
 		Bridge: Bridge{
 			Enabled:    true,
 			MaxWorkers: 4,
@@ -70,6 +76,11 @@ func Defaults(version string) *Config {
 			IdleTime:   5,
 		},
 	}
+	if c.RKMPP {
+		c.GoalBufferMax = 2
+		c.StreamIdleTime = 15
+	}
+	return c
 }
 
 func (c *Config) LoadFile(path string) error {
@@ -138,6 +149,17 @@ func (c *Config) DescribeURL() string {
 }
 
 func (c *Config) AutoDetect() error {
+	if value := os.Getenv("MEMORIES_RKMPP_OPENCL"); value != "" {
+		enabled, err := strconv.ParseBool(value)
+		if err != nil {
+			return fmt.Errorf("invalid MEMORIES_RKMPP_OPENCL: %w", err)
+		}
+		c.RKMPPOpenCL = enabled
+	}
+	if v := os.Getenv("MEMORIES_RKMPP_CODEC"); v != "" {
+		c.RKMPPOutputCodec = v
+	}
+
 	// Detect general configuration
 	if err := c.loadEnv(map[string]any{
 		"NEXTCLOUD_HOST":           &c.NextcloudURL,

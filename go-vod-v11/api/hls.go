@@ -23,11 +23,19 @@ func MasterPlaylist(renditions []core.Rendition, frameRate int, query string) (s
 	m := m3u8.NewMasterPlaylist()
 	m.SetIndependentSegments(true)
 	for _, r := range sorted {
-		m.Append(r.Quality+".m3u8"+query, nil, m3u8.VariantParams{
+		params := m3u8.VariantParams{
 			Bandwidth:  uint32(r.Bitrate),
 			Resolution: fmt.Sprintf("%dx%d", r.Width, r.Height),
 			FrameRate:  float64(frameRate),
-		})
+			Codecs:     r.Codecs,
+		}
+		if r.SeparateAudio {
+			params.Audio = "audio"
+			params.Alternatives = []*m3u8.Alternative{{
+				GroupId: "audio", Type: "AUDIO", Name: "Audio", Default: true, Autoselect: "YES", URI: "audio.m3u8" + query,
+			}}
+		}
+		m.Append(r.Quality+".m3u8"+query, nil, params)
 	}
 	return m.Encode().String(), nil
 }
@@ -35,6 +43,7 @@ func MasterPlaylist(renditions []core.Rendition, frameRate int, query string) (s
 // VariantPlaylist serves a rendition's playlist. direct.m3u8 never blocks:
 // cache hits serve copy, a finished probe without a grid serves uniform
 // re-encoded segments, and a pending probe answers ErrCopyPending (409).
+// audio.m3u8 is served like any other transcoded rendition.
 func VariantPlaylist(m *core.Manager, quality string, query string) (string, error) {
 	if quality == core.QUALITY_DIRECT {
 		if segs, ok := m.TryCacheCopySegments(); ok {

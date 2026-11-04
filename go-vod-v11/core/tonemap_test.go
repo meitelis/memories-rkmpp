@@ -168,3 +168,32 @@ func TestTonemapProbeShared(t *testing.T) {
 		}
 	}
 }
+
+func TestRKMPPTonemapSelection(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		dir := t.TempDir()
+		count := filepath.Join(dir, "calls")
+		t.Setenv("PROBE_CALLS", count)
+		bin := filepath.Join(dir, "ffmpeg")
+		script := "#!/bin/sh\necho call >> \"$PROBE_CALLS\"\n"
+		if fail {
+			script += "echo 'Mali OpenCL unavailable' >&2\nexit 1\n"
+		}
+		require.NoError(t, os.WriteFile(bin, []byte(script), 0755))
+		c := &config.Config{FFmpeg: bin, RKMPP: true, RKMPPOpenCL: true}
+		m := &Manager{
+			c: c, url: "http://localhost/hdr.mp4",
+			probe: &ProbeVideoData{HDR: true, CodecName: "hevc", PixelFormat: "p010le", BitDepth: 10, Width: 1920, Height: 1080},
+		}
+		s := &Stream{c: c, m: m, quality: "720p", width: 1280, height: 720}
+		spec := s.transcodeSpec(0, true)
+		require.Equal(t, !fail, spec.RKMPPOpenCL)
+		args := strings.Join(ffmpeg.BuildArgs(spec), " ")
+		if fail {
+			require.Contains(t, args, "tonemap=hable")
+			require.NotContains(t, args, "tonemap_opencl")
+		} else {
+			require.Contains(t, args, "tonemap_opencl=")
+		}
+	}
+}

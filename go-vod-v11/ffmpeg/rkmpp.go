@@ -17,13 +17,71 @@ func IsRKMPPEncoder(encoder string) bool {
 	return encoder == EncoderRKMPP || encoder == EncoderRKMPPHEVC
 }
 
+// Keep one source packet clock across adaptive renditions when the original
+// audio already matches the supported AAC-LC configuration. Unknown profiles
+// and bitrates retain normalization rather than guessing compatibility/budget.
+func copyRKMPPAudio(audio AudioInfo) bool {
+	return strings.EqualFold(audio.CodecName, "aac") && strings.EqualFold(audio.Profile, "LC") &&
+		(audio.Channels == 1 || audio.Channels == 2) && (audio.SampleRate == 44100 || audio.SampleRate == 48000) &&
+		audio.BitRate > 0 && audio.BitRate <= 256000
+}
+
+func NormalizeRKMPPAudio(audio AudioInfo) bool {
+	return audio.CodecName != "" && !copyRKMPPAudio(audio)
+}
+
+// One audio encoder is shared by the HLS video qualities. It never opens a
+// hardware video decoder or encoder, and uses the same source timestamp clock.
+func buildRKMPPAudioArgs(s Spec) []string {
+	args := []string{"-hide_banner", "-loglevel", "warning"}
+	if s.StartAt > 0 {
+		args = append(args, "-ss", fmt.Sprintf("%.6f", s.StartAt))
+	}
+	args = append(args, remoteInputArgs(s.Headers)...)
+	filter := fmt.Sprintf("aresample=async=1:first_pts=%d", int64(math.Round(s.StartAt*48000)))
+	if remaining := s.EndAt - s.StartAt; remaining > 0 {
+		// A shorter audio source must not make HLS wait for nonexistent tail
+		// fragments. Silence is cheap to encode and keeps the video playable.
+		filter += fmt.Sprintf(",apad=whole_dur=%.6f", remaining)
+	}
+	filter += fmt.Sprintf(",asetpts=N/SR/TB+%.6f/TB", s.StartAt)
+	args = append(args, "-i", s.Input, "-copyts", "-fflags", "+genpts", "-vn", "-map", "0:a:0",
+		"-c:a", "aac", "-ac", "2", "-ar", "48000", "-b:a", "128k", "-af", filter)
+	if s.EndAt > s.StartAt {
+		// copyts preserves absolute source timestamps, including on cold seeks.
+		args = append(args, "-to", fmt.Sprintf("%.6f", s.EndAt))
+	}
+	return args
+}
+
+func rkmppAudioBitrate(audio AudioInfo) int {
+	if audio.CodecName == "" {
+		return 0
+	}
+	if copyRKMPPAudio(audio) {
+		return audio.BitRate
+	}
+	return 128000
+}
+
+// RKMPPMinBitrate is the minimum advertised bandwidth for a hardware encode:
+// the encoder's 128kbps video floor, the chosen audio, and muxing headroom.
+// Stream-copy video does not use this allocation.
+func RKMPPMinBitrate(audio AudioInfo) int {
+	return ((128000+rkmppAudioBitrate(audio))*10 + 8) / 9
+}
+
 // RKMPPFrameRate returns a stable integer GOP cadence without guessing
 // an unsupported high frame rate.
 func RKMPPFrameRate(s Spec) int {
-	if s.FrameRate <= 0 || s.FrameRate > 240 {
+	fps := s.FrameRateExact
+	if fps <= 0 || math.IsNaN(fps) || math.IsInf(fps, 0) {
+		fps = float64(s.FrameRate)
+	}
+	if fps <= 0 || fps > 240 {
 		return 30
 	}
-	return s.FrameRate
+	return max(1, int(math.Round(fps)))
 }
 
 func usesRKMPPFrames(s Spec) bool {
@@ -64,7 +122,7 @@ func buildRKMPPArgs(s Spec) []string {
 	if hardwareFrames {
 		args = append(args, "-hwaccel", "rkmpp", "-hwaccel_output_format", "drm_prime")
 	}
-	rotation := ((s.Rotation % 360) + 360) % 360
+	rotation := NormalizeRotation(s.Rotation)
 	if rotation != 0 {
 		args = append(args, "-noautorotate")
 	}
@@ -106,9 +164,9 @@ func buildRKMPPArgs(s Spec) []string {
 	switch rotation {
 	case 90:
 		transpose = "2"
-	case 270:
+	case -90, 270:
 		transpose = "1"
-	case 180:
+	case 180, -180:
 		transpose = "4"
 	}
 	if transpose != "" {
@@ -123,7 +181,8 @@ func buildRKMPPArgs(s Spec) []string {
 	filters = append(filters, "setsar=1")
 	args = append(args, "-vf", strings.Join(filters, ","), "-map", "0:v:0", "-c:v", Encoder(s))
 	if s.RKMPPOutputCodec == "hevc" {
-		args = append(args, "-profile:v", "main", "-tier", "main", "-tag:v", "hvc1")
+		level := HEVCLevel(s.Width, s.Height, RKMPPFrameRate(s))
+		args = append(args, "-profile:v", "main", "-tier", "main", "-level:v", level.Name, "-tag:v", "hvc1")
 	}
 	if s.HDR {
 		args = append(args, "-color_primaries", "bt709", "-color_trc", "bt709",
@@ -134,13 +193,7 @@ func buildRKMPPArgs(s Spec) []string {
 		qp = 24
 	}
 	if s.HLS && s.Bitrate > 0 {
-		audioRate := 0
-		if s.Audio.CodecName != "" {
-			audioRate = 128000
-			if s.Audio.CodecName == "aac" && s.Audio.Channels >= 1 && s.Audio.Channels <= 2 && s.Audio.BitRate > 0 {
-				audioRate = s.Audio.BitRate
-			}
-		}
+		audioRate := rkmppAudioBitrate(s.Audio)
 		videoRate := max(128000, s.Bitrate*9/10-audioRate)
 		args = append(args, "-rc_mode", "VBR", "-b:v", strconv.Itoa(videoRate),
 			"-maxrate", strconv.Itoa(videoRate), "-bufsize", strconv.Itoa(videoRate*2),
@@ -148,34 +201,22 @@ func buildRKMPPArgs(s Spec) []string {
 	} else {
 		args = append(args, "-rc_mode", "CQP", "-qp_init", strconv.Itoa(qp))
 	}
-	if s.Audio.CodecName != "" {
+	if s.Audio.CodecName != "" && !s.SeparateAudio {
 		args = append(args, "-map", "0:a:0?")
-		if s.Audio.CodecName == "aac" && s.Audio.Channels >= 1 && s.Audio.Channels <= 2 {
+		if copyRKMPPAudio(s.Audio) {
 			args = append(args, "-c:a", "copy")
 			if s.HLS && s.StartAt > 0 {
 				args = append(args, "-copypriorss:a", "0")
 			}
 		} else {
-			args = append(args, "-c:a", "aac", "-ac", "2", "-ar", "48000", "-b:a", "128k")
+			af := "aresample=async=1"
 			if s.HLS && s.StartAt > 0 {
-				args = append(args, "-af", fmt.Sprintf("atrim=start=%.6f,aresample=async=1", s.StartAt))
+				af = fmt.Sprintf("atrim=start=%.6f,", s.StartAt) + af
 			}
+			args = append(args, "-c:a", "aac", "-ac", "2", "-ar", "48000", "-b:a", "128k", "-af", af)
 		}
 	} else {
 		args = append(args, "-an")
 	}
 	return args
-}
-
-// The initial bitrate estimate is a policy floor, not an encoder guarantee.
-// Leave an audio/muxing allowance when choosing the lowest rendition.
-func RKMPPMinBitrate(audio AudioInfo) int {
-	audioRate := 0
-	if audio.CodecName != "" {
-		audioRate = 128000
-		if audio.CodecName == "aac" && audio.Channels >= 1 && audio.Channels <= 2 && audio.BitRate > 0 {
-			audioRate = int(math.Min(float64(audio.BitRate), 256000))
-		}
-	}
-	return (128000 + audioRate) * 10 / 9
 }

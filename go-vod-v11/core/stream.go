@@ -60,6 +60,7 @@ type Stream struct {
 	tonemapOnce sync.Once
 	vaapiOpenCL bool
 	nvencCUDA   bool
+	rkmppOpenCL bool
 
 	inactive int
 	stop     chan bool
@@ -380,6 +381,22 @@ func (s *Stream) spec(startAt float64, isHls bool) ffmpeg.Spec {
 	// direct falls back to re-encoding (like max); progressive MP4 copies
 	// fine without keyframes, so it always copies.
 	_, grid := s.m.CopySegments()
+	width, height := s.width, s.height
+	if s.c.RKMPP && ffmpeg.SwapsAxes(s.m.probe.Rotation) && (s.quality == QUALITY_MAX || s.quality == QUALITY_DIRECT) {
+		width, height = height, width
+	}
+
+	// The shared audio stream is audio-only; video renditions mute their own
+	// audio so the player uses the single shared AAC track instead.
+	audioOnly := s.c.RKMPP && s.quality == QUALITY_AUDIO
+	separateAudio := s.c.RKMPP && isHls && !audioOnly && s.m.HasStream(QUALITY_AUDIO)
+
+	// EndAt bounds the audio padding so the stream doesn't outlast the video.
+	endAt := 0.0
+	if audioOnly {
+		endAt = s.m.probe.Duration.Seconds()
+	}
+
 	return ffmpeg.Spec{
 		Bin:     s.c.FFmpeg,
 		Input:   s.m.ffmpegInput(),
@@ -387,18 +404,27 @@ func (s *Stream) spec(startAt float64, isHls bool) ffmpeg.Spec {
 		StartAt: startAt,
 		HLS:     isHls,
 
-		Quality:   s.quality,
-		Width:     s.width,
-		Height:    s.height,
-		QF:        s.m.tc.QF,
-		FrameRate: s.m.probe.FrameRate,
-		Rotation:  s.m.probe.Rotation,
-		HDR:       s.m.probe.HDR,
-		BitDepth:  s.m.probe.BitDepth,
-		Audio:     s.m.probe.Audio,
-		ChunkSize: s.m.tc.ChunkSize,
-		Copy:      s.quality == QUALITY_DIRECT && (!isHls || grid),
-		CodecName: s.m.probe.CodecName,
+		RKMPP:            s.c.RKMPP,
+		RKMPPOutputCodec: s.m.OutputCodec(),
+		Bitrate:          s.bitrate,
+		PixelFormat:      s.m.probe.PixelFormat,
+		FrameRateExact:   s.m.probe.FrameRateExact,
+
+		Quality:       s.quality,
+		Width:         width,
+		Height:        height,
+		QF:            s.m.tc.QF,
+		FrameRate:     s.m.probe.FrameRate,
+		Rotation:      s.m.probe.Rotation,
+		HDR:           s.m.probe.HDR,
+		BitDepth:      s.m.probe.BitDepth,
+		Audio:         s.m.probe.Audio,
+		AudioOnly:     audioOnly,
+		SeparateAudio: separateAudio,
+		EndAt:         endAt,
+		ChunkSize:     s.m.tc.ChunkSize,
+		Copy:          s.quality == QUALITY_DIRECT && (!isHls || grid),
+		CodecName:     s.m.probe.CodecName,
 
 		VAAPI:           s.m.tc.VAAPI,
 		VAAPILowPower:   s.m.tc.VAAPILowPower,
@@ -430,6 +456,9 @@ func (s *Stream) transcode(startId int) {
 		// Start one frame before.
 		// This ensures that the keyframes are aligned.
 		startNumber = startId - 1
+		if s.c.RKMPP {
+			startNumber = startId
+		}
 		startAt = float64(startNumber * s.m.tc.ChunkSize)
 	}
 

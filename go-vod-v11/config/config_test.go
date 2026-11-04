@@ -156,3 +156,28 @@ func TestAutoDetect(t *testing.T) {
 	require.NoError(t, preset.AutoDetect())
 	require.Equal(t, "/custom/ffmpeg", preset.FFmpeg)
 }
+
+func TestRKMPPEnvironmentResolvedAtStartup(t *testing.T) {
+	t.Setenv("MEMORIES_RKMPP", "1")
+	c := Defaults("test")
+	t.Setenv("MEMORIES_RKMPP", "0")
+	require.True(t, c.RKMPP)
+	require.Equal(t, "hevc", c.RKMPPOutputCodec)
+	require.Equal(t, 2, c.GoalBufferMax)
+	require.Equal(t, 15, c.StreamIdleTime)
+	require.False(t, Defaults("test").RKMPP)
+}
+
+func TestRKMPPOpenCLEnvironment(t *testing.T) {
+	for value, expected := range map[string]bool{"true": true, "1": true, "false": false, "0": false} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("MEMORIES_RKMPP_OPENCL", value)
+			c := Defaults("test")
+			c.FFmpeg, c.FFprobe = "/bin/ffmpeg", "/bin/ffprobe"
+			require.NoError(t, c.AutoDetect())
+			require.Equal(t, expected, c.RKMPPOpenCL)
+		})
+	}
+	t.Setenv("MEMORIES_RKMPP_OPENCL", "invalid")
+	require.ErrorContains(t, Defaults("test").AutoDetect(), "MEMORIES_RKMPP_OPENCL")
+}
