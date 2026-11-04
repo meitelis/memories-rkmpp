@@ -52,4 +52,3 @@ func TestRKMPPMinBitrateIsStableForSilent(t *testing.T) {
 		t.Errorf("RKMPPMinBitrate(silent) = %d, want > 0", got)
 	}
 }
-
