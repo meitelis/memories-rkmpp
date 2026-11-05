@@ -76,3 +76,5 @@ No credentials or private-media contents belong in this repository. Keep diagnos
 - A 50-second 800 kbps limit was applied only inside the transcoder container network namespace, then automatically removed. The player downshifted to 480p but stalled during the gradual descent. This is a failed acceptance case, not smooth-playback completion.
 - Adapter 1.0.5 adds faster emergency descent (halving the level cap when the buffer is draining, minimum level when under three seconds) and samples in-flight transfer progress instead of waiting for a complete large fragment. Six JS regressions pass; live retesting is ongoing.
 - Network shaping was removed and the original noqueue configuration verified. Main is still unmerged.
+
+- The second 800 kbps test still stalled with the cap already at minimum: a large old-quality fragment remained in flight. Added emergency loader cancellation/resume using the existing media buffers (adapter 1.0.6). This change is awaiting live verification; do not mark smooth bandwidth adaptation complete or merge yet. Both temporary network limits were automatically removed and noqueue verified.

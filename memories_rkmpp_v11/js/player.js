@@ -286,6 +286,14 @@
           // Drop future video fragments, retain currently playing audio/video.
           hls.nextLevel = cap;
           hls.loadLevel = -1;
+          // nextLevel can leave a large old-quality request in flight. If
+          // starvation is close, abort network loading and resume against
+          // the existing MSE buffers at the new cap; keep the media attached.
+          if (buffer < 8) {
+            hls.stopLoad();
+            hls.nextAutoLevel = cap;
+            hls.startLoad(video.currentTime, true);
+          }
         }
         hls.nextAutoLevel = cap;
       }
