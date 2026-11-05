@@ -91,3 +91,5 @@ No credentials or private-media contents belong in this repository. Keep diagnos
 - Replaced body-only completed-fragment samples with full request delivery time. Slow responses buffered by a proxy no longer create inflated bandwidth estimates.
 - Added protection when a request makes no body progress for two seconds while buffered playback falls below twelve seconds. Recovery estimates rise gradually instead of jumping from one fast burst.
 - Seven JavaScript regressions pass, including delayed-response bandwidth/audio selection. Deployed 1.0.7; a fresh 800 kbps live test is in progress.
+
+- Adapter 1.0.9 subtracts a bounded minimum observed request latency from delivery samples so short fragments can demonstrate recovery without ignoring proxy delays. It avoids the no-progress watchdog during the initial three seconds. Local DOM diagnostics now count actual post-start waiting events and duration separately from seeks. Seven JS regressions pass; the new measured Original-to-800 kbps acceptance run is starting.

@@ -8,6 +8,7 @@ test('delayed proxy delivery does not masquerade as a fast connection', () => {
   assert.equal(audioProfile(rate),'audio64');
   assert.equal(chooseLevel(levels,rate),0);
   assert.equal(deliveryRate({loaded:0,loading:{start:1,end:1000}}),0);
+  assert.equal(deliveryRate({loaded:100000,loading:{start:1000,first:1100,end:1125}},100),32000000);
 });
 
 const levels = [350000,700000,1800000,4000000,9000000].map((bitrate,i)=>({bitrate,url:[i===4?'/direct.m3u8?x=y':`/${i}.m3u8`]}));

@@ -4,8 +4,8 @@
   const isOriginal = level => (Array.isArray(level?.url) ? level.url : [level?.url]).some(u => /\/direct\.m3u8(?:\?|$)/.test(u || ''));
   const bandwidth = level => level?.bitrate || Number(level?.attrs?.BANDWIDTH) || Infinity;
 
-  function deliveryRate(stats) {
-    const elapsed = stats?.loading?.end - stats?.loading?.start;
+  function deliveryRate(stats, latency = 0) {
+    const elapsed = stats?.loading?.end - stats?.loading?.start - latency;
     return elapsed > 0 && stats.loaded > 0 ? stats.loaded * 8000 / Math.max(25, elapsed) : 0;
   }
 
@@ -212,11 +212,15 @@
       if (data.frag?.type !== 'main') return;
       if (state.inflight === data.frag) state.inflight = null;
       const stats = data.stats || data.frag.stats;
-      const sample = deliveryRate(stats);
+      const firstByte = stats?.loading?.first - stats?.loading?.start;
+      if (firstByte >= 0) state.latency = Math.min(state.latency ?? 200, firstByte, 200);
+      const sample = deliveryRate(stats, state.latency || 0);
       if (!sample) return;
       // Delivery includes time waiting behind a proxy or encoder. A fast
       // body after a long wait cannot sustain a high-bitrate rendition.
-      state.bps = sample < state.bps ? sample : Math.min(sample, state.bps * 1.35);
+      state.bps = sample < state.bps ? sample : Math.min(sample, state.bps * 2);
+      state.badge.dataset.requestMs = String(Math.round(stats.loading.end - stats.loading.start));
+      state.badge.dataset.latencyMs = String(Math.round(state.latency || 0));
     });
     listen(Events.FRAG_LOADING, (_event, data) => {
       if (data.frag?.type === 'main') state.inflight = data.frag;
@@ -254,10 +258,25 @@
     badge.setAttribute('role', 'status');
     parent.appendChild(badge);
     const state = {badge, hls:null, decoderCap:Infinity, bps:0, audioChanged:0};
+    const diagnostics = new AbortController();
+    const metric = (name, fn) => video.addEventListener(name, fn, {signal:diagnostics.signal});
+    metric('playing', () => {
+      state.hasPlayed = true;
+      if (state.waitingAt) state.waitingMs = (state.waitingMs || 0) + Date.now() - state.waitingAt;
+      state.waitingAt = 0;
+    });
+    metric('waiting', () => {
+      if (!state.hasPlayed || video.seeking || video.paused || state.waitingAt) return;
+      state.waitingAt = Date.now();
+      state.waitingCount = (state.waitingCount || 0) + 1;
+    });
+    metric('seeking', () => { state.waitingAt = 0; state.seekAt = Date.now(); });
+    metric('seeked', () => { badge.dataset.seekMs = String(Date.now() - state.seekAt); });
     attached.set(video, state);
     const refresh = () => update(video, state);
     for (const event of ['resize','loadedmetadata','quality-list']) video.addEventListener(event, refresh);
     state.detach = () => {
+      diagnostics.abort();
       state.abort?.abort();
       clearTimeout(state.retryTimer);
       for (const [event, fn] of state.events || []) state.hls.off(event, fn);
@@ -276,7 +295,7 @@
     if (stats?.loading?.start > 0 && !video.paused && !video.seeking) {
       const elapsed = performance.now() - stats.loading.start;
       if (elapsed >= 1500 && stats.loaded > 0) state.bps = Math.min(state.bps, stats.loaded * 8000 / elapsed);
-      if (elapsed > 2000 && buffer < 12 && !stats.loaded) {
+      if (elapsed > 2000 && buffer < 12 && !stats.loaded && video.currentTime > 3) {
         // No body progress may be invisible proxy buffering. Protect the
         // remaining playback time before the original fragment completes.
         state.bps = Math.min(state.bps, bandwidth(hls.levels[0]) / 0.72);
@@ -316,6 +335,8 @@
     Object.assign(state.badge.dataset, {
       bandwidth: String(Math.round(state.bps)), buffer:buffer.toFixed(2),
       cap:String(state.cap ?? ''), audio:state.audioProfile || '',
+      waitingCount:String(state.waitingCount || 0),
+      waitingMs:String((state.waitingMs || 0) + (state.waitingAt ? now - state.waitingAt : 0)),
     });
     if (typeof video.getVideoPlaybackQuality === 'function') {
       const q = video.getVideoPlaybackQuality();
