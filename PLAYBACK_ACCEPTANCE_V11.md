@@ -12,8 +12,8 @@ identified timestamp defect, not every possible cause of a two-second freeze.
 
 ## Deployment and checks
 
-- Native adapter 1.1.12; runtime image memories-11.0.2-govod-0.7.0-r4.
-- All 19 JavaScript regressions pass. Linux Go tests, vet, formatting and ARM64
+- Native adapter 1.1.13; runtime image memories-11.0.2-govod-0.7.0-r4.
+- All 20 JavaScript regressions pass. Linux Go tests, vet, formatting and ARM64
   image build passed. The complete isolated hardware matrix passed, including
   both encoders, HDR, rotations, cold starts, shared audio and new 50 fps cadence checks.
 - r4 uses measured container bitrate when Matroska omits stream bitrate. Probe
@@ -60,18 +60,31 @@ isolation before accepting performance. These checks establish broader functiona
 coverage, not complete visual/audio acceptance. Real-library HDR acceptance is
 still open; the generated hardware HDR checks passed.
 
+The isolated repeat of the rotated 4K case reached its 23.9-second EOF with zero
+recorded waits and zero dropped frames. Fast-network A/B/C/D started at Original
+without recorded waits. The corrected Matroska master advertised 28.22 Mbps for
+Original, which played rather than using the former 5.6 Mbps budget.
+
+A 20 Mbps cold seek exposed a separate false-downshift defect: after playback
+resumed, the old seek timer still counted as an outstanding stalled request.
+Adapter 1.1.13 uses that fallback timer only while seeking or unable to play future
+pictures. Actual in-flight request age remains active. The regression verifies
+both resumed playback and a genuinely stuck seek. Repeating the same live case
+kept 1080p, resumed in 1.696 seconds, then returned to normal Auto with zero waits.
+
 ## Required repeatable scenarios
 
 | Scenario | Required outcome | Latest status |
 | --- | --- | --- |
-| Fast-network startup, A-E | Compatible Original selected; playback advances past two seconds | Fixed AAC case played to 290 s; repeat final build across baseline |
-| Midpoint and backward cold seeks, A-E | Resume at requested clock without a false network downshift | Earlier B/C/D passed; repeat final build and weak-link seek |
-| Pause beyond producer idle timeout, then resume | No dead stream or audio reset | Pending |
-| Original / 1440p / 1080p / all three 480p rates | Retain buffered pictures and shared audio; actual rendition display | Partial desktop result above; repeat new build |
+| Fast-network startup, A-E | Compatible Original selected; playback advances past two seconds | A/B/C/D and MKV selected Original without waits on r4 / 1.1.12; E previously played to 290 s. Final 1.1.13 change affects the seek watchdog. |
+| Midpoint and backward cold seeks, A-E | Resume at requested clock without a false network downshift | r4 high-bitrate D retained Original: midpoint 1.219 s, backward 0.270 s, zero waits/quota errors. 1.1.13 fixed and repeated B's false downshift at 20 Mbps. Wider seek coverage remains open. |
+| Pause beyond producer idle timeout, then resume | No dead stream or audio reset | E / 1.1.13: paused for over a minute, resumed for 25 s past the old buffer, retained Original/high audio and added no waits. Audible continuity still needs Android confirmation. |
+| Original / 1440p / 1080p / all three 480p rates | Retain buffered pictures and shared audio; actual rendition display | E / 1.1.13 Original-to-1440p retained about 9 s of queued video and high/source audio, adding no waits or dropped frames; actual badge changed after queued Original. Full ladder/Android acceptance remains open. |
 | Mobile-like delivery: fast -> 800 kbps -> 4 Mbps -> fast | Prompt useful downshift, sustained recovery, no flapping or buffer starvation | r4 / 1.1.12: Original to 480p and back to Original; zero recorded playback waits, including weak-link backward seek (2.623 s seek). Startup probe preceded shaping, so this run does not establish shaped-startup selection. |
 | Sustained weak link and recovery | Appropriate independent audio rate, no audio flush on video changes | r4 / 1.1.12 selected reduced audio during restriction, then restored high/source audio; zero recorded playback waits. Audible Android acceptance remains open. |
+| Startup with the weak limit already active | Conservative useful rendition without early starvation | Still open: A measured 0.717 Mbps, selected 480p/64 kbps audio and recorded one 275 ms wait. E measured 1.091 Mbps on the nominal 800 kbps link, initially chose a higher 480p rate/96 kbps audio, and recorded a 1.053 s startup wait; later total was two waits / 1.223 s. Do not call weak startup stall-free. |
 | Rapid scrubbing / repeat navigation / EOF | No stale requests, stuck two-second playback or endless retries | Pending |
-| Badge controls, touch and fullscreen | Compact corner placement; hidden with native controls | DOM placement verified; final visual/fullscreen check pending |
+| Badge controls, touch and fullscreen | Compact corner placement; hidden with native controls | Fullscreen DOM bounds put it above controls at the lower right; visibility becomes hidden with the fading controls. Android touch acceptance remains open. |
 
 Record measured waiting time, resolution, decoder cap, buffer, errors and hardware
 execution. A zero waiting counter alone does not establish visual/audio acceptance.

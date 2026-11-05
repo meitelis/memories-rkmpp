@@ -1,6 +1,20 @@
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
-const {chooseLevel, audioProfile, selectQuality, selectAudio, beginSeek, renditionText, configure} = require('./player.js');
+const {chooseLevel, audioProfile, selectQuality, selectAudio, beginSeek, requestAge, renditionText, configure} = require('./player.js');
+const {PlaybackPolicy} = require('./policy.js');
+
+test('a resumed seek cannot turn its old seek timer into a new network stall',()=>{
+  const levels=[400000,5000000].map((bitrate,i)=>({bitrate,url:[`/${i}.m3u8`]}));
+  const policy=new PlaybackPolicy(levels,20000000,true);
+  policy.beginSeek();
+  const state={policy,seekAt:0,inflight:{stats:{loading:{start:6500}}}};
+  const video={seeking:false,readyState:4};
+  const step=()=>policy.step({now:7000,buffer:7.5,playing:true,seeking:video.seeking,auto:true,
+    requestAge:requestAge(video,state,7000,7000)});
+  assert.equal(step().cap,1,'resumed playback keeps its affordable rendition');
+  video.seeking=true;video.readyState=1;state.inflight=null;
+  assert.equal(step().cap,0,'an actually stuck seek still has a bounded rescue');
+});
 
 test('a seek respects an earlier downshift while Original pictures are still buffered',()=>{
   const state={selected:'auto',cap:0,hls:{currentLevel:6},policy:{beginSeek(){this.seeking=true}},inflight:{}};

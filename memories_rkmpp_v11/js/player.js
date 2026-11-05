@@ -37,6 +37,15 @@
     state.hls.loadLevel = state.seekLevel;
   }
 
+  function requestAge(video, state, now, clock = performance.now()) {
+    const start = state.inflight?.stats?.loading?.start;
+    const loading = start > 0 ? clock - start : 0;
+    // Bound a stuck seek even when hls.js has no request. Once pictures
+    // resume, only an actual outstanding request can signal congestion.
+    const stalledSeek = state.policy?.phase === 'seeking' && (video.seeking || video.readyState < 3);
+    return Math.max(loading, stalledSeek ? now - state.seekAt : 0);
+  }
+
   function renditionText(video, hls) {
     if (!video.videoWidth || !video.videoHeight) return 'Loading video…';
     const level = hls?.levels?.[hls.currentLevel];
@@ -47,7 +56,7 @@
   }
 
   if (typeof module !== 'undefined' && module.exports) {
-    module.exports = {chooseLevel, audioProfile, selectQuality, selectAudio, beginSeek, renditionText, configure};
+    module.exports = {chooseLevel, audioProfile, selectQuality, selectAudio, beginSeek, requestAge, renditionText, configure};
   }
   if (typeof document === 'undefined') return;
   const debug = new URLSearchParams(location.search).has('rkmpp_debug');
@@ -307,8 +316,7 @@
       const action = state.policy.step({
         now, buffer, playing:!video.paused && !video.ended, seeking:video.seeking,
         auto:state.selected === 'auto', originalReady:state.originalReady, decoderCap:state.decoderCap,
-        requestAge:Math.max(stats?.loading?.start > 0 ? performance.now() - stats.loading.start : 0,
-          state.policy.phase === 'seeking' ? now-state.seekAt : 0),
+        requestAge:requestAge(video, state, now),
         loaded:stats?.loaded || 0,
         targetBuffer:Math.min(hls.config.maxMaxBufferLength,
           Math.max(hls.config.maxBufferLength, 8*hls.config.maxBufferSize/bandwidth(hls.levels[hls.currentLevel]))),
