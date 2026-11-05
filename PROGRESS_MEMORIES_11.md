@@ -1,56 +1,32 @@
 # Memories 11.0.2 RK3588 — active checkpoint
 
-See [PLAYBACK_ACCEPTANCE_V11.md](PLAYBACK_ACCEPTANCE_V11.md) for measured playback evidence and [HARDWARE_TEST_V11.md](HARDWARE_TEST_V11.md) for the reproducible board matrix. Earlier checkpoints remain in Git history.
+See [PLAYBACK_ACCEPTANCE_V11.md](PLAYBACK_ACCEPTANCE_V11.md) for measured playback evidence and [HARDWARE_TEST_V11.md](HARDWARE_TEST_V11.md) for the reproducible board matrix. Earlier revisions and experiments remain in Git history.
 
 ## Required behaviour
 
 - Measure delivery through Nextcloud before startup; prefer compatible Original when measured bandwidth has headroom.
-- Follow throughput and buffer health as mobile connectivity changes. Recover quality cautiously, avoid false downshifts after seeks and keep video at 480p or higher.
-- Keep audio independent of video resolution. Preserve reasonable compatible AAC; use high/96/64/32 kbps tracks as bandwidth warrants, retaining a shared sample clock.
-- Require MPP video decode/encode, RGA scale/rotation and Mali OpenCL HDR mapping. Unsupported video must fail explicitly rather than silently use CPU video processing.
-- Show the presented resolution and codec with the native controls; keep switches, seeks and audio continuous.
-- Validate real playback before merging, simplify superseded logic before that merge, then test mainline again and remove obsolete branches while preserving unique work.
-- Save progress to GitHub regularly. Never commit credentials, private media paths, identifiers or captures.
+- Adapt to changing throughput and buffer health, recover cautiously, protect cold seeks from false downshifts and keep video at 480p or higher.
+- Keep audio independent of video resolution: compatible high/source AAC on normal links and 96/64/32 kbps profiles on weak links, with one sample clock.
+- Require MPP video decode/encode, RGA scale/rotation and Mali OpenCL HDR mapping. Fail unsupported video explicitly rather than silently processing video on the CPU.
+- Show presented resolution and codec beside the controls; preserve picture, audio and clocks through quality changes and seeks.
+- Validate real playback before merging; simplify superseded logic, recheck mainline after merging and preserve unique work before deleting branches.
+- Save verified implementation to GitHub. Never commit credentials, private media identifiers, paths or captures.
 
-## Current deployment
+## Current implementation
 
-Latest: r7 / adapter 1.1.24 is healthy and connected to Nextcloud. The unaccepted
-custom handoff has been deleted; hls.js owns switching. The server uses one
-presentation/decode timeline plan, including open-GOP cold starts. Twenty retained
-JS regressions and Linux checks pass. Focused hardware checks pass nine input
-codecs to both output codecs and both AVC/HEVC open-GOP source combinations.
-VP8 remains an observed FFmpeg/MPP runtime failure and is retained as a failing
-full-matrix case. Real Original-to-1440p repeats took 3.047 s and 5.976 s without
-added waits/drops/gap errors. See acceptance for limits. No mainline merge.
+Runtime r8 / adapter 1.1.24 is healthy and connected to Memories 11.0.2 through go-vod 0.7.0.
 
-- Working branch: `import/laptop-2026-11-04`. Main still contains the older 10.2 baseline; do not deploy that baseline into Memories 11.
-- Memories 11.0.2 communicates with go-vod 0.7.0 through the existing internal transcoder address. Runtime r5 is healthy and its real Nextcloud handshake passes.
-- Adapter 1.1.23 is installed. Ordinary URLs retain the conservative buffer-preserving quality switch. Faster manual switching remains restricted to the explicit `rkmpp_fast_switch` preview flag.
-- Nextcloud 35 gives JavaScript a server-version cache URL. Deployment now advances its template asset cache after copying the adapter so browsers receive the installed code.
-- PRs 6 and 8 are closed, unmerged. No merge or branch deletion has been performed. The legacy direct-play branch contains unique work and must be preserved before any cleanup.
+- Copied AAC drops negative priming packets, preventing unsigned MP4 timestamp wrap. The formerly frozen real video subsequently played to 290 seconds.
+- Hardware workers use input pacing instead of SIGSTOP/CONT, which had lost in-flight frames. Both encoders pass the 50 fps packet-cadence regression.
+- One immutable server plan distinguishes GOP presentation start from decoder keyframe. Copy seeks, hardware trims/IDRs and open-GOP cold starts use the appropriate boundary. The plan is cache-only at startup; a cache miss retains a stable fixed grid for that session.
+- Copied B-frame fragments omit DASH sidx continuity rewriting. Playlists preserve fractional presentation durations. Regressions read raw MP4 decode times and composition offsets.
+- hls.js owns manual scheduling through nextLevel. The custom prepared-switch/buffer-flush experiment and its feature flag have been removed.
+- Startup uses a bounded same-origin speed probe and Original preflight. Forward buffering has a byte limit; cold-seek protection and independent audio adaptation remain active.
+- r8 builds the original pinned Jellyfin MPP source with a three-line semantic fix for an absent optional VP8 control callback. All ten input codecs pass to both hardware encoders; the full hardware matrix, Linux checks and final packaging checks pass. No wholesale MPP SDK upgrade is included.
 
-## Verified changes
+## Acceptance still required
 
-- Fixed copied AAC negative priming wrapping the unsigned MP4 decode clock. The reproduced frozen real video played to 290 s afterward. This fixes the identified timestamp defect, not every possible freeze.
-- Replaced SIGSTOP/CONT for hardware video with input pacing after reproducing lost in-flight frames. The 50 fps full-packet cadence regression passes for both hardware encoders.
-- Added independently scheduled audio profiles, bounded startup probing and Original preflight, byte-limited buffers, source-bitrate fallback for Matroska and seek-specific congestion protection.
-- Source-aligned RKMPP HLS uses one immutable cached keyframe plan, explicit IDRs and blocking packet retrieval. It preserves fractional source PTS, keeps AAC separate, never scans at playlist startup and keeps a stable fixed-grid fallback after a cache miss.
-- Linux tests, vet, formatting, ARM64 packaging and the complete r5 board matrix pass. The published source-alignment checkpoint passed all three GitHub workflows. All 29 current JavaScript regressions pass.
-- Fresh-code real tests: HEVC Original-to-1440p reported 4.079 s with no waits; AVC 1440p-to-1080p changed presented dimensions in 3.775 s with no added waits/drops. Aligned AVC backward/forward cold seeks took 785/801 ms and retained the selected resolution.
-
-## Active investigation
-
-The keyframe-versus-presentation defect is corrected in r7 and passed the two
-real switch repeats. The older investigation below records its origin. Remaining
-work is VP8 runtime support, fresh mobile adaptation/startup acceptance, audible
-continuity and native Android controls; those requirements are not waived.
-
-The 50 fps HEVC source exposes an Original-copy composition-timestamp offset. The preview guard refuses an unsafe early cut and falls back, preserving playback but leaving a slow switch. An isolated raw-MP4 check identifies MOV's DASH/sidx continuity handling as rewriting later fragment PTS. A minimal `skip_sidx` change for copied video and generated AVC/HEVC B-frame startup/cold regressions are being validated; this change is not deployed yet. Do not compensate for this in the player.
-
-## Remaining acceptance and integration
-
-1. Finish the copy B-frame timestamp regression, repeat real source-aligned Original/encoded switches and confirm presented dimensions and audio continuity rather than only loader events.
-2. Repeat weak-startup tests: previous nominal 800 kbps runs included 275 ms and 1.053 s waits and are not accepted as stall-free. Keep network limits temporary and verify their removal.
-3. Validate native Android playback and controls. The browser adapter does not control ExoPlayer; upstream exposes no quality-list/selection bridge. A compatible Android/web bridge is required. The user deferred handset QA while server/browser testing continues.
-4. Complete real-library HDR perceptual checks, native-HLS/Safari and public-share coverage, repeated switching, long pause/resume and audio continuity checks.
-5. Remove superseded experiments and review the final pipeline/controller as coherent logic before merging. Re-run affected checks, merge only after acceptance, then recheck mainline and clean up branches.
+1. Repeat shaped startup and changing mobile throughput on current code. Earlier weak-startup runs had short waits and are not accepted as stall-free.
+2. Implement and validate Android native quality selection and startup policy. Its ExoPlayer path does not run the browser adapter; upstream has no quality-list/selection bridge. A native integration needs a compatible APK and web controls without replacing signed upstream assets.
+3. Finish audible continuity, real HDR appearance, native-HLS/Safari, public shares, rapid scrubbing, repeated navigation and full-ladder checks. Browser telemetry cannot establish perceptual acceptance.
+4. Review, merge and recheck mainline only after acceptance. PRs 6 and 8 are closed and unmerged. Main still contains the older 10.2 baseline; the legacy direct-play branch has unique work to preserve.

@@ -3,6 +3,11 @@
 This is a separate development image and runner. It does not change Nextcloud,
 Portainer, the running transcoder, production Compose or the old player helper.
 Both the Go builder and the MPP/RGA/Mali multimedia image are pinned by digest.
+The original multimedia runtime's MPP source is pinned to
+`a9380ef333102ac318628f83b5f7a460d377749e`. The image builds it with one local
+backport: an absent optional VP8 control callback returns success rather than
+`MPP_ERR_NULL_PTR`. This preserves the pinned ABI; no wholesale SDK upgrade is
+included. The production image reuses this tested library exactly.
 
 ## Generated hardware matrix
 
@@ -42,8 +47,9 @@ Tests return a nonzero status on failure. Hardware tests skip during ordinary
 
 The input-format suite generates AVC, HEVC, VP8, VP9, AV1, H.263, MPEG-1,
 MPEG-2, MPEG-4 and MJPEG sources and tests both output codecs. In the pinned
-runtime VP8 currently fails MPP decoder initialization; the full matrix therefore
-remains red. Nine other codec paths passed the focused r7 run. Open-GOP AVC/HEVC
+runtime VP8 failed MPP decoder initialization before the optional-control fix.
+All ten input codecs now pass to both output encoders with the patched library.
+The full hardware matrix, including HDR, core and API suites, passes. Open-GOP AVC/HEVC
 tests compare raw presentation ranges with the server plan and verify full/cold
 hardware output against the same ranges. Do not confuse these synthetic codec
 checks with real-browser/mobile playback acceptance.

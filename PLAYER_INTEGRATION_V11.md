@@ -5,7 +5,7 @@
 - Measure a bounded random-data download over the same Nextcloud origin before segment loading. Exclude PHP/encoder time to first byte from transfer estimates. Probe time is limited to 2.2 seconds; unavailable measurements start conservatively.
 - Budget 72% of measured bandwidth. Prefer compatible original HLS when bandwidth permits it; allow its copy-grid preflight up to 1.5 seconds before selecting an encoded fallback.
 - Watch fragment transfer throughput and buffered seconds. React quickly to a shrinking buffer, wait at least ten seconds of stable headroom before increasing the cap, and retain hls.js error/ABR handling.
-- Keep a shared AAC track across Original and encoded video. Manual video selection uses `loadLevel`, preserving buffered pictures while a cold rendition starts. Runtime audio uses `nextAudioTrack`, preserving the current audio buffer.
+- Keep a shared AAC track across Original and encoded video. Manual video selection uses the hls.js `nextLevel` scheduler; Auto restores `loadLevel = -1`. Runtime audio uses `nextAudioTrack`, preserving the current audio buffer.
 - Protect cold seeks separately from congestion. Hold the current rendition while its producer warms; exclude that cold delivery from network samples. Scale buffer thresholds to the byte-limited forward target, rather than requiring ten seconds on every source.
 - Bound forward storage to a 48 MiB target with an 18-second ceiling and three seconds retained behind. This matters for high-bitrate originals. Browser quota recovery can reduce those targets further. Use the normal 20% sustained frame-drop threshold for decoder capping.
 - Audio adaptation is independent: high/original on normal links, 96/64/32 kbps on weaker links, with sustained-change and cooldown checks. Profiles use AAC-LC, stereo, 48 kHz; normalized cold seeks use a global 1024-sample clock.
@@ -48,5 +48,6 @@ track-selection parameters on the existing media item without replacing its URL
 or resetting shared audio. Native startup bandwidth and buffer policy need their
 own verification. Shipping that bridge requires a compatible Android build and
 web controls, not a server-only JavaScript injection or an unsigned replacement
-of the app's signed asset manifest. The installed Android version has not yet
-been collected, so do not assume its shell behavior from the server version alone.
+of the app's signed asset manifest. Server logs show a native 1.15 client;
+the 11.0.2 source tag contains Android 1.17. Do not assume every handset's client
+version or shell behavior from the Nextcloud application version alone.

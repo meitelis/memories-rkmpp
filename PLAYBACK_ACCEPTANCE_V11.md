@@ -1,196 +1,43 @@
 # Playback acceptance checkpoint: 5 November 2026
 
-Do not merge while the reported Android startup/seek failures remain unverified.
-Use actual library videos; keep filenames, file IDs, credentials and captures out of Git.
+Use real library videos as well as generated hardware tests. Keep private media, identifiers, paths, credentials and captures outside Git. Earlier implementation history is retained in prior commits.
 
-Android blocker: the user reports that the resolution menu is missing in the
-native app. Upstream 11.0.2's ExoPlayer bridge exposes no quality list/selection
-API, and this repository's adapter targets browser hls.js. See
-`PLAYER_INTEGRATION_V11.md`; browser results do not establish native-app coverage.
-The user deferred Android playback retesting while work continues.
+## Current state
 
-Resolved reproduced blocker: copied AAC priming produced an invalid unsigned MP4
-decode timestamp and a nearly 25-hour browser audio jump. The copy path now drops
-negative priming packets without re-encoding audio. The raw-box startup/cold-seek
-regression and expanded hardware matrix pass. The previously frozen real video
-subsequently played to 290 seconds with a normal audio clock. This covers the
-identified timestamp defect, not every possible cause of a two-second freeze.
+Runtime r8 / adapter 1.1.24 is deployed and healthy. The real Nextcloud go-vod 0.7.0 handshake passes. r8 changes only MPP packaging: the original pinned SDK receives a small optional VP8-control fix. All ten input codecs pass to both hardware encoders; the complete board matrix and Linux checks pass. The final runtime contains the byte-identical tested MPP library and independently passes VP8-to-H.264/HEVC checks without errors.
 
-## Deployment and checks
+The browser uses hls.js's native nextLevel scheduler. There is no custom preparation/SourceBuffer-flush path or fast-switch preview flag. Twenty retained player/policy regressions pass. One server presentation/decode plan handles source alignment and open-GOP cold starts. The copy mux preserves B-frame composition timestamps; generated tests inspect raw MP4 boxes rather than trusting ffprobe's standalone fragment reorder offsets.
 
-Latest: runtime r7 / adapter 1.1.24. The custom prepared-switch/buffer-flush
-experiment has been removed. Manual selection uses the native hls.js switch
-scheduler; there is no fast-switch preview flag. Twenty retained player/policy
-regressions pass. Prior measurements below describe earlier revisions.
+## Verified evidence
 
-The source plan now distinguishes a GOP's presentation start from its decoder
-keyframe. One existing packet scan collects both; a versioned index stores them.
-Copy seeks use the decoder entry, while hardware trims/IDRs use presentation
-boundaries. Cold open-GOP encoding decodes from the preceding random-access point.
-Old key-only indexes refresh without evicting unchanged sibling artifacts.
-
-Linux tests/vet/build/formatting pass. Generated AVC and HEVC open-GOP inputs pass
-to BOTH hardware output codecs, with exact copied/encoded presentation boundaries,
-independent encoded fragment decoding and stable cold init. Hardware core serving
-and API tests pass. Nine input codecs passed hardware decoding/RGA and both output
-encoders: AVC, HEVC, VP9, AV1, H.263, MPEG-1, MPEG-2, MPEG-4 and MJPEG, across
-MOV/MP4/WebM/Matroska/AVI fixtures. These are capability tests, not complete player
-acceptance for every format.
-
-Observed runtime limitation: VP8 fails in the pinned FFmpeg/MPP decoder with
-`Failed to set enable deinterlace: -3`, including when disabled explicitly.
-The full hardware matrix intentionally retains this failing case. The focused
-retest excluded VP8 and passed; do not describe it as an all-formats pass.
-
-Final real browser repeats, unshaped: the previously failing 50 fps open-GOP video
-switched Original-to-1440p in 3.047 s, and the longer-GOP 4K video in 5.976 s.
-Presented dimensions changed, with no additional waiting events, dropped frames
-or gap errors during either measured switch. Startup drops already existed in
-this hidden-browser run and are not counted as switch drops. Audible continuity,
-new mobile bandwidth traces and native Android acceptance remain open. Runtime
-health and the real go-vod 0.7.0 handshake pass. No merge or branch deletion.
-
-- Native adapter 1.1.23; runtime image memories-11.0.2-govod-0.7.0-r5. Faster
-  manual handoff is opt-in with rkmpp_fast_switch; default behavior remains 1.1.13's conservative handoff.
-- All 29 JavaScript regressions pass in working source. The deployed r5 Linux Go tests, vet, formatting and ARM64
-  image build passed. The complete isolated hardware matrix passed, including
-  both encoders, HDR, rotations, cold starts, shared audio and new 50 fps cadence checks.
-- r4 uses measured container bitrate when Matroska omits stream bitrate. Probe
-  cache version 5 refreshes that budget while preserving unchanged keyframe indexes.
-- Initial audio selection now also works when hls.js discovers tracks after the
-  speed probe; runtime changes remain scheduled rather than flushing current audio.
-- Runtime health and the real Nextcloud go-vod 0.7.0 handshake pass.
-- Reproduced an independent hardware defect: 75 seconds encoded continuously
-  produced 25 complete 150-frame segments. The identical run with 11 STOP/CONT
-  pauses lost a frame. Completed production-cache captures showed the same
-  missing-frame pattern. r2 replaces hardware-process suspension with input pacing.
-
-## Source-aligned hardware: r5 and open copy-clock regression
-
-The opt-in early handoff exposed incompatible Original and encoded GOP boundaries.
-Preparing the target alone did not prevent a picture gap. Adapter 1.1.22 refuses
-an early cut unless the old GOP ends exactly where a new independently decodable
-GOP starts; ordinary URLs retain the established buffer-preserving handoff.
-
-An isolated RK3588 experiment found that explicit source timestamps plus
-`-flags:v +low_delay` align both hardware encoders exactly. Without blocking
-packet retrieval, the global MPP IDR request could affect an earlier queued frame.
-Short real 4K tests remained faster than real time: approximately 2.78x for
-AVC-to-1080p AVC and 1.82–1.88x for 1440p HEVC. These are bounded throughput
-measurements, not full playback or visual-quality acceptance.
-
-The server candidate shares one immutable cached keyframe grid across encoded
-video renditions, preserves fractional source timestamps and leaves the AAC
-timeline independent. It never scans the source during playlist startup. A cache
-miss keeps the fixed grid for that whole manager; a later session may use the
-warmed cache. Long, dense, incomplete or oversized grids retain the fixed path.
-HDR, rotated, incompatible-codec and progressive outputs keep their existing path.
-
-New regressions cover VBR H.264/HEVC, two sizes, irregular fractional GOPs,
-independent fragment decoding, byte-identical cold-start init, serving segment IDs
-beyond the old fixed-grid limit and unchanged audio workers. The full Linux build
-and board matrix passed. The playlist also preserves microsecond precision:
-millisecond duration rounding could accumulate drift across fractional GOPs.
-
-Fresh-code r5/1.1.23 playback results (unshaped, no competing hardware tests):
-
-| Case / action | Result |
+| Check | Result and limit |
 | --- | --- |
-| 4K HEVC Original to 1440p | 4.079 s quality event, no waits; one dropped frame over the observation. |
-| HEVC 1440p to Original | 6.968 s quality event, no waits; still too slow in this GOP phase. |
-| High bitrate 4K60 AVC Original to 1440p | No added waits/drops; quality event took 7.250 s. |
-| AVC 1440p to 1080p | Presented dimensions changed in 3.775 s; no added waits/drops. |
-| Aligned AVC 1080p cold backward / forward seek | 785 / 801 ms; no waits, selected resolution retained. |
-| 50 fps HEVC with reordered frames | Guard refused early cut because remuxed Original and encoded PTS differed; conservative fallback took 17.938 s with no waits. Not accepted as fast switching. |
+| Linux source checks, r7 | Go tests, vet, formatting and ARM64 packaging pass. All three published GitHub workflows pass. |
+| Hardware pipeline, r8 | All ten input codecs pass decoding/RGA and both hardware encoders. VP8 optional-control initialization is fixed in the pinned MPP source. PQ/HLG, cadence, full/cold clocks, shared audio, core serving and API checks pass. |
+| Real Original to 1440p, r7 | The 50 fps open-GOP HEVC case changed presented dimensions in 3.047 s; the longer-GOP 4K case took 5.976 s. Neither measured switch added waits, drops or gap errors. Startup drops already present in the hidden browser are excluded from those switch counts. |
+| Earlier AVC switching/seeks | 1440p to 1080p changed presented dimensions in 3.775 s; backward/forward cold seeks took 785/801 ms without added waits and retained the selection. Repeat broader coverage on final code. |
+| Reproduced two-second freeze | Copied AAC priming wrapped unsigned MP4 decode time. The corrected raw-box regression passes; the previously frozen real video played to 290 s with a normal audio clock. This covers that defect, not every possible freeze. |
+| Hardware suspension | SIGSTOP/CONT lost an in-flight frame in a reproduced 75 s run. Input pacing replaces suspension; both hardware encoders pass full 50 fps packet cadence beyond the startup burst. |
+| Real-library coverage | Eleven additional real videos advanced past startup or reached EOF: AVC/HEVC, MOV/Matroska, 4K60, full-range/10-bit SDR, rotation/portrait, AC3 and silence. A rotated 4K isolated repeat reached EOF without recorded waits/drops. These are functional checks, not complete visual/audio acceptance. |
+| Fast-network startup, earlier adapter | A/B/C/D and Matroska cases selected Original without recorded waits. High-bitrate Original cold seeks retained quality without quota errors. Current Android behavior still needs separate validation. |
+| Earlier mobile trace | Fast to 800 kbps to 4 Mbps to fast downshifted/recovered video and independent audio without recorded waits. The speed probe preceded shaping; this does not establish weak-link startup. |
+| Weak-link startup | One case measured 0.717 Mbps, selected 480p/64 kbps and had a 275 ms wait. Another measured 1.091 Mbps on nominal 800 kbps, selected a higher 480p rate/96 kbps and had a 1.053 s startup wait. Not accepted as stall-free. |
+| Pause/resume, earlier adapter | A real Original resumed beyond a minute-long producer timeout and played 25 s beyond its old buffer without recorded waits or quality/audio resets. Audible continuity remains open. |
+| Resolution badge | DOM dimensions/codec reflect presented output. Fullscreen placement is above the lower-right controls and fades with them. Native Android is a separate gap. |
 
-The last case exposes an omitted scenario in the generated source-grid test: its
-fixture had no B-frames. A raw-box investigation shows that MOV's DASH/sidx
-continuity handling rewrites later copy-fragment composition timestamps. A
-copy-only `skip_sidx` change preserves source PTS in the isolated raw-box check;
-generated AVC/HEVC B-frame startup/cold-init/decode regressions and the full matrix
-are running before any deployment. FFprobe can add its own reorder offset to
-standalone fMP4, so this check reads `tfdt` and signed `trun` offsets directly.
+## Remaining release gates
 
-Nextcloud 35's script URLs use the server version. The installed adapter version
-alone did not invalidate a browser's old JavaScript URL. Advancing the template
-asset cache produced a new URL and fresh-code tests above. Deployment now does
-this explicitly; do not attribute earlier cached-code repeats to a new adapter.
+| Scenario | Required outcome |
+| --- | --- |
+| Fast home-network startup across representative sources | Compatible Original selected; progress beyond two seconds; normal audio clock. |
+| Weak startup; abrupt throughput drop and recovery | Useful >=480p selection, appropriate independent audio, bounded recovery, no oscillation or starvation. Run shaping before the initial probe. |
+| Original, encoded resolutions and all three 480p rates | Actual presented quality displayed; bounded switches with continuous clocks/audio. Include AVC/HEVC output and source/container diversity. |
+| Cold seeks, rapid scrubbing, repeat navigation and EOF | Requested clock resumes; no false downshift, stale request or endless retry. |
+| Android native app | Restore Auto/manual quality controls and actual rendition display; native startup and adaptation must be tested through ExoPlayer. Browser tests do not cover it. |
+| Audible/perceptual checks | No clicks, drift or picture jitter; real HDR colors acceptable. Hidden-browser drop counters alone cannot establish this. |
+| Other clients/authentication | Native-HLS/Safari and public shares work with appropriate fallbacks. |
+| Final integration | Review clean logic, merge only after acceptance, retest mainline, then remove obsolete branches while preserving unique work. |
 
-## Real-media baseline before 1.1.7
+Run `bash scripts/test-v11-rkmpp.sh --matrix` for the isolated hardware gate and `node --test memories_rkmpp_v11/js/*.test.cjs` for browser regressions.
 
-| Case | Video / audio | Observed desktop result |
-| --- | --- | --- |
-| A | HEVC 3200x1800, 50 fps; AAC 48 kHz | Original played; fixed 480p at both low and normal rates played with full buffer. User reported frequent laptop jitter but smooth Android playback at all three 480p rates. |
-| B | AVC High 2560x1440, about 30 fps; AAC 44.1 kHz | Original played. Forward seek worked; backward cold seek completed in about 830 ms. No waiting events. |
-| C | HEVC 3840x2160, 30 fps; AAC 44.1 kHz | Original played. Cold midpoint seek completed in about 1.06 s, preserving Original, with no waiting events. |
-| D | AVC Baseline 3840x2160, 60 fps, about 66 Mbps; AAC 48 kHz | Original played and cold seek completed in about 715 ms. Browser bufferFullError occurred: previous seconds-only buffering was excessive for this bitrate. |
-| E | HEVC 3840x2160, about 60 fps; AAC 48 kHz | Original played past one minute; one 333 ms wait and a levelLoadError were recorded. Repeat after the preflight/buffer fixes. |
-
-Original-to-1440p manual selection previously cut roughly 18 buffered seconds to
-under three. Changing selection to loadLevel preserved about 18 seconds through
-the desktop switch, with zero waiting events. It takes effect after queued video.
-
-The Android report is broader than these desktop results: some videos stalled at
-two seconds, startup selected 1440p on a fast home link, and seeking caused an
-unnecessary 480p drop. Those reports remain acceptance failures until retested.
-
-## Broader real-library coverage after the AAC fix
-
-Inventory covered 77 video entries: 63 were readable (41 AVC, 22 HEVC; 59 AAC,
-one AC3 and three silent). Eleven paths were unreadable even from Nextcloud and
-three tiny entries were invalid containers; these are separate source-access
-issues, not evidence of an encoder freeze. No source files were modified.
-
-Eleven additional real videos advanced beyond startup or reached their short EOF:
-4K/60 AVC and HEVC, MOV, Matroska, full-range input, 10-bit SDR, portrait and rotated
-sources, AC3 normalization, silent video, and small native dimensions. Several
-had desktop startup frame drops. A rotated 4K case completed but recorded a
-2.06-second wait while an offline hardware test was also running: repeat it in
-isolation before accepting performance. These checks establish broader functional
-coverage, not complete visual/audio acceptance. Real-library HDR acceptance is
-still open; the generated hardware HDR checks passed.
-
-The isolated repeat of the rotated 4K case reached its 23.9-second EOF with zero
-recorded waits and zero dropped frames. Fast-network A/B/C/D started at Original
-without recorded waits. The corrected Matroska master advertised 28.22 Mbps for
-Original, which played rather than using the former 5.6 Mbps budget.
-
-A 20 Mbps cold seek exposed a separate false-downshift defect: after playback
-resumed, the old seek timer still counted as an outstanding stalled request.
-Adapter 1.1.13 uses that fallback timer only while seeking or unable to play future
-pictures. Actual in-flight request age remains active. The regression verifies
-both resumed playback and a genuinely stuck seek. Repeating the same live case
-kept 1080p, resumed in 1.696 seconds, then returned to normal Auto with zero waits.
-
-## Required repeatable scenarios
-
-| Scenario | Required outcome | Latest status |
-| --- | --- | --- |
-| Fast-network startup, A-E | Compatible Original selected; playback advances past two seconds | A/B/C/D and MKV selected Original without waits on r4 / 1.1.12; E previously played to 290 s. Final 1.1.13 change affects the seek watchdog. |
-| Midpoint and backward cold seeks, A-E | Resume at requested clock without a false network downshift | r4 high-bitrate D retained Original: midpoint 1.219 s, backward 0.270 s, zero waits/quota errors. 1.1.13 fixed and repeated B's false downshift at 20 Mbps. Wider seek coverage remains open. |
-| Pause beyond producer idle timeout, then resume | No dead stream or audio reset | E / 1.1.13: paused for over a minute, resumed for 25 s past the old buffer, retained Original/high audio and added no waits. Audible continuity still needs Android confirmation. |
-| Original / 1440p / 1080p / all three 480p rates | Retain buffered pictures and shared audio; actual rendition display | E / 1.1.13 Original-to-1440p retained about 9 s of queued video and high/source audio, adding no waits or dropped frames; actual badge changed after queued Original. Full ladder/Android acceptance remains open. |
-| Mobile-like delivery: fast -> 800 kbps -> 4 Mbps -> fast | Prompt useful downshift, sustained recovery, no flapping or buffer starvation | r4 / 1.1.12: Original to 480p and back to Original; zero recorded playback waits, including weak-link backward seek (2.623 s seek). Startup probe preceded shaping, so this run does not establish shaped-startup selection. |
-| Sustained weak link and recovery | Appropriate independent audio rate, no audio flush on video changes | r4 / 1.1.12 selected reduced audio during restriction, then restored high/source audio; zero recorded playback waits. Audible Android acceptance remains open. |
-| Startup with the weak limit already active | Conservative useful rendition without early starvation | Still open: A measured 0.717 Mbps, selected 480p/64 kbps audio and recorded one 275 ms wait. E measured 1.091 Mbps on the nominal 800 kbps link, initially chose a higher 480p rate/96 kbps audio, and recorded a 1.053 s startup wait; later total was two waits / 1.223 s. Do not call weak startup stall-free. |
-| Rapid scrubbing / repeat navigation / EOF | No stale requests, stuck two-second playback or endless retries | Pending |
-| Badge controls, touch and fullscreen | Compact corner placement; hidden with native controls | Fullscreen DOM bounds put it above controls at the lower right; visibility becomes hidden with the fading controls. Android touch acceptance remains open. |
-
-Record measured waiting time, resolution, decoder cap, buffer, errors and hardware
-execution. A zero waiting counter alone does not establish visual/audio acceptance.
-Only merge after those failures are resolved; then recheck mainline and clean up branches.
-
-The faster manual-switch preview remains unaccepted. Its initial high-bitrate AVC
-hold was traced to appending the preceding GOP over already-playing pictures.
-Boundary-sample retention corrected first-fragment selection in later repeats:
-4.454 s to 1080p, 2.046 s up to Original and 4.616 s down to 480p, without recorded
-waits or the earlier dropped-frame burst. However an HEVC repeat required an
-automatic clock correction (bufferSeekOverHole). Keep the faster path opt-in
-until clock/segment alignment and visual/audio acceptance pass. Background-throttled
-frame callbacks cannot establish smoothness; see PROGRESS_MEMORIES_11.md.
-
-Run `bash scripts/test-v11-network.sh nextcloud 443` on the board for the bounded
-mobile profile. This affects that container's IPv4 HTTPS responses to the proxy,
-including the speed probe. Internal HTTP bridge traffic remains unshaped. Verify
-nonzero shaped-byte counters and actual transfer speeds; a nominal rate alone is
-insufficient. The EXIT/INT/TERM handlers restore the original noqueue state.
+`bash scripts/test-v11-network.sh nextcloud 443` runs a bounded mobile profile on the board. It shapes that container's IPv4 HTTPS responses, including the speed probe; internal bridge traffic stays unshaped. Verify shaped-byte counters and actual rates. EXIT/INT/TERM handlers restore the original noqueue state. No shaping is currently active.
