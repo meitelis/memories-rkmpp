@@ -60,8 +60,8 @@
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = {chooseLevel, audioProfile, selectQuality, selectAudio, beginSeek, requestAge, renditionText, configure, recheckConnection, update};
   }
+  const debug = typeof location !== 'undefined' && new URLSearchParams(location.search).has('rkmpp_debug');
   if (typeof document === 'undefined') return;
-  const debug = new URLSearchParams(location.search).has('rkmpp_debug');
 
   const attached = new Map();
   function bufferAhead(video) {
@@ -354,6 +354,7 @@
         targetBuffer:Math.min(hls.config.maxMaxBufferLength,
           Math.max(hls.config.maxBufferLength, 8*hls.config.maxBufferSize/bandwidth(hls.levels[hls.currentLevel]))),
       });
+      const loweredCap = action.cap < state.cap;
       state.bps = action.bps;
       state.cap = action.cap;
       state.badge.dataset.phase = action.phase;
@@ -364,6 +365,7 @@
           hls.loadLevel = -1;
         }
         hls.autoLevelCapping = action.cap;
+        if (loweredCap) hls.nextAutoLevel = action.cap;
         if (action.cancel) {
           // Stop downloads only. Keep the media source and playing buffers.
           hls.stopLoad();
