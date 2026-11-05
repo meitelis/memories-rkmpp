@@ -16,3 +16,37 @@ Encoded RKMPP HLS video uses FFmpeg input pacing with an 18-second initial burst
 The custom bandwidth policy currently targets hls.js. Safari native HLS retains the browser's own ABR; guest/public-share probing and mobile browser compatibility still require validation. A successful server hardware test does not prove audible continuity, perceptual HDR quality or smooth browser switching.
 
 Deploy with `scripts/deploy-v11.sh`. Acceptance requires real media playback, repeated quality changes, cold seeks, abrupt network reduction/recovery, and checking audio drift/gaps. Merge and branch cleanup follow acceptance, then the mainline deployment is checked again.
+
+## Android native player: confirmed integration gap
+
+The user reports that the resolution menu is absent in the Android app while it
+remains available in the browser. Treat this as an open acceptance failure.
+
+The pinned upstream 11.0.2 implementation has two distinct playback paths:
+
+- [PsVideo.ts](https://github.com/pulsejet/memories/blob/v11.0.2/src/components/viewer/PsVideo.ts)
+  creates `viewer-video-native-hole` when the native capability is available;
+  only HTML video receives the hls.js quality hooks.
+- [ViewerVideoNativeHole.vue](https://github.com/pulsejet/memories/blob/v11.0.2/src/components/viewer/ViewerVideoNativeHole.vue)
+  mirrors position, dimensions, buffering and playback controls, but does not
+  expose `qualityList` or `currentQuality` to the stock quality menu.
+- [NativeHoleVideo.kt](https://github.com/pulsejet/memories/blob/v11.0.2/android/app/src/main/java/gallery/memories/ui/video/NativeHoleVideo.kt)
+  uses ExoPlayer with HLS support. Its command bridge handles play, stop, pause,
+  seek, volume, mute and rate; it has no quality-selection command or track list.
+- The newer Android shell caches signed upstream web assets rather than the
+  normal Nextcloud template. A BeforeTemplateRenderedEvent helper is therefore
+  insufficient for that shell as well as for its native player.
+
+The browser adapter deliberately attaches to HTMLVideoElement/hls.js. Do not
+claim that its speed probe, policy, rendition badge or quality menu runs in the
+native app. ExoPlayer still has its own automatic adaptation; server-side MPP/RGA,
+AAC packet-clock and bitrate fixes apply to either client.
+
+A complete native integration must expose ExoPlayer video tracks and Auto/manual
+selection through the bridge, report the actually presented format, and change
+track-selection parameters on the existing media item without replacing its URL
+or resetting shared audio. Native startup bandwidth and buffer policy need their
+own verification. Shipping that bridge requires a compatible Android build and
+web controls, not a server-only JavaScript injection or an unsigned replacement
+of the app's signed asset manifest. The installed Android version has not yet
+been collected, so do not assume its shell behavior from the server version alone.

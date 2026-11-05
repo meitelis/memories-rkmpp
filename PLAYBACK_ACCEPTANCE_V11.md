@@ -3,6 +3,12 @@
 Do not merge while the reported Android startup/seek failures remain unverified.
 Use actual library videos; keep filenames, file IDs, credentials and captures out of Git.
 
+Android blocker: the user reports that the resolution menu is missing in the
+native app. Upstream 11.0.2's ExoPlayer bridge exposes no quality list/selection
+API, and this repository's adapter targets browser hls.js. See
+`PLAYER_INTEGRATION_V11.md`; browser results do not establish native-app coverage.
+The user deferred Android playback retesting while work continues.
+
 Resolved reproduced blocker: copied AAC priming produced an invalid unsigned MP4
 decode timestamp and a nearly 25-hour browser audio jump. The copy path now drops
 negative priming packets without re-encoding audio. The raw-box startup/cold-seek
