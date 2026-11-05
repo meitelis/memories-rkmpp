@@ -37,13 +37,13 @@ test('recovery remeasures capacity after healthy buffering instead of trusting p
   assert.equal(recheck.probe,true);
   assert.equal(recheck.cap,0);
   p.measured(30000000,12000,true);
-  assert.equal(tick(p,{now:12500,buffer:12}).cap,6);
+  assert.equal(tick(p,{now:12500,buffer:12}).cap,2,'open only two new quality steps');
   assert.equal(p.phase,'normal');
 });
 
 test('a lowest-only decoder does not alternate rescue and normal on each tick',()=>{
   const p=normal();const stalled={buffer:0,requestAge:2500,decoderCap:0,currentLevel:0};
-  assert.equal(tick(p,{now:1000,...stalled}).cancel,true);
+  assert.equal(tick(p,{now:1000,...stalled,requestedLevel:0}).cancel,false,'never cancel lowest rendition');
   const second=tick(p,{now:1100,...stalled});
   assert.deepEqual([second.phase,second.cancel],['recovering',false]);
   const third=tick(p,{now:1200,...stalled});
@@ -55,9 +55,67 @@ test('recovery completes after healthy buffering even below the decoder ceiling'
   assert.equal(tick(p,{now:2000,buffer:12}).phase,'recovering');
   assert.equal(tick(p,{now:11999,buffer:12}).phase,'recovering');
   const recovered=tick(p,{now:12000,buffer:12});
-  assert.deepEqual([recovered.phase,recovered.cap],['normal',2]);
+  assert.deepEqual([recovered.phase,recovered.cap],['normal',0]);
+  p.measured(2000000,12000,true);
+  assert.equal(p.cap,2,'a new stable measurement can permit higher quality');
 });
 
+test('fluctuating buffers do not restart lowest 480p segment or prematurely recover',()=>{
+  const p=normal();
+  assert.equal(tick(p,{now:1000,buffer:3,requestAge:3000,requestedLevel:6}).cancel,true);
+  for(const [now,buffer] of [[2000,6.2],[12000,6.2],[13000,10],[14000,9],[24000,10],[25000,9]]) {
+    const a=tick(p,{now,buffer,requestAge:3000,currentLevel:0,requestedLevel:0});
+    assert.equal(a.cancel,false,'keep the ongoing 480p producer');
+    assert.equal(a.phase,'recovering','one high buffer sample is not sustained recovery');
+  }
+});
+test('full buffer must remain healthy for ten consecutive seconds',()=>{
+  const p=normal();tick(p,{now:1000,buffer:3,requestAge:3000});
+  tick(p,{now:2000,buffer:10,currentLevel:0});
+  tick(p,{now:11999,buffer:9,currentLevel:0});
+  assert.equal(tick(p,{now:12000,buffer:10,currentLevel:0}).phase,'recovering');
+  assert.equal(tick(p,{now:22000,buffer:10,currentLevel:0}).phase,'normal');
+});
+test('slow first fragment gets bounded warm-up before bandwidth rescue',()=>{
+  const p=new PlaybackPolicy(levels,30000000,true);
+  assert.equal(tick(p,{now:2000,buffer:0,requestAge:8000,currentLevel:6,requestedLevel:6}).cancel,false);
+  assert.equal(tick(p,{now:3000,buffer:0,requestAge:9500,currentLevel:6,requestedLevel:6}).cancel,true);
+  assert.equal(p.phase,'recovering');
+});
+test('weak-to-fast recovery climbs gradually and can reach Original',()=>{
+  const p=normal();tick(p,{now:1000,buffer:3,requestAge:3000});
+  tick(p,{now:2000,buffer:12,currentLevel:0});
+  tick(p,{now:12000,buffer:12,currentLevel:0});
+  p.measured(30000000,12000,true);
+  assert.equal(p.cap,2);
+  p.measured(30000000,14000,true);
+  assert.equal(p.cap,2);
+  p.measured(30000000,28000,true);
+  assert.equal(p.cap,4);
+  p.measured(30000000,44000,true);
+  assert.equal(p.cap,6);
+});
+test('failed high-quality producer imposes cooldown despite fast speed probes',()=>{
+  const p=normal();tick(p,{now:1000,buffer:3,requestAge:3000});
+  tick(p,{now:2000,buffer:12,currentLevel:0});
+  tick(p,{now:12000,buffer:12,currentLevel:0});
+  p.measured(30000000,12000,true);
+  assert.equal(p.cap,2);
+  assert.equal(tick(p,{now:13000,buffer:2,requestAge:3000,requestedLevel:2,currentLevel:2}).cancel,true);
+  p.measured(30000000,30000,true);
+  assert.equal(p.cap,0);
+  p.measured(30000000,74000,true);
+  assert.equal(p.cap,0,'fast probe alone cannot promote an unhealthy buffer');
+  tick(p,{now:75000,buffer:12,currentLevel:0});
+  tick(p,{now:85000,buffer:12,currentLevel:0});
+  p.measured(30000000,85000,true);
+  assert.equal(p.cap,2);
+});
+test('cold seek does not get false startup rescue before seek threshold',()=>{
+  const p=normal();p.beginSeek();
+  assert.equal(tick(p,{now:1000,buffer:0,seeking:true,requestAge:4500}).cancel,false);
+  assert.equal(tick(p,{now:2000,buffer:12}).cap,6);
+});
 test('recovery measurements respect affordability, Original readiness and decoder limits',()=>{
   const p=normal();tick(p,{now:1000,buffer:9,requestAge:2500});
   p.measured(800000,12000,true);
@@ -65,7 +123,7 @@ test('recovery measurements respect affordability, Original readiness and decode
   assert.equal(tick(p,{now:26000}).probe,false);
   assert.equal(tick(p,{now:27000}).probe,true);
   p.measured(30000000,28000,false,3);
-  assert.equal(tick(p,{now:28500,originalReady:false,decoderCap:3}).cap,3);
+  assert.equal(tick(p,{now:28500,originalReady:false,decoderCap:3}).cap,2);
 });
 
 test('weak-startup playback rechecks capacity even without a buffer rescue',()=>{
