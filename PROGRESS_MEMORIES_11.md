@@ -112,3 +112,12 @@ No credentials or private-media contents belong in this repository. Keep diagnos
 - Inspected three actual 480p stream segments: 450 decoded frames, all unique; 449 timestamp deltas exactly 20 ms; keyframes at the expected 3-second boundaries. No repeated frames or backward packet PTS in this captured interval.
 - Added opt-in cadence.js diagnostics, enabled by rkmpp_debug in the page query, to record presented-frame backsteps, late frames and seeks locally in DOM data. No pixels, private URLs or tokens are captured. Adapter 1.1.2 is installed for this investigation. The normal player remains free of frame-callback diagnostics unless explicitly enabled.
 - Visual 480p jitter remains unaccepted. Mainline merge, post-merge checks and branch cleanup remain pending.
+
+## Finer cadence and stream inspection (1.1.4)
+
+- Added opt-in five-second presentation summaries: display/media intervals, decoder timing, presentation-clock skew and missed callbacks. Reset frame comparisons on play/pause and detect shorter holds. Normal playback still does not enable frame callbacks without rkmpp_debug.
+- Fixed 480p / 1.3 Mbps maintained about 18 seconds of buffer with zero playback waits. The finer trace shows mostly regular 20 ms media intervals, with occasional short presentation holds. This does not explain or dismiss the user's reported frequent visual stutters.
+- Compared all 450 decoded frames from the earlier low-rate capture against nearby original frames: no reverse frame matches; one ambiguous near-adjacent match. This limited capture is not proof that the entire stream is clean.
+- A longer normal-rate 480p capture revealed a missing packet at 168.10 seconds, followed by decoder reference errors. A second capture excluding the newest cache file found another completed segment with 149 rather than 150 frames and a 40 ms sample duration near its beginning. The missing-frame defect requires investigation independently of browser buffering.
+- An isolated same-source hardware experiment comparing continuous encoding with repeated process STOP/CONT is running to test whether the server's producer throttling contributes. Do not assume that cause before the comparison completes. Private media and raw diagnostic captures remain outside Git.
+- User is comparing the same video on Android to distinguish client presentation from stream defects. No acceptance, mainline merge or branch cleanup yet. All 13 player/policy regressions pass.
