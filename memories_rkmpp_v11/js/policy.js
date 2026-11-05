@@ -22,8 +22,12 @@
       this.latency = 200;
       this.cap = chooseLevel(levels, initialBps, ready);
       this.networkCap = chooseLevel(levels, initialBps);
+      this.budgetCap = this.networkCap;
       this.healthySince = null;
+      this.recoveryHealthySince = null;
       this.probeAt = 0;
+      this.upgradeHoldUntil = 0;
+      this.lastUpgradeAt = -Infinity;
     }
     sample(stats) {
       // A cold seek includes producer startup, not just network delivery.
@@ -38,20 +42,34 @@
     beginSeek() {
       this.phase = 'seeking';
       this.healthySince = null;
+      this.recoveryHealthySince = null;
     }
     measured(bps, now, originalReady, decoderCap = Infinity) {
       this.bps = this.deliveryBps = bps;
       this.networkCap = chooseLevel(this.levels, bps);
-      this.cap = chooseLevel(this.levels, bps, originalReady, decoderCap);
+      if (this.networkCap < this.budgetCap) {
+        this.budgetCap = this.networkCap;
+      } else if (this.networkCap > this.budgetCap &&
+                 this.phase !== 'recovering' && now >= this.upgradeHoldUntil) {
+        // A fast network probe alone does not establish the segment-production
+        // rate of a newly started hardware rendition. Upgrade incrementally.
+        this.budgetCap = Math.min(this.networkCap, this.budgetCap + 2);
+        this.lastUpgradeAt = now;
+        this.upgradeHoldUntil = now + 15000;
+      }
+      const originalIndex = this.levels.findIndex(original);
+      const limit = Math.min(decoderCap, originalReady || originalIndex < 0 ?
+        this.levels.length - 1 : Math.max(0, originalIndex - 1));
+      this.cap = Math.min(this.budgetCap, limit);
       this.healthySince = now;
       this.probeAt = now + 15000;
     }
-    step({now, buffer, playing, seeking, auto, requestAge = 0, loaded = 0, originalReady = false, decoderCap = Infinity, targetBuffer = 18, currentLevel = this.cap}) {
+    step({now, buffer, playing, seeking, auto, requestAge = 0, loaded = 0, originalReady = false, decoderCap = Infinity, targetBuffer = 18, currentLevel = this.cap, requestedLevel = currentLevel}) {
       const originalIndex = this.levels.findIndex(original);
       const limit = Math.min(decoderCap, originalReady || originalIndex < 0 ? this.levels.length - 1 : Math.max(0, originalIndex - 1));
       let cancel = false;
       let probe = false;
-      this.cap = Math.min(this.networkCap, limit);
+      this.cap = Math.min(this.budgetCap, limit);
       const healthyBuffer = Math.min(10, targetBuffer * 0.6);
       const criticalBuffer = Math.min(4, targetBuffer * 0.25);
       if (!playing || !auto || (seeking && this.phase !== 'seeking')) {
@@ -61,21 +79,34 @@
       // A metadata-sized buffer is normal before playback has warmed up.
       if (this.phase === 'startup' || this.phase === 'seeking') {
         if (buffer >= healthyBuffer) this.phase = 'normal';
-        else if (requestAge < 6000) return this.result(cancel);
+        // Cold RKMPP startup can be slow without indicating a weak network.
+        // A genuinely stalled seek still uses the existing six-second gate.
+        else if (requestAge < (this.phase === 'startup' ? 9000 : 6000)) return this.result(cancel);
       }
       const endangered = (buffer < healthyBuffer && requestAge > 2000 && !loaded) || (buffer < criticalBuffer && requestAge > 1000);
       if (endangered && (this.phase !== 'recovering' || this.cap > 0)) {
         this.phase = 'recovering';
         this.cap = 0;
+        this.budgetCap = 0;
         this.networkCap = 0;
         this.bps = Math.min(this.deliveryBps, bitrate(this.levels[0]) / 0.72);
         this.healthySince = null;
-        cancel = true;
-      } else if (this.phase === 'recovering' && buffer >= healthyBuffer &&
-                 this.healthySince !== null && now - this.healthySince >= 10000) {
-        // Recovery depends on sustained playable buffer, not on whether the
-        // connection can afford the highest level permitted by the decoder.
-        this.phase = 'normal';
+        this.recoveryHealthySince = null;
+        // A recent upgrade that starved playback deserves a longer cooldown.
+        this.upgradeHoldUntil = Math.max(this.upgradeHoldUntil,
+          now + (now - this.lastUpgradeAt < 20000 ? 60000 : 10000));
+        // Only abort an actual higher-quality request; restarting a 480p
+        // producer discards its useful progress without fixing throughput.
+        cancel = requestedLevel > 0;
+      } else if (this.phase === 'recovering') {
+        // Independent of the 6-second timer used for bandwidth probes:
+        // require ten continuous seconds with a FULL healthy buffer.
+        if (buffer < healthyBuffer) this.recoveryHealthySince = null;
+        else if (this.recoveryHealthySince === null) this.recoveryHealthySince = now;
+        else if (now - this.recoveryHealthySince >= 10000) {
+          this.phase = 'normal';
+          this.recoveryHealthySince = null;
+        }
       }
       if (buffer < Math.min(6, healthyBuffer)) this.healthySince = null;
       else if (this.healthySince === null) this.healthySince = now;
