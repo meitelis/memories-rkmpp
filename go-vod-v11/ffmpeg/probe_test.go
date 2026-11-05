@@ -14,6 +14,18 @@ func TestParseFrameRate(t *testing.T) {
 	require.Equal(t, 30, parseFrameRate(""))
 }
 
+func TestProbeUsesContainerBitrateWhenVideoRateIsMissing(t *testing.T) {
+	for _, streamRate := range []string{"", "0", "N/A"} {
+		data := `{"streams":[{"codec_type":"video","codec_name":"hevc","bit_rate":"` + streamRate + `"}],"format":{"bit_rate":"25527654"}}`
+		info, err := ParseProbeJSON([]byte(data))
+		require.NoError(t, err)
+		require.Equal(t, 25527654, info.BitRate)
+	}
+	info, err := ParseProbeJSON([]byte(`{"streams":[{"codec_type":"video","bit_rate":"8000000"}],"format":{"bit_rate":"8200000"}}`))
+	require.NoError(t, err)
+	require.Equal(t, 8000000, info.BitRate, "prefer a known video rate")
+}
+
 func TestParseProbeJSONHDR(t *testing.T) {
 	probe := func(stream string) bool {
 		info, err := ParseProbeJSON([]byte(`{"streams":[` + stream + `]}`))

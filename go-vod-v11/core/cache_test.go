@@ -59,6 +59,18 @@ func TestKeyframeCacheRoundtrip(t *testing.T) {
 	require.Equal(t, keys, got)
 }
 
+func TestProbeMigrationPreservesUnchangedKeyframeIndex(t *testing.T) {
+	dir := t.TempDir()
+	keys := []float64{0, 3, 6}
+	require.NoError(t, StoreCachedKeyframes(dir, 7, "same", keys))
+	require.NoError(t, os.WriteFile(ProbeCachePath(dir, 7), []byte(`{"v":4,"etag":"same","probe":{"BitRate":5000000}}`), 0644))
+	_, ok := LoadCachedProbe(dir, 7, "same")
+	require.False(t, ok)
+	got, ok := LoadCachedKeyframes(dir, 7, "same")
+	require.True(t, ok)
+	require.Equal(t, keys, got)
+}
+
 func TestKeyframeCacheEtagMismatchEvictsFile(t *testing.T) {
 	dir := t.TempDir()
 	keys := []float64{0, 4, 8}

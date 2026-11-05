@@ -118,6 +118,8 @@
   }
 
   function setAudio(state, startup = false) {
+    if (!(state.bps > 0)) return;
+    startup = startup || !state.audioInitialized;
     const desired = audioProfile(state.bps);
     const now = Date.now();
     if (desired !== state.audioCandidate) {
@@ -133,7 +135,10 @@
       selectAudio(state.hls, index, startup);
       state.audioChanged = now;
     }
-    if (index >= 0) state.audioProfile = desired;
+    if (index >= 0) {
+      state.audioProfile = desired;
+      state.audioInitialized = true;
+    }
   }
 
   function configure(video, state, hls) {
@@ -144,6 +149,7 @@
     state.abort = new AbortController();
     state.selected = 'auto';
     state.seekLevel = null;
+    state.audioInitialized = false;
     state.inflight = null;
     state.decoderCap = Infinity;
     state.policy = null;

@@ -3,18 +3,23 @@
 Do not merge while the reported Android startup/seek failures remain unverified.
 Use actual library videos; keep filenames, file IDs, credentials and captures out of Git.
 
-Latest blocker: the two-second freeze is reproduced. Copied AAC priming produced
-an invalid unsigned MP4 decode timestamp and a nearly 25-hour browser audio jump.
-The r3 source drops negative priming packets without re-encoding audio; its new
-raw-box regression and live retest are in progress. Runtime r2 remains deployed
-until that validation completes. Adapter 1.1.10 adds local loader-state diagnostics.
+Resolved reproduced blocker: copied AAC priming produced an invalid unsigned MP4
+decode timestamp and a nearly 25-hour browser audio jump. The copy path now drops
+negative priming packets without re-encoding audio. The raw-box startup/cold-seek
+regression and expanded hardware matrix pass. The previously frozen real video
+subsequently played to 290 seconds with a normal audio clock. This covers the
+identified timestamp defect, not every possible cause of a two-second freeze.
 
 ## Deployment and checks
 
-- Native adapter 1.1.7; runtime image memories-11.0.2-govod-0.7.0-r2.
-- All 17 JavaScript regressions pass. Linux Go tests, vet, formatting and ARM64
+- Native adapter 1.1.12; runtime image memories-11.0.2-govod-0.7.0-r4.
+- All 19 JavaScript regressions pass. Linux Go tests, vet, formatting and ARM64
   image build passed. The complete isolated hardware matrix passed, including
   both encoders, HDR, rotations, cold starts, shared audio and new 50 fps cadence checks.
+- r4 uses measured container bitrate when Matroska omits stream bitrate. Probe
+  cache version 5 refreshes that budget while preserving unchanged keyframe indexes.
+- Initial audio selection now also works when hls.js discovers tracks after the
+  speed probe; runtime changes remain scheduled rather than flushing current audio.
 - Runtime health and the real Nextcloud go-vod 0.7.0 handshake pass.
 - Reproduced an independent hardware defect: 75 seconds encoded continuously
   produced 25 complete 150-frame segments. The identical run with 11 STOP/CONT
@@ -39,18 +44,34 @@ The Android report is broader than these desktop results: some videos stalled at
 two seconds, startup selected 1440p on a fast home link, and seeking caused an
 unnecessary 480p drop. Those reports remain acceptance failures until retested.
 
+## Broader real-library coverage after the AAC fix
+
+Inventory covered 77 video entries: 63 were readable (41 AVC, 22 HEVC; 59 AAC,
+one AC3 and three silent). Eleven paths were unreadable even from Nextcloud and
+three tiny entries were invalid containers; these are separate source-access
+issues, not evidence of an encoder freeze. No source files were modified.
+
+Eleven additional real videos advanced beyond startup or reached their short EOF:
+4K/60 AVC and HEVC, MOV, Matroska, full-range input, 10-bit SDR, portrait and rotated
+sources, AC3 normalization, silent video, and small native dimensions. Several
+had desktop startup frame drops. A rotated 4K case completed but recorded a
+2.06-second wait while an offline hardware test was also running: repeat it in
+isolation before accepting performance. These checks establish broader functional
+coverage, not complete visual/audio acceptance. Real-library HDR acceptance is
+still open; the generated hardware HDR checks passed.
+
 ## Required repeatable scenarios
 
 | Scenario | Required outcome | Latest status |
 | --- | --- | --- |
-| Fast-network startup, A-E | Compatible Original selected; playback advances past two seconds | Retest 1.1.7 / r2 |
-| Midpoint and backward cold seeks, A-E | Resume at requested clock without a false network downshift | Retest 1.1.7 / r2 |
+| Fast-network startup, A-E | Compatible Original selected; playback advances past two seconds | Fixed AAC case played to 290 s; repeat final build across baseline |
+| Midpoint and backward cold seeks, A-E | Resume at requested clock without a false network downshift | Earlier B/C/D passed; repeat final build and weak-link seek |
 | Pause beyond producer idle timeout, then resume | No dead stream or audio reset | Pending |
 | Original / 1440p / 1080p / all three 480p rates | Retain buffered pictures and shared audio; actual rendition display | Partial desktop result above; repeat new build |
 | Mobile-like delivery: fast -> 800 kbps -> 4 Mbps -> fast | Prompt useful downshift, sustained recovery, no flapping or buffer starvation | Repeat new build through the Nextcloud/probe path |
 | Sustained weak link and recovery | Appropriate independent audio rate, no audio flush on video changes | Earlier 1.1.1 run passed waiting counters; repeat new build |
 | Rapid scrubbing / repeat navigation / EOF | No stale requests, stuck two-second playback or endless retries | Pending |
-| Badge controls, touch and fullscreen | Compact corner placement; hidden with native controls | Verify 1.1.7 |
+| Badge controls, touch and fullscreen | Compact corner placement; hidden with native controls | DOM placement verified; final visual/fullscreen check pending |
 
 Record measured waiting time, resolution, decoder cap, buffer, errors and hardware
 execution. A zero waiting counter alone does not establish visual/audio acceptance.

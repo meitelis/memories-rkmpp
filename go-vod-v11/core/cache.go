@@ -13,7 +13,7 @@ const KeyframeCacheFile = "keyframes.json"
 
 const ProbeCacheFile = "probe.json"
 
-const probeCacheVersion = 4
+const probeCacheVersion = 5
 
 // FileCacheDir is the file's cache home, sharded by hashed fileid.
 // Empty when caching is unavailable (no cache dir or fileid).
@@ -116,8 +116,14 @@ func LoadCachedProbe(cacheDir string, fileid int64, etag string) (*ProbeVideoDat
 		EvictFileCache(cacheDir, fileid)
 		return nil, false
 	}
-	if plan.V != probeCacheVersion || plan.Etag != etag {
+	if plan.Etag != etag {
 		EvictFileCache(cacheDir, fileid)
+		return nil, false
+	}
+	if plan.V != probeCacheVersion {
+		// New probe semantics do not invalidate this unchanged file's
+		// expensive keyframe index or its storyboard.
+		os.Remove(path)
 		return nil, false
 	}
 	probe := plan.Probe

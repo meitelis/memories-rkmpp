@@ -139,7 +139,12 @@ func ParseProbeJSON(data []byte) (VideoInfo, error) {
 	}
 
 	bitRate, err := strconv.Atoi(s.BitRate)
-	if err != nil {
+	if (err != nil || bitRate <= 0) && out.Format != nil {
+		// Matroska often omits per-stream bitrate. Its measured container
+		// rate is a conservative budget, unlike an arbitrary 5 Mbps default.
+		bitRate, err = strconv.Atoi(out.Format.BitRate)
+	}
+	if err != nil || bitRate <= 0 {
 		bitRate = defaultBitRate
 	}
 

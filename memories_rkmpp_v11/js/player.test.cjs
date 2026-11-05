@@ -105,3 +105,19 @@ test('fast startup awaits an affordable Original preflight instead of racing int
     state.abort?.abort();global.window=previousWindow;global.fetch=previousFetch;
   }
 });
+
+test('late audio-track discovery applies the measured startup rate immediately', async () => {
+  const events=new Map();
+  const hls={constructor:{Events:{MANIFEST_PARSED:'parsed',AUDIO_TRACKS_UPDATED:'audio'},version:'1.7.4'},
+    config:{},levels:[],audioTracks:[],on(e,fn){events.set(e,fn)},startLoad(){},
+    set nextAudioTrack(_) {throw Error('initial audio was delayed into a runtime switch')}};
+  const state={badge:{dataset:{}},audioChanged:0};
+  configure({},state,hls);
+  hls.levels=[{bitrate:400000,url:['/480plow.m3u8']}];
+  await events.get('parsed')();
+  hls.audioTracks=['audio','audio96','audio64','audio32'].map(id=>({url:`https://example.test/${id}.m3u8`}));
+  events.get('audio')();
+  assert.equal(hls.audioTrack,2);
+  assert.equal(state.audioProfile,'audio64');
+  state.abort.abort();
+});
