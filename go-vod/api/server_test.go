@@ -23,9 +23,7 @@ func testServer(t *testing.T, mutate func(*config.Config)) *Server {
 	if mutate != nil {
 		mutate(cfg)
 	}
-	server, err := NewServer(cfg)
-	require.NoError(t, err)
-	return server
+	return NewServer(cfg)
 }
 
 func postVod(s *Server, body string) *httptest.ResponseRecorder {
@@ -220,6 +218,10 @@ func TestVodCodecsQueryParam(t *testing.T) {
 	require.Contains(t, w.Body.String(), "direct.m3u8")
 	require.NotContains(t, w.Body.String(), "max.m3u8")
 	require.Contains(t, w.Body.String(), "direct.m3u8?codecs=h264%2Chevc&token=abc")
+
+	// A Manager recreated from a baked URL keeps the direct rendition.
+	w = postVod(s, `{"client":"f00dcafe","fileid":7,"profile":"direct.m3u8","query":{"token":"abc","codecs":"h264,hevc"},"config":{"chunkSize":3}}`)
+	require.NotEqual(t, http.StatusNotFound, w.Code)
 }
 
 func TestVodLivephotoFullVideo(t *testing.T) {
@@ -292,13 +294,14 @@ func TestVodReusesManagerOnConfigChange(t *testing.T) {
 
 func TestVersionGuard(t *testing.T) {
 	s := testServer(t, func(c *config.Config) { c.VersionMonitor = true })
+	go func() { <-s.idle }()
 
 	r := httptest.NewRequest("POST", "/vod", strings.NewReader(`{"client":"beefbeef","fileid":7,"profile":"test","config":{"chunkSize":3}}`))
 	r.Header.Set("X-Go-Vod-Version", "wrong")
 	w := httptest.NewRecorder()
 	s.routes().ServeHTTP(w, r)
 	require.Equal(t, http.StatusServiceUnavailable, w.Code)
-	require.Equal(t, int32(12), s.exitCode.Load())
+	require.Equal(t, 12, s.exitCode)
 
 	r = httptest.NewRequest("POST", "/vod", strings.NewReader(`{"client":"beefbeef","fileid":7,"profile":"test","config":{"chunkSize":3}}`))
 	r.Header.Set("X-Go-Vod-Version", "test")

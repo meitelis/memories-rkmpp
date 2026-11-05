@@ -10,13 +10,11 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
+	"github.com/pulsejet/memories/go-vod/bridge"
 	"github.com/pulsejet/memories/go-vod/config"
 	"github.com/pulsejet/memories/go-vod/core"
 	"github.com/pulsejet/memories/go-vod/ffmpeg"
@@ -26,51 +24,31 @@ type Server struct {
 	cfg      *config.Config
 	server   *http.Server
 	reg      *core.Registry
+	bridge   *bridge.Bridge
 	idle     chan core.IdleEvent
-	stop     chan struct{}
-	stopOnce sync.Once
-	exitCode atomic.Int32
+	exitCode int
 }
 
-func NewServer(cfg *config.Config) (*Server, error) {
-	if err := validateScratchDir(cfg.TempDir, cfg.CacheDir()); err != nil {
-		return nil, err
-	}
-	if err := os.RemoveAll(cfg.TempDir); err != nil {
-		return nil, fmt.Errorf("reset temporary directory: %w", err)
-	}
-	if err := os.MkdirAll(cfg.TempDir, 0755); err != nil {
-		return nil, fmt.Errorf("create temporary directory: %w", err)
-	}
+func NewServer(cfg *config.Config) *Server {
+	os.RemoveAll(cfg.TempDir)
+	os.MkdirAll(cfg.TempDir, 0755)
 
-	s := &Server{cfg: cfg, idle: make(chan core.IdleEvent), stop: make(chan struct{})}
+	s := &Server{cfg: cfg, idle: make(chan core.IdleEvent)}
 	s.reg = core.NewRegistry(cfg, s.idle)
-	return s, nil
-}
-
-// Scratch is reset at startup, so it must not contain persistent cache data.
-func validateScratchDir(tempDir, cacheDir string) error {
-	scratch, err := filepath.Abs(tempDir)
-	if err != nil || tempDir == "" || filepath.Dir(scratch) == scratch {
-		return fmt.Errorf("temporary directory must be a dedicated scratch directory")
+	if cfg.Bridge.Enabled {
+		s.bridge = bridge.New(cfg)
 	}
-	if cacheDir != "" {
-		cache, err := filepath.Abs(cacheDir)
-		if err != nil {
-			return fmt.Errorf("resolve cache directory: %w", err)
-		}
-		rel, err := filepath.Rel(scratch, cache)
-		if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
-			return fmt.Errorf("temporary directory must not contain the persistent cache directory")
-		}
-	}
-	return nil
+	return s
 }
 
 func (s *Server) routes() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.handleHealth)
+	mux.HandleFunc("GET /ping", s.handlePing)
 	mux.HandleFunc("POST /vod", s.handleVod)
+	if s.bridge != nil {
+		mux.Handle("GET /bridge", s.bridge)
+	}
 	return mux
 }
 
@@ -84,6 +62,14 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"status":    status,
 		"version":   s.cfg.Version,
 		"latencyMs": latencyMs,
+	})
+}
+
+func (s *Server) handlePing(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"status":  "healthy",
+		"version": s.cfg.Version,
 	})
 }
 
@@ -125,9 +111,17 @@ func (s *Server) handleVod(w http.ResponseWriter, r *http.Request) {
 func (s *Server) serve(w http.ResponseWriter, r *http.Request, req VodRequest) {
 	leaf := req.Profile
 
+	var closeBridgeFile func()
 	fileURL := s.cfg.FileURL(req.FileID)
-	if req.Query.Liveid != "" {
+	switch {
+	case req.Query.Liveid != "":
 		fileURL = s.cfg.LiveURL(req.FileID, req.Query.Liveid)
+	case s.bridge != nil && req.GoVodAddress != "":
+		s.bridge.SetServer(req.GoVodAddress)
+		fileURL = s.bridge.FileURL(req.FileID)
+		closeBridgeFile = func() {
+			s.bridge.CloseFile(req.FileID)
+		}
 	}
 
 	if !validProfile(leaf) {
@@ -136,14 +130,15 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, req VodRequest) {
 	}
 
 	manager, err := s.reg.GetOrCreate(core.ManagerParams{
-		URL:            fileURL,
-		StreamID:       req.Client,
-		FileID:         req.FileID,
-		Etag:           req.Etag,
-		ServiceToken:   req.ServiceToken,
-		PlayableCodecs: core.ParseCodecs(req.Query.Codecs),
-		TConfig:        req.TConfig,
-		UsesTemp:       req.Query.Liveid != "",
+		URL:             fileURL,
+		StreamID:        req.Client,
+		FileID:          req.FileID,
+		Etag:            req.Etag,
+		ServiceToken:    req.ServiceToken,
+		PlayableCodecs:  core.ParseCodecs(req.Query.Codecs),
+		TConfig:         req.TConfig,
+		UsesTemp:        req.Query.Liveid != "",
+		CloseBridgeFile: closeBridgeFile,
 	})
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -167,7 +162,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, req VodRequest) {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		body, err := VariantPlaylist(manager, req.TConfig, quality, query)
+		body, err := VariantPlaylist(manager, quality, query)
 		if errors.Is(err, core.ErrCopyPending) {
 			w.WriteHeader(http.StatusConflict)
 			return
@@ -177,7 +172,16 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, req VodRequest) {
 			return
 		}
 		WriteM3U8(w, body)
-	case strings.HasSuffix(leaf, ".ts"):
+	case strings.HasSuffix(leaf, "-init.m4s"):
+		quality, ok := ffmpeg.ParseInitName(leaf)
+		if !ok {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if !manager.ServeInit(w, quality) {
+			w.WriteHeader(http.StatusNotFound)
+		}
+	case strings.HasSuffix(leaf, ".m4s"):
 		quality, id, err := ffmpeg.ParseSegmentName(leaf)
 		if err != nil {
 			w.WriteHeader(http.StatusBadRequest)
@@ -201,7 +205,7 @@ func validProfile(leaf string) bool {
 	case leaf == "ignore" || leaf == "index.m3u8":
 		return true
 	case strings.HasSuffix(leaf, ".m3u8"),
-		strings.HasSuffix(leaf, ".ts"),
+		strings.HasSuffix(leaf, ".m4s"),
 		strings.HasSuffix(leaf, ".mp4"):
 		return true
 	case core.IsStoryboardLeaf(leaf):
@@ -223,26 +227,17 @@ func (s *Server) describeStatus() (string, int64) {
 		return err.Error(), elapsedMs()
 	}
 
-	client := &http.Client{Timeout: 2 * time.Second}
+	client := &http.Client{
+		Timeout:   2 * time.Second,
+		Transport: s.cfg.Transport(),
+	}
 	res, err := client.Do(req)
 	if err != nil {
 		log.Println("Error testing describe URL", err)
 		return err.Error(), elapsedMs()
 	}
 	defer res.Body.Close()
-	if s.cfg.ExpectedAppVersion != "" && res.StatusCode == http.StatusOK {
-		var described struct {
-			Version string `json:"version"`
-		}
-		if err := json.NewDecoder(io.LimitReader(res.Body, 65536)).Decode(&described); err != nil {
-			return "invalid Nextcloud describe response", elapsedMs()
-		}
-		if described.Version != s.cfg.ExpectedAppVersion {
-			return fmt.Sprintf("Memories compatibility mismatch: expected %s, found %s; update the tested Memories/transcoder pair together", s.cfg.ExpectedAppVersion, described.Version), elapsedMs()
-		}
-	} else {
-		io.Copy(io.Discard, res.Body)
-	}
+	io.Copy(io.Discard, res.Body)
 	if res.StatusCode != http.StatusOK {
 		err := fmt.Sprintf("unexpected status %d", res.StatusCode)
 		log.Println("Describe URL check failed:", err)
@@ -258,7 +253,7 @@ func (s *Server) versionOk(w http.ResponseWriter, r *http.Request) bool {
 
 		w.WriteHeader(http.StatusServiceUnavailable)
 
-		s.exitCode.Store(12)
+		s.exitCode = 12
 		s.Close()
 		return false
 	}
@@ -273,14 +268,11 @@ func (s *Server) Start() int {
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(sig)
 	go func() {
-		select {
-		case <-sig:
-			s.Close()
-		case <-s.stop:
-		}
+		<-sig
+		s.Close()
 	}()
 
-	s.server = &http.Server{Addr: s.cfg.Bind, Handler: s.routes(), ReadHeaderTimeout: 5 * time.Second}
+	s.server = &http.Server{Addr: s.cfg.Bind, Handler: s.routes()}
 
 	go func() {
 		err := s.server.ListenAndServe()
@@ -291,24 +283,25 @@ func (s *Server) Start() int {
 		}
 	}()
 
-idleLoop:
 	for {
-		select {
-		case ev := <-s.idle:
-			s.reg.Remove(ev.ID, ev.Generation)
-		case <-s.stop:
-			break idleLoop
+		ev := <-s.idle
+		if ev.ID == "" {
+			break
 		}
+		s.reg.Remove(ev.ID, ev.Generation)
 	}
 
 	log.Println("Shutting down HTTP server")
 	ctx, cancel := context.WithDeadline(context.TODO(), time.Now().Add(5*time.Second))
 	defer cancel()
 	s.server.Shutdown(ctx)
+	if s.bridge != nil {
+		s.bridge.Close()
+	}
 
-	return int(s.exitCode.Load())
+	return s.exitCode
 }
 
 func (s *Server) Close() {
-	s.stopOnce.Do(func() { close(s.stop) })
+	s.idle <- core.IdleEvent{}
 }

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"strconv"
@@ -16,12 +17,15 @@ import (
 // (no live server state), so argument building stays pure: the same Spec
 // always yields the same argv, reviewable and testable without binaries.
 //
-// The zero value selects software x264. Encoder precedence is copy,
-// RKMPP, VAAPI, NVENC, then x264.
+// The zero value selects software x264. Set VAAPI or NVENC (never both;
+// VAAPI wins) for hardware.
+//
+// Fields tagged `hwprobe:"key"` can decide whether an encode graph works
+// on this host; see HWProbeKey.
 type Spec struct {
 	// Bin is the ffmpeg executable. Informational only (callers prepend it
 	// via exec.Command); kept so tests render complete command lines.
-	Bin string
+	Bin string `hwprobe:"key"`
 	// Input is the Nextcloud file URL handed to "-i".
 	Input string
 	// Headers is the ffmpeg "-headers" block.
@@ -34,73 +38,105 @@ type Spec struct {
 
 	// Quality is the rendition label ("480p", …, QualityMax). Anything but
 	// QualityMax enables the downscale filter.
-	Quality string
-	// Width and Height are the output dimensions before explicit rotation.
-	// The manager preserves aspect ratio and aligns RKMPP sizes to even pixels.
-	Width, Height int
+	Quality string `hwprobe:"key"`
+	// Width is always the larger source dimension, scaled proportionally
+	// (callers swap axes for portrait sources).
+	Width, Height int `hwprobe:"key"`
 	// QF is the quality factor: CRF (x264), global_quality (VA-API), CQ (NVENC).
-	QF    int
-	RKMPP bool
-	// OutputCodec selects RKMPP HEVC only after client capability negotiation.
-	// Empty and h264 retain the AVC compatibility path.
-	OutputCodec    string
-	Bitrate        int
-	CodecName      string
-	FrameRateExact float64
-	PixelFormat    string
+	QF int
 	// FrameRate is the probed source fps, truncated to int. Only sizes the
 	// GOP when UseGopSize is set.
 	FrameRate int
+	// FrameRateExact is the parsed fractional frame rate (e.g. 23.976, 29.97).
+	FrameRateExact float64
 	// Rotation is the probed source rotation (-90, 90, ±180, 0), applied as
 	// an explicit transpose filter when UseTranspose is set.
-	Rotation int
+	Rotation int `hwprobe:"key"`
 	// HDR marks sources needing SDR tonemapping.
-	HDR bool
+	HDR bool `hwprobe:"key"`
+	// Source colour tags may exist only on the container. Reapply them after
+	// RGA/OpenCL mapping, whose hardware frames can lose those properties.
+	ColorTransfer  string `hwprobe:"key"`
+	ColorPrimaries string `hwprobe:"key"`
+	ColorSpace     string `hwprobe:"key"`
+	ColorRange     string `hwprobe:"key"`
 	// BitDepth is the source sample depth, 8 when unknown.
-	BitDepth int
+	BitDepth int `hwprobe:"key"`
+	// PixelFormat helps gate Rockchip hardware decoding to supported surfaces.
+	PixelFormat string `hwprobe:"key"`
+	// Bitrate is the target total rendition bitrate, including audio.
+	Bitrate int
+	// RKMPP enables Rockchip MPP/RGA encoding (experimental v11 port).
+	RKMPP bool `hwprobe:"key"`
+	// RKMPPOutputCodec selects h264 or hevc output.
+	RKMPPOutputCodec string `hwprobe:"key"`
+	// RKMPPOpenCL enables the Mali HDR graph only after a successful frame probe.
+	RKMPPOpenCL bool
 	// Audio is the first audio stream; empty when silent.
 	Audio AudioInfo
+	// AudioOnly builds a shared AAC audio stream for HLS without video.
+	AudioOnly bool
+	// AudioBitrate selects a shared AAC profile; zero uses 192 kbps.
+	AudioBitrate int
+	// SeparateAudio marks video renditions paired with a shared audio stream.
+	SeparateAudio bool
+	// EndAt is the duration upper bound for audio padding/trimming.
+	EndAt float64
 	// ChunkSize is the target segment length in whole seconds. Drives
 	// -hls_time and the forced-keyframe interval.
 	ChunkSize int
 
 	// VAAPI selects h264_vaapi on VAAPIDevice; VAAPILowPower adds
 	// "-low_power 1" for fixed-function encode blocks.
-	VAAPI, VAAPILowPower bool
+	VAAPI, VAAPILowPower bool `hwprobe:"key"`
 	// VAAPIDevice is the VA-API render node; empty selects /dev/dri/renderD128.
-	VAAPIDevice string
+	VAAPIDevice string `hwprobe:"key"`
 	// VAAPIOpenCL enables GPU HDR tonemapping after a successful interop probe.
 	VAAPIOpenCL bool
-	// RKMPPOpenCL enables Mali HDR tonemapping after a successful frame probe.
-	RKMPPOpenCL bool
 	// NVENC selects h264_nvenc with CUDA offload. NVENCScale picks the scaler
 	// ("cuda" or "npp"); NVENCTemporalAQ enables temporal AQ.
-	NVENC, NVENCTemporalAQ bool
-	NVENCScale             string
+	NVENC, NVENCTemporalAQ bool   `hwprobe:"key"`
+	NVENCScale             string `hwprobe:"key"`
+	// NVENCCUDA enables GPU HDR tonemapping after a successful pipeline probe.
+	NVENCCUDA bool
 
 	// UseTranspose disables ffmpeg autorotation (-noautorotate) and rotates
 	// manually instead. Autorotation fails silently on some hardware paths
 	// and never applies to HLS segments; see
 	// https://trac.ffmpeg.org/ticket/8329.
-	UseTranspose bool
+	UseTranspose bool `hwprobe:"key"`
 	// ForceSwTranspose rotates on the CPU (hwdownload → transpose → hwupload)
 	// to dodge broken hardware transpose filters. Always on for
 	// transpose_cuda, which is not trusted at all.
-	ForceSwTranspose bool
+	ForceSwTranspose bool `hwprobe:"key"`
 	// UseGopSize uses a fixed GOP (ChunkSize*FrameRate) instead of forced
 	// keyframes, for encoders whose forced keyframes drift (notably NVENC).
 	UseGopSize bool
+	// KeyframeGrid aligns hardware HLS renditions with a cached Original grid.
+	// Nil retains the fixed-duration encoding path.
+	KeyframeGrid *RKMPPKeyframeGrid
 	// Copy stream-copies the video (-c:v copy) instead of re-encoding it,
 	// for copy-eligible sources.
 	Copy bool
-	// Shared audio is carried by one HLS rendition instead of each video job.
-	AudioOnly, SeparateAudio bool
-	// EndAt bounds a padded shared audio track to the video timeline.
-	EndAt float64
+	// CodecName is the source video codec_name; HEVC copies are tagged hvc1,
+	// since Safari rejects hev1 in MP4.
+	CodecName string `hwprobe:"key"`
 }
 
-// Encoder resolves the video encoder: stream copy, then RKMPP, VAAPI,
-// NVENC, then software x264. The only other stream-copy fast path (original h264
+// HWProbeKey keeps only the `hwprobe:"key"` fields, so hardware
+// probes (e.g. GPU tonemap) can share results across files and requests.
+func HWProbeKey(s Spec) Spec {
+	v := reflect.ValueOf(&s).Elem()
+	for i := range v.NumField() {
+		if v.Type().Field(i).Tag.Get("hwprobe") != "key" {
+			v.Field(i).SetZero()
+		}
+	}
+	return s
+}
+
+// Encoder resolves the video encoder: stream copy, then VAAPI, then NVENC,
+// then software x264. The only other stream-copy fast path (original h264
 // served as-is for progressive download) bypasses argument building entirely.
 func Encoder(s Spec) string {
 	switch {
@@ -109,7 +145,7 @@ func Encoder(s Spec) string {
 	case s.Copy:
 		return EncoderCopy
 	case s.RKMPP:
-		if s.OutputCodec == "hevc" {
+		if s.RKMPPOutputCodec == "hevc" {
 			return EncoderRKMPPHEVC
 		}
 		return EncoderRKMPP
@@ -120,6 +156,18 @@ func Encoder(s Spec) string {
 	default:
 		return EncoderX264
 	}
+}
+
+// remoteInputArgs are the options for an authenticated http input: one
+// persistent seekable connection with bounded reconnects. Empty for local
+// inputs (no headers).
+func remoteInputArgs(headers string) []string {
+	if headers == "" {
+		return nil
+	}
+	args := []string{"-multiple_requests", "1", "-seekable", "1"}
+	args = append(args, reconnectArgs()...)
+	return append(args, "-headers", headers)
 }
 
 // reconnectArgs are the http input reconnect flags shared by transcode and
@@ -162,14 +210,13 @@ func reconnectArgs() []string {
 // HDR tonemap when needed (GPU interop or CPU zscale/hable, always after
 // the downscale so it runs on fewer pixels), then transpose for rotated
 // sources (software transpose drops to CPU and re-uploads after),
-// fixed mapping (first video re-encoded, optional first audio normalized
-// to stereo 48kHz AAC), and
+// fixed mapping (first video re-encoded, optional first audio), and
 // constant-quality rate control per encoder (crf / global_quality / cq).
-// Mono/stereo AAC can be copied on the generic backends; other audio is
-// normalized to stereo 48kHz AAC for MSE compatibility. RKMPP copies known
-// mono/stereo 44.1/48kHz AAC-LC up to 256kbps across every rendition,
-// preserving its packet clock; other audio is normalized across the ladder.
-// RKMPP also uses the rendition bitrate for bounded rate control. With Copy set, the
+// Mono or stereo AAC audio is copied; anything else is normalized to stereo
+// 48kHz AAC: passthrough channel counts (notably multichannel) yield
+// segments that Chrome's MSE audio SourceBuffer rejects with
+// bufferAppendingError.
+// Ladder bitrates appear only in playlists, never here. With Copy set, the
 // offload, filter graph and rate control collapse to "-c:v copy".
 func BuildArgs(s Spec) []string {
 	if s.AudioOnly {
@@ -185,8 +232,11 @@ func BuildArgs(s Spec) []string {
 	}
 
 	cv := Encoder(s)
+
+	var hwaccel string
 	switch cv {
 	case EncoderVAAPI:
+		hwaccel = "vaapi"
 		dev := s.VAAPIDevice
 		if dev == "" {
 			dev = "/dev/dri/renderD128"
@@ -194,7 +244,6 @@ func BuildArgs(s Spec) []string {
 		args = append(args,
 			"-hwaccel", "vaapi",
 			"-hwaccel_device", dev,
-			"-hwaccel_output_format", "vaapi",
 			"-init_hw_device", "vaapi=memories:"+dev,
 		)
 		if s.HDR && s.VAAPIOpenCL {
@@ -206,25 +255,29 @@ func BuildArgs(s Spec) []string {
 			args = append(args, "-filter_hw_device", "memories")
 		}
 	case EncoderNVENC:
+		hwaccel = "cuda"
 		args = append(args,
 			"-hwaccel", "cuda",
-			"-hwaccel_output_format", "cuda",
 			"-init_hw_device", "cuda=memories",
 			"-filter_hw_device", "memories",
 		)
+	}
+
+	// CPU tonemapping wants system frames.
+	cpuTonemap := s.HDR && cv != EncoderCopy &&
+		!(cv == EncoderVAAPI && s.VAAPIOpenCL) &&
+		!(cv == EncoderNVENC && s.NVENCCUDA)
+
+	// Keep decoded frames on the device, except for CPU tonemapping.
+	if hwaccel != "" && !cpuTonemap {
+		args = append(args, "-hwaccel_output_format", hwaccel)
 	}
 
 	if s.UseTranspose {
 		args = append(args, "-noautorotate")
 	}
 
-	if s.Headers != "" {
-		args = append(args,
-			"-multiple_requests", "1",
-			"-seekable", "1")
-		args = append(args, reconnectArgs()...)
-		args = append(args, "-headers", s.Headers)
-	}
+	args = append(args, remoteInputArgs(s.Headers)...)
 
 	args = append(args,
 		"-i", s.Input,
@@ -234,6 +287,9 @@ func BuildArgs(s Spec) []string {
 
 	if cv != EncoderCopy {
 		b := NewFilterBuilder(s, cv)
+		if cpuTonemap {
+			b.isInHw = false
+		}
 
 		switch {
 		case s.HDR && cv == EncoderVAAPI && s.VAAPIOpenCL:
@@ -242,11 +298,13 @@ func BuildArgs(s Spec) []string {
 			b.scaleEncode("p010")
 			b.tonemapOpenCL()
 			b.bitDepth = 8
-		case s.HDR:
-			// CPU tonemap between decode and encode; the download
-			// pin matches the surface depth and no-ops on SW frames.
+		case s.HDR && cv == EncoderNVENC && s.NVENCCUDA:
+			b.scaleEncode("p010le")
+			b.tonemapCUDA()
+			b.bitDepth = 8
+		case cpuTonemap:
+			// CPU tonemap between decode and encode, on system frames.
 			// https://github.com/pulsejet/memories/issues/1726
-			b.hwdownload()
 			b.scaleCpu()
 			b.tonemapCpu()
 			b.append("format=nv12")
@@ -279,6 +337,10 @@ func BuildArgs(s Spec) []string {
 	args = append(args, "-map", "0:v:0", "-c:v", cv)
 
 	switch cv {
+	case EncoderCopy:
+		if s.CodecName == "hevc" {
+			args = append(args, "-tag:v", "hvc1")
+		}
 	case EncoderVAAPI:
 		args = append(args, "-global_quality", fmt.Sprintf("%d", s.QF))
 		if s.VAAPILowPower {
@@ -291,6 +353,7 @@ func BuildArgs(s Spec) []string {
 			"-rc", "vbr",
 			"-rc-lookahead", "30",
 			"-cq", fmt.Sprintf("%d", s.QF),
+			"-forced-idr", "1",
 		)
 		if s.NVENCTemporalAQ {
 			args = append(args, "-temporal-aq", "1")
@@ -314,85 +377,92 @@ func BuildArgs(s Spec) []string {
 				"-b:a", "128k",
 			)
 		}
-	} else if s.SeparateAudio {
-		args = append(args, "-an")
 	}
 
+	if s.SeparateAudio {
+		args = append(args, "-an")
+	}
 	return args
 }
 
+// copyHLSTime is shorter than any GOP, so the muxer cuts at every keyframe.
+// Longer times count from the first packet, so a seek restart would cut at
+// different keyframes than the playlist lists.
+const copyHLSTime = "0.001"
+
 // SegmentArgs extends BuildArgs with the HLS muxer tail that chops one
-// rendition into servable MPEG-TS segments:
+// rendition into fMP4 segments plus an init segment:
 //
 //   - "-start_number" numbers the first segment. Callers pass the chunk id
 //     decremented by one (starting a frame early keeps keyframes aligned), so
-//     on-disk segment N is always "<quality>-NNNNNN.ts".
+//     on-disk segment N is always "<quality>-NNNNNN.m4s".
 //   - "-avoid_negative_ts disabled" preserves post-seek timestamps instead of
-//     shifting them to zero, matching the "-copyts" input side. RKMPP also
-//     forwards it to the HLS child muxer so startup AAC priming cannot shift
-//     the warm rendition's audio and video clock relative to a cold seek.
-//   - Time-based splitting (-hls_flags split_by_time) cuts strictly by the
-//     clock so segments stay uniformly sized even when keyframes drift; see
-//     the inline comment and https://github.com/videojs/mux.js/pull/138 for
-//     why players must tolerate segments that open without a keyframe.
-//   - Segments go to SegmentPattern(dir, quality) files; the playlist itself
-//     goes to stdout ("-"), where the segment watcher reads names from it.
-//   - Keyframes are forced every ChunkSize seconds — fixed GOP when
-//     UseGopSize is set, "-force_key_frames expr:…" otherwise — so each
-//     boundary lands near a keyframe. Stream copy (Copy) cannot create
-//     keyframes, so nothing is forced: the muxer cuts at the next source
-//     keyframe past each -hls_time boundary, matching CopySegments.
-func SegmentArgs(s Spec, startID int, pattern string) []string {
+//     shifting them to zero, matching the "-copyts" input side.
+//   - "movflags=+frag_discont" keeps tfdt absolute. Otherwise movenc rebases
+//     every run to zero and moves the offset into the init's edit list, so a
+//     seek restart's segments would not fit the init the player cached. With
+//     it, every run writes a byte-identical init.
+//   - No edit list: hls.js ignores it while MSE applies it, so B-frame delay
+//     put them 1-2 frames apart and a one-frame tail segment never counted as
+//     buffered, stalling playback. Negative cts offsets replace it.
+//   - The init path must be absolute: with the playlist on stdout, a relative
+//     one resolves against the working directory.
+//   - Segments cut on keyframes only; fMP4 passthrough needs each segment to
+//     open on one. Keyframes are forced every ChunkSize seconds (fixed GOP
+//     when UseGopSize is set). With -copyts, t is the source time, so the
+//     grid survives seek restarts. Stream copy cannot create keyframes;
+//     copyHLSTime makes the muxer cut at every source keyframe instead,
+//     matching CopySegments.
+//   - The playlist goes to stdout ("-"), where the segment watcher reads
+//     finished segment names from it.
+func SegmentArgs(s Spec, startID int, pattern, init string) []string {
+	// Rockchip's hardware encoders obey GOP sizing more reliably than
+	// forced-keyframe expressions. Preserve v11's fMP4 muxer and timeline.
+	if s.RKMPP && !s.Copy && !s.AudioOnly && s.KeyframeGrid == nil {
+		s.UseGopSize = true
+		s.FrameRate = RKMPPFrameRate(s)
+	}
+	hlsTime := fmt.Sprintf("%d", s.ChunkSize)
+	if s.Copy || s.KeyframeGrid != nil {
+		hlsTime = copyHLSTime
+	}
+	segmentOptions := "movflags=+frag_discont+negative_cts_offsets"
+	if s.Copy && !s.AudioOnly {
+		// MOV's DASH/sidx continuity correction rewrites the first PTS of
+		// later B-frame fragments. HLS uses its playlist index; preserve
+		// the source composition timestamps instead of generating sidx.
+		segmentOptions += "+skip_sidx"
+	}
+	segmentOptions += ":use_editlist=0"
+
 	args := BuildArgs(s)
 	args = append(args,
 		"-start_number", fmt.Sprintf("%d", startID),
 		"-avoid_negative_ts", "disabled",
 		"-f", "hls",
-		"-hls_time", fmt.Sprintf("%d", s.ChunkSize),
-		"-hls_segment_type", "mpegts",
+		"-hls_time", hlsTime,
+		"-hls_segment_type", "fmp4",
+		"-hls_fmp4_init_filename", init,
+		"-hls_segment_options", segmentOptions,
 		"-hls_segment_filename", pattern,
 	)
-	if s.RKMPP {
-		args = append(args, "-hls_segment_options", "avoid_negative_ts=disabled")
-	}
-	if s.AudioOnly {
-		return append(args, "-progress", "pipe:1", "-stats_period", "0.05", "-")
-	}
 
-	if !s.Copy {
+	if !s.Copy && !s.AudioOnly {
 		// HLS may otherwise duplicate VFR frames to match the probed r_frame_rate.
-		if !s.RKMPP {
-			args = append(args, "-fps_mode", "passthrough")
-		}
+		args = append(args, "-fps_mode", "passthrough")
 
-		// We force a keyframe at the start of each segment.
-		// By default, ffmpeg will split only on keyframes, so
-		// theoretically we should have perfectly sized chunks.
-		//
-		// However, the keyframes can be misaligned with the
-		// segment start even after forcing. To get around this,
-		// we chop the segments by time instead of keyframes.
-		//
-		// Technically this doesn't work with MSE (at least on Chrome),
-		// but video.js can work around this by fusing the
-		// segment with the previous GOP if no keyframe is found
-		// at the start of the segment.
-		// https://github.com/videojs/mux.js/pull/138
-		if s.RKMPP {
-			// The HLS muxer creates a separate MPEG-TS context. The outer
-			// avoid_negative_ts option alone does not stop that child from
-			// shifting a warm job with negative AAC priming timestamps.
-			args = append(args, "-progress", "pipe:1", "-stats_period", "0.05", "-hls_flags", "independent_segments")
-		} else {
-			args = append(args, "-hls_flags", "split_by_time")
-		}
+		// No B-frames: their delay shifts video two frames after the audio cut,
+		// so the buffer ends short of the segment boundary and hls.js refetches
+		// the same segment on every level switch.
+		args = append(args, "-bf", "0")
 
-		if s.RKMPP || (s.UseGopSize && s.FrameRate > 0) {
-			fps := s.FrameRate
-			if s.RKMPP {
-				fps = RKMPPFrameRate(s)
-			}
-			gop := fmt.Sprintf("%d", s.ChunkSize*fps)
+		if s.RKMPP && s.KeyframeGrid != nil {
+			// Blocking packet retrieval prevents a forced-IDR command from
+			// taking effect on an earlier frame still queued in asynchronous MPP.
+			args = append(args, "-flags:v", "+low_delay", "-g", strconv.Itoa(s.KeyframeGrid.GOPSize),
+				"-force_key_frames", s.KeyframeGrid.forceTimes(s.StartAt))
+		} else if s.UseGopSize && s.FrameRate > 0 {
+			gop := fmt.Sprintf("%d", s.ChunkSize*s.FrameRate)
 			args = append(args, "-g", gop, "-keyint_min", gop)
 		} else {
 			args = append(args, "-force_key_frames", fmt.Sprintf("expr:gte(t,n_forced*%d)", s.ChunkSize))
@@ -416,23 +486,23 @@ func MP4Args(s Spec) []string {
 // Segment is one stream-copy HLS segment: absolute start and duration.
 type Segment struct {
 	Start, Duration float64
+	// Nonzero when a copied open GOP is decoded from a later keyframe.
+	KeyframeAt float64
 }
 
-// CopySegments groups keyframes into HLS-sized segments, mirroring the
-// muxer's stream-copy splitting. Nil when no grid can be derived.
-func CopySegments(keyframes []float64, duration time.Duration, chunkSize int) []Segment {
+// CopySegments makes one segment per keyframe, mirroring the muxer's
+// copyHLSTime splitting. The first keyframe opens segment 0 wherever it lands,
+// since the muxer never cuts there. Nil when no grid can be derived.
+func CopySegments(keyframes []float64, duration time.Duration) []Segment {
 	total := duration.Seconds()
-	if len(keyframes) == 0 || total <= 0 || chunkSize <= 0 {
+	if len(keyframes) == 0 || total <= 0 {
 		return nil
 	}
 
-	size := float64(chunkSize)
+	keys := slices.Sorted(slices.Values(keyframes))
 	bounds := []float64{0}
-	for _, k := range slices.Sorted(slices.Values(keyframes)) {
-		if k < 0 || k >= total {
-			continue
-		}
-		if k-bounds[len(bounds)-1] >= size {
+	for _, k := range slices.Compact(keys)[1:] {
+		if k > 0 && k < total {
 			bounds = append(bounds, k)
 		}
 	}
@@ -455,22 +525,43 @@ func CopySegments(keyframes []float64, duration time.Duration, chunkSize int) []
 }
 
 // SegmentPattern is the "-hls_segment_filename" template for one rendition:
-// "<dir>/<quality>-%06d.ts", expanded by the HLS muxer into zero-padded
+// "<dir>/<quality>-%06d.m4s", expanded by the HLS muxer into zero-padded
 // segment numbers honoring "-start_number".
 func SegmentPattern(dir, quality string) string {
-	return filepath.Join(dir, quality+"-%06d.ts")
+	return filepath.Join(dir, quality+"-%06d.m4s")
 }
 
 // SegmentPath resolves one concrete segment file; the inverse of
 // ParseSegmentName for well-formed names.
 func SegmentPath(dir, quality string, id int) string {
-	return filepath.Join(dir, fmt.Sprintf("%s-%06d.ts", quality, id))
+	return filepath.Join(dir, fmt.Sprintf("%s-%06d.m4s", quality, id))
+}
+
+// InitName is the init segment's public name for one rendition.
+func InitName(quality string) string {
+	return quality + "-init.m4s"
+}
+
+// InitPath is the on-disk init segment of one transcode run. Runs write
+// separate files, so a restart never truncates an init being served.
+func InitPath(dir, quality string, run int) string {
+	return filepath.Join(dir, fmt.Sprintf("%s-init-%d.m4s", quality, run))
+}
+
+// ParseInitName extracts the rendition from an InitName.
+func ParseInitName(name string) (quality string, ok bool) {
+	quality, ok = strings.CutSuffix(name, "-init.m4s")
+	return quality, ok && qualityRe.MatchString(quality)
 }
 
 // segmentNameRe is the single definition of a segment file name: rendition
-// label, dash, decimal number, ".ts". Labels never contain dashes, so the
+// label, dash, decimal number, ".m4s". Labels never contain dashes, so the
 // first dash always separates label from number.
-var segmentNameRe = regexp.MustCompile(`^([A-Za-z0-9]+)-(\d+)\.ts$`)
+var segmentNameRe = regexp.MustCompile(`^([A-Za-z0-9]+)-(\d+)\.m4s$`)
+
+// qualityRe is a bare rendition label, as in segment names; it keeps
+// ParseInitName from accepting paths or dashed names.
+var qualityRe = regexp.MustCompile(`^[A-Za-z0-9]+$`)
 
 // ParseSegmentName splits a segment name into label and number. It matches on
 // the base name only, so temp directories containing dashes can't throw off

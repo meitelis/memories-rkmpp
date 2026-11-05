@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/pulsejet/memories/go-vod/config"
 	"github.com/stretchr/testify/require"
@@ -55,11 +56,17 @@ func TestRegistryRefreshesToken(t *testing.T) {
 	defer m1.Destroy()
 	require.Equal(t, "tok-1", m1.getServiceToken())
 
-	// Same file, new short-lived token: same manager, refreshed token.
+	// Same file, new token: same manager, token kept so PHP reuses open files.
 	m2, err := reg.GetOrCreate(ManagerParams{URL: "http://localhost/input.mp4", StreamID: "s", FileID: 7, Etag: "etag-1", ServiceToken: "tok-2"})
 	require.NoError(t, err)
 	require.Same(t, m1, m2)
-	require.Equal(t, "tok-2", m2.getServiceToken())
+	require.Equal(t, "tok-1", m2.getServiceToken())
+
+	// Refreshed once the token is old.
+	m1.tokenAt = time.Now().Add(-time.Hour)
+	_, err = reg.GetOrCreate(ManagerParams{URL: "http://localhost/input.mp4", StreamID: "s", FileID: 7, Etag: "etag-1", ServiceToken: "tok-3"})
+	require.NoError(t, err)
+	require.Equal(t, "tok-3", m1.getServiceToken())
 }
 
 func TestRegistryStaleRemove(t *testing.T) {
@@ -103,6 +110,10 @@ func TestRegistryEtagMismatch(t *testing.T) {
 	require.NoError(t, err)
 	defer m2.Destroy()
 	require.NotSame(t, m1, m2)
+
+	// Destroying the replaced manager keeps the new manager's temp dir.
+	require.NotEqual(t, m1.tempDir, m2.tempDir)
+	require.DirExists(t, m2.tempDir)
 
 	// Same session and etag, moved URL: fresh manager.
 	m3, err := reg.GetOrCreate(ManagerParams{URL: "http://localhost/moved.mp4", StreamID: "s", FileID: 7, Etag: "etag-2"})
@@ -215,4 +226,17 @@ func TestIsValidStreamID(t *testing.T) {
 	for _, id := range []string{"", "abc", "../test", "zzzzzzzz"} {
 		require.False(t, IsValidStreamID(id), id)
 	}
+}
+
+func TestManagerKeepsOddWidthRenditions(t *testing.T) {
+	// 1918x1080 scales 720p to 1279 wide; the scaler rounds it to even.
+	m := newCopyManager(t, `{"streams":[{"codec_type":"video","codec_name":"h264","width":1918,"height":1080,"avg_frame_rate":"30/1","duration":"10","bit_rate":"20000000"}],"format":{}}`, "", false, nil)
+	require.True(t, m.HasStream("480p"))
+	require.True(t, m.HasStream("720p"))
+}
+
+func TestIdleTicks(t *testing.T) {
+	require.Equal(t, 1, idleTicks(0))
+	require.Equal(t, 1, idleTicks(4))
+	require.Equal(t, 12, idleTicks(60))
 }

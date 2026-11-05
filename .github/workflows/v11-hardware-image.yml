@@ -1,0 +1,28 @@
+name: v11 RKMPP offline image build
+on:
+  push:
+    paths:
+      - 'go-vod/**'
+      - 'scripts/test-v11-rkmpp.sh'
+      - '.github/workflows/v11-hardware-image.yml'
+  pull_request:
+    paths:
+      - 'go-vod/**'
+      - 'scripts/test-v11-rkmpp.sh'
+      - '.github/workflows/v11-hardware-image.yml'
+permissions:
+  contents: read
+jobs:
+  hardware-image:
+    name: Build isolated ARM64 RKMPP test image
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Build image from v11 code and pinned RKMPP multimedia runtime
+        run: |
+          docker build --platform linux/arm64 -f go-vod/Dockerfile.rkmpp-test -t local/memories-rkmpp:v11-smoke go-vod
+      - name: Check version and FFmpeg features without hardware
+        run: |
+          test "$(docker run --rm --entrypoint /app/go-vod local/memories-rkmpp:v11-smoke -version)" = "go-vod 0.7.0"
+          docker run --rm --network none local/memories-rkmpp:v11-smoke

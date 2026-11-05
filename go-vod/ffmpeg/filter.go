@@ -63,7 +63,9 @@ func (b *FilterBuilder) hwdownload() {
 
 // normalize enters the encode domain: 8-bit convert plus hardware upload.
 // Emitted without checking isInHw: it also covers decoders that fell back
-// to software frames.
+// to software frames. Software stays yuv420p: older ffmpeg swscale zeroes
+// chroma on same-size nv12->nv12 conversions (e.g. untagged range -> tv),
+// turning max-size renditions green.
 func (b *FilterBuilder) normalize() {
 	switch b.cv {
 	case EncoderVAAPI:
@@ -71,7 +73,7 @@ func (b *FilterBuilder) normalize() {
 	case EncoderNVENC:
 		b.append("format=nv12|cuda", "hwupload")
 	default:
-		b.append("format=nv12")
+		b.append("format=yuv420p")
 	}
 }
 
@@ -103,15 +105,21 @@ func (b *FilterBuilder) scaleEncode(format string) {
 		panic("unknown encoder: " + b.cv)
 	}
 
-	// Base args always preserve aspect ratio.
+	// Base args preserve aspect ratio with even dimensions
+	// (odd output like 854x641 breaks encoders; see #1208).
 	args := []string{
 		"force_original_aspect_ratio=decrease",
+		"force_divisible_by=2",
 	}
 
 	// Convert to the encode format, except on software where the
 	// scaler must preserve source depth (e.g. HDR before tonemap).
 	if b.cv != EncoderX264 {
 		args = append(args, fmt.Sprintf("format=%s", format))
+		b.bitDepth = 8
+		if strings.HasPrefix(format, "p010") {
+			b.bitDepth = 10
+		}
 	}
 
 	// The CUDA scaler needs an explicit passthrough opt-out.
@@ -130,6 +138,7 @@ func (b *FilterBuilder) scaleEncode(format string) {
 func (b *FilterBuilder) scaleCpu() {
 	args := []string{
 		"force_original_aspect_ratio=decrease",
+		"force_divisible_by=2",
 	}
 	args = append(args, b.scaleDims()...)
 	b.append(fmt.Sprintf("scale=%s", strings.Join(args, ":")))
@@ -158,6 +167,10 @@ func (b *FilterBuilder) tonemapOpenCL() {
 	)
 }
 
+func (b *FilterBuilder) tonemapCUDA() {
+	b.append("tonemap_cuda=tonemap=hable:desat=0:format=nv12:primaries=bt709:transfer=bt709:matrix=bt709:range=tv")
+}
+
 // transposePlan resolves Rotation to filters; sw reports CPU transpose,
 // forced around broken hardware filters and always for transpose_cuda.
 func (b *FilterBuilder) transposePlan() (filters []string, sw bool) {
@@ -176,7 +189,7 @@ func (b *FilterBuilder) transposePlan() (filters []string, sw bool) {
 		transposer = "transpose"
 		sw = true
 	}
-	switch NormalizeRotation(s.Rotation) {
+	switch s.Rotation {
 	case -90:
 		filters = []string{transposer + "=1"}
 	case 90:

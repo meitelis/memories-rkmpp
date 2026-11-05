@@ -1,0 +1,21 @@
+The VP8 HAL has no control callback. Absence is optional, not a null context.
+Use the same missing-callback semantics as current upstream mpp_hal_control,
+while preserving the pinned Jellyfin MPP ABI used by the multimedia runtime.
+Source: https://github.com/nyanmisaka/mpp/blob/a9380ef333102ac318628f83b5f7a460d377749e/mpp/hal/vpu/vp8d/hal_vp8d_api.c
+Semantics: https://github.com/rockchip-linux/mpp/blob/9b56348cc61393c84662e6d6dd78feae67773a36/mpp/hal/mpp_hal.c
+
+diff --git a/mpp/hal/vpu/vp8d/hal_vp8d_api.c b/mpp/hal/vpu/vp8d/hal_vp8d_api.c
+--- a/mpp/hal/vpu/vp8d/hal_vp8d_api.c
++++ b/mpp/hal/vpu/vp8d/hal_vp8d_api.c
+@@ -82,7 +82,10 @@ static MPP_RET hal_vp8d_control(void *hal, MpiCmd cmd_type, void *param)
+     VP8DHalContext_t *self = (VP8DHalContext_t *)hal;
+ 
+-    if (NULL == self || NULL == self->hal_api || NULL == self->hal_api->control)
++    if (NULL == self || NULL == self->hal_api)
+         return MPP_ERR_NULL_PTR;
+ 
++    if (NULL == self->hal_api->control)
++        return MPP_OK;
++
+     return self->hal_api->control(hal, cmd_type, param);
+ }

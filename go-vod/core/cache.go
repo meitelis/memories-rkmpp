@@ -7,13 +7,15 @@ import (
 	"hash/fnv"
 	"os"
 	"path/filepath"
+
+	"github.com/pulsejet/memories/go-vod/ffmpeg"
 )
 
 const KeyframeCacheFile = "keyframes.json"
 
 const ProbeCacheFile = "probe.json"
 
-const probeCacheVersion = 6
+const probeCacheVersion = 5
 
 // FileCacheDir is the file's cache home, sharded by hashed fileid.
 // Empty when caching is unavailable (no cache dir or fileid).
@@ -45,11 +47,12 @@ func KeyframeCachePath(cacheDir string, fileid int64) string {
 
 // keyframesPlan is the stored keyframe payload, validated by Etag.
 type keyframesPlan struct {
-	Etag string    `json:"etag"`
-	Keys []float64 `json:"keys"`
+	V      int               `json:"v"`
+	Etag   string            `json:"etag"`
+	Frames []ffmpeg.Keyframe `json:"frames"`
 }
 
-func LoadCachedKeyframes(cacheDir string, fileid int64, etag string) ([]float64, bool) {
+func LoadCachedTimeline(cacheDir string, fileid int64, etag string) ([]ffmpeg.Keyframe, bool) {
 	path := KeyframeCachePath(cacheDir, fileid)
 	if path == "" {
 		return nil, false
@@ -67,10 +70,15 @@ func LoadCachedKeyframes(cacheDir string, fileid int64, etag string) ([]float64,
 		EvictFileCache(cacheDir, fileid)
 		return nil, false
 	}
-	return plan.Keys, true
+	// Old indexes have decoder timestamps only. Refresh this one payload;
+	// an unchanged source's other cached artifacts remain valid.
+	if plan.V != 1 || len(plan.Frames) == 0 {
+		return nil, false
+	}
+	return plan.Frames, true
 }
 
-func StoreCachedKeyframes(cacheDir string, fileid int64, etag string, keys []float64) error {
+func StoreCachedTimeline(cacheDir string, fileid int64, etag string, frames []ffmpeg.Keyframe) error {
 	path := KeyframeCachePath(cacheDir, fileid)
 	if path == "" {
 		return nil
@@ -78,11 +86,11 @@ func StoreCachedKeyframes(cacheDir string, fileid int64, etag string, keys []flo
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return err
 	}
-	data, err := json.Marshal(keyframesPlan{Etag: etag, Keys: keys})
+	data, err := json.Marshal(keyframesPlan{V: 1, Etag: etag, Frames: frames})
 	if err != nil {
 		return err
 	}
-	return publishCacheFile(path, data)
+	return writeFileAtomic(path, data)
 }
 
 func ProbeCachePath(cacheDir string, fileid int64) string {
@@ -121,8 +129,9 @@ func LoadCachedProbe(cacheDir string, fileid int64, etag string) (*ProbeVideoDat
 		return nil, false
 	}
 	if plan.V != probeCacheVersion {
-		// A metadata schema update needs a fresh probe, not new keyframes or
-		// storyboards for the same unchanged source.
+		// New probe semantics do not invalidate this unchanged file's
+		// expensive keyframe index or its storyboard.
+		os.Remove(path)
 		return nil, false
 	}
 	probe := plan.Probe
@@ -145,22 +154,24 @@ func StoreCachedProbe(cacheDir string, fileid int64, etag string, probe *ProbeVi
 	if err != nil {
 		return err
 	}
-	return publishCacheFile(path, data)
+	return writeFileAtomic(path, data)
 }
 
-// Publish only complete metadata: concurrent readers must never see a truncated
-// JSON document and mistake an in-progress write for a corrupt cache entry.
-func publishCacheFile(path string, data []byte) error {
-	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+"-*")
+// writeFileAtomic replaces path in one rename, so readers never see a
+// partial file. A corrupt read evicts the whole file cache, storyboards
+// included. The temp name is unique, so concurrent writers can't collide.
+func writeFileAtomic(path string, data []byte) error {
+	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.part")
 	if err != nil {
 		return err
 	}
 	defer os.Remove(f.Name())
-	defer f.Close()
-	if err := f.Chmod(0644); err != nil {
+	if _, err := f.Write(data); err != nil {
+		f.Close()
 		return err
 	}
-	if _, err := f.Write(data); err != nil {
+	if err := f.Chmod(0644); err != nil {
+		f.Close()
 		return err
 	}
 	if err := f.Close(); err != nil {

@@ -1,9 +1,6 @@
 package core
 
 import (
-	"crypto/sha256"
-	"encoding/json"
-	"fmt"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -29,14 +26,15 @@ type IdleEvent struct {
 // ManagerParams identifies a manager for a file and client. Token is
 // per-request auth material, refreshed on hits, never identity.
 type ManagerParams struct {
-	URL            string
-	StreamID       string
-	FileID         int64
-	Etag           string
-	ServiceToken   string
-	PlayableCodecs []string
-	TConfig        config.TCfg
-	UsesTemp       bool
+	URL             string
+	StreamID        string
+	FileID          int64
+	Etag            string
+	ServiceToken    string
+	PlayableCodecs  []string
+	TConfig         config.TCfg
+	UsesTemp        bool
+	CloseBridgeFile func()
 }
 
 func NewRegistry(cfg *config.Config, idle chan IdleEvent) *Registry {
@@ -48,19 +46,6 @@ func NewRegistry(cfg *config.Config, idle chan IdleEvent) *Registry {
 }
 
 func (r *Registry) GetOrCreate(p ManagerParams) (*Manager, error) {
-	if r.cfg.RKMPP {
-		identity, _ := json.Marshal(struct {
-			URL    string
-			FileID int64
-			Etag   string
-			Config config.TCfg
-			Codecs []string
-			Temp   bool
-		}{p.URL, p.FileID, p.Etag, p.TConfig, p.PlayableCodecs, p.UsesTemp})
-		sum := sha256.Sum256(identity)
-		p.StreamID = fmt.Sprintf("%s-%x", p.StreamID, sum[:8])
-	}
-
 	if m := r.get(p); m != nil {
 		m.refreshServiceToken(p.ServiceToken)
 		return m, nil
@@ -85,7 +70,7 @@ func (r *Registry) get(p ManagerParams) *Manager {
 	defer r.mu.Unlock()
 
 	m := r.members[p.StreamID]
-	if m == nil || m.url != p.URL || m.destroyed.Load() {
+	if m == nil || m.url != p.URL {
 		return nil
 	}
 	if m.usesTemp != p.UsesTemp {
@@ -110,12 +95,14 @@ func (r *Registry) create(p ManagerParams) (*Manager, error) {
 	}
 
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	old := r.members[p.StreamID]
+	r.members[p.StreamID] = manager
+	r.mu.Unlock()
 
-	if old := r.members[p.StreamID]; old != nil {
+	// Outside the lock: Destroy waits on each stream's mutex.
+	if old != nil {
 		old.Destroy()
 	}
-	r.members[p.StreamID] = manager
 	return manager, nil
 }
 

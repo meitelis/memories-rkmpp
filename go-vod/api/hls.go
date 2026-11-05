@@ -6,10 +6,10 @@ import (
 	"math"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/grafov/m3u8"
-	"github.com/pulsejet/memories/go-vod/config"
 	"github.com/pulsejet/memories/go-vod/core"
 	"github.com/pulsejet/memories/go-vod/ffmpeg"
 )
@@ -22,6 +22,14 @@ func MasterPlaylist(renditions []core.Rendition, frameRate int, query string) (s
 	})
 
 	m := m3u8.NewMasterPlaylist()
+	independent := true
+	for _, r := range sorted {
+		if r.Quality == core.QUALITY_DIRECT {
+			independent = false
+			break
+		}
+	}
+	m.SetIndependentSegments(independent)
 	for _, r := range sorted {
 		params := m3u8.VariantParams{
 			Bandwidth:  uint32(r.Bitrate),
@@ -31,7 +39,12 @@ func MasterPlaylist(renditions []core.Rendition, frameRate int, query string) (s
 		}
 		if r.SeparateAudio {
 			params.Audio = "audio"
-			params.Alternatives = []*m3u8.Alternative{{GroupId: "audio", Type: "AUDIO", Name: "Audio", Default: true, Autoselect: "YES", URI: "audio.m3u8" + query}}
+			params.Alternatives = []*m3u8.Alternative{
+				{GroupId: "audio", Type: "AUDIO", Name: "Original / high", Default: true, Autoselect: "YES", URI: "audio.m3u8" + query},
+				{GroupId: "audio", Type: "AUDIO", Name: "96 kbps", Autoselect: "NO", URI: "audio96.m3u8" + query},
+				{GroupId: "audio", Type: "AUDIO", Name: "64 kbps", Autoselect: "NO", URI: "audio64.m3u8" + query},
+				{GroupId: "audio", Type: "AUDIO", Name: "32 kbps", Autoselect: "NO", URI: "audio32.m3u8" + query},
+			}
 		}
 		m.Append(r.Quality+".m3u8"+query, nil, params)
 	}
@@ -41,86 +54,80 @@ func MasterPlaylist(renditions []core.Rendition, frameRate int, query string) (s
 // VariantPlaylist serves a rendition's playlist. direct.m3u8 never blocks:
 // cache hits serve copy, a finished probe without a grid serves uniform
 // re-encoded segments, and a pending probe answers ErrCopyPending (409).
-func VariantPlaylist(m *core.Manager, tc config.TCfg, quality string, query string) (string, error) {
-	chunkSize := tc.ChunkSize
+// audio.m3u8 is served like any other transcoded rendition.
+func VariantPlaylist(m *core.Manager, quality string, query string) (string, error) {
 	if quality == core.QUALITY_DIRECT {
 		if segs, ok := m.TryCacheCopySegments(); ok {
 			return CopyVariantPlaylist(quality, segs, query)
 		}
 		if m.CopyProbed() {
-			return TranscodeVariantPlaylist(quality, m.Duration(), chunkSize, query)
+			return TranscodeVariantPlaylist(quality, m.Duration(), m.ChunkSize(), query)
 		}
 		m.StartCopyProbeAsync()
 		return "", core.ErrCopyPending
 	}
-	if m.AdaptiveStartBuffer() {
-		return transcodeVariantPlaylist(quality, m.Duration(), chunkSize, 2, query)
+	if grid := m.AlignedGrid(quality); grid != nil {
+		return CopyVariantPlaylist(quality, grid.Segments, query)
 	}
-	return TranscodeVariantPlaylist(quality, m.Duration(), chunkSize, query)
+	return TranscodeVariantPlaylist(quality, m.Duration(), m.ChunkSize(), query)
 }
 
 // TranscodeVariantPlaylist renders the variant playlist for a re-encoded
 // rendition: uniform chunkSize segments.
 func TranscodeVariantPlaylist(quality string, total time.Duration, chunkSize int, query string) (string, error) {
-	return transcodeVariantPlaylist(quality, total, chunkSize, 1, query)
-}
-
-func transcodeVariantPlaylist(quality string, total time.Duration, chunkSize, startupChunks int, query string) (string, error) {
 	n := 0
 	if total > 0 && chunkSize > 0 {
-		n = 1 + int(math.Ceil(math.Max(0, total.Seconds()-float64(startupChunks*chunkSize))/float64(chunkSize)))
+		n = int(math.Ceil(total.Seconds() / float64(chunkSize)))
 	}
 
 	p, err := m3u8.NewMediaPlaylist(uint(n), uint(n))
 	if err != nil {
 		return "", err
 	}
-	p.SetVersion(4)
-	p.MediaType = m3u8.VOD
-	p.TargetDuration = float64(startupChunks * chunkSize)
+	initVariant(p, quality, query)
+	p.TargetDuration = float64(chunkSize)
 
 	remaining := total.Seconds()
 	for i := 0; i < n; i++ {
 		size := float64(chunkSize)
-		if i == 0 {
-			size *= float64(startupChunks)
-		}
 		if remaining < size {
 			size = remaining
 		}
-		if err := p.Append(fmt.Sprintf("%s-%06d.ts%s", quality, i, query), size, "nodesc"); err != nil {
+		if err := p.Append(fmt.Sprintf("%s-%06d.m4s%s", quality, i, query), size, "nodesc"); err != nil {
 			return "", err
 		}
-		remaining -= size
+		remaining -= float64(chunkSize)
 	}
 	p.Close()
 	return p.Encode().String(), nil
 }
 
-// CopyVariantPlaylist renders the variant playlist for a stream-copy
-// rendition from its keyframe-derived segments.
+// CopyVariantPlaylist renders the source keyframe grid shared by Original and
+// aligned hardware renditions. Keep microsecond precision: the m3u8 writer's
+// three decimal places accumulate drift across fractional GOPs.
 func CopyVariantPlaylist(quality string, segments []ffmpeg.Segment, query string) (string, error) {
-	n := len(segments)
-	p, err := m3u8.NewMediaPlaylist(uint(n), uint(n))
-	if err != nil {
-		return "", err
-	}
-	p.SetVersion(4)
-	p.MediaType = m3u8.VOD
-
 	longest := 0.0
 	for _, s := range segments {
 		longest = max(longest, s.Duration)
 	}
-	p.TargetDuration = math.Ceil(longest)
-
-	for i, s := range segments {
-		if err := p.Append(fmt.Sprintf("%s-%06d.ts%s", quality, i, query), s.Duration, "nodesc"); err != nil {
-			return "", err
-		}
+	var p strings.Builder
+	fmt.Fprintf(&p, "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-TARGETDURATION:%.0f\n#EXT-X-MAP:URI=\"%s%s\"\n",
+		math.Ceil(longest), ffmpeg.InitName(quality), query)
+	if quality != core.QUALITY_DIRECT {
+		p.WriteString("#EXT-X-INDEPENDENT-SEGMENTS\n")
 	}
-	p.Close()
-	return p.Encode().String(), nil
+	for i, s := range segments {
+		fmt.Fprintf(&p, "#EXTINF:%.6f,nodesc\n%s-%06d.m4s%s\n", s.Duration, quality, i, query)
+	}
+	p.WriteString("#EXT-X-ENDLIST\n")
+	return p.String(), nil
+}
+
+// initVariant sets up a VOD fMP4 playlist; EXT-X-MAP needs version 6.
+func initVariant(p *m3u8.MediaPlaylist, quality string, query string) {
+	p.SetVersion(7)
+	p.MediaType = m3u8.VOD
+	p.SetDefaultMap(ffmpeg.InitName(quality)+query, 0, 0)
 }
 
 func WriteM3U8(w http.ResponseWriter, body string) {

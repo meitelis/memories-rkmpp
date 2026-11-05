@@ -1,0 +1,19 @@
+.mr-v11-status {
+  display: none;
+  align-self: flex-end;
+  max-width: 100%;
+  margin-bottom: 6px;
+  padding: 3px 7px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, .6);
+  color: #fff;
+  font: 11px/1.4 system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+
+/* Inherit the native controls' fade/visibility, including touch/fullscreen. */
+.m-vc-controls > .mr-v11-status { display: block; }

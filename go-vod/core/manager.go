@@ -1,9 +1,9 @@
 package core
 
 import (
+	"context"
 	"errors"
 	"fmt"
-	"hash/fnv"
 	"io"
 	"log"
 	"math"
@@ -22,10 +22,17 @@ import (
 )
 
 const (
-	QUALITY_MAX    = "max"
-	QUALITY_DIRECT = "direct"
-	QUALITY_AUDIO  = "audio"
+	QUALITY_MAX     = "max"
+	QUALITY_DIRECT  = "direct"
+	QUALITY_AUDIO   = "audio"
+	QUALITY_AUDIO96 = "audio96"
+	QUALITY_AUDIO64 = "audio64"
+	QUALITY_AUDIO32 = "audio32"
 )
+
+func isAudioQuality(quality string) bool {
+	return quality == QUALITY_AUDIO || quality == QUALITY_AUDIO96 || quality == QUALITY_AUDIO64 || quality == QUALITY_AUDIO32
+}
 
 // ErrCopyPending means the keyframe probe is still running; answer 409
 // so the client fails over and retries later once the grid is warm.
@@ -53,9 +60,11 @@ type Manager struct {
 	// usesTemp marks inputs served from a temp file download.
 	usesTemp bool
 	// serviceToken is the short-lived provisioned token sent back upstream.
-	// Refreshed on every request since each carries a new token.
+	// Kept stable for an hour so PHP can reuse open files, then replaced
+	// by the next request's token.
 	tokenMu      sync.RWMutex
 	serviceToken string
+	tokenAt      time.Time
 	// fileid keys the on-disk cache; etag validates it.
 	fileid int64
 	etag   string
@@ -67,9 +76,7 @@ type Manager struct {
 	generation uint64
 	// idle reports expiry to the registry.
 	idle chan IdleEvent
-	// destroyed is separate from activity, which an in-flight tick may update.
-	destroyed atomic.Bool
-	// inactive counts ticks since any transcode.
+	// inactive counts ticks since any transcode (-1 once destroyed).
 	inactive atomic.Int32
 
 	// probe holds the source properties, immutable after creation.
@@ -77,6 +84,9 @@ type Manager struct {
 
 	// playableCodecs lists browser-playable codecs; immutable after creation.
 	playableCodecs []string
+
+	// closeBridgeFile releases the file in bridge workers on Destroy.
+	closeBridgeFile func()
 
 	// copyEligible is set from the base probe (playable codec, no rotation)
 	// and is immutable after creation. It only says keyframes are worth trying.
@@ -93,6 +103,10 @@ type Manager struct {
 	copyProbed bool
 	// copySF dedupes concurrent keyframe probes so they share one ffprobe.
 	copySF singleflight.Group
+	// Decide the encoded grid once, before its first playlist/init/segment.
+	// A cache miss keeps startup nonblocking and the choice stable thereafter.
+	gridOnce  sync.Once
+	videoGrid *ffmpeg.RKMPPKeyframeGrid
 
 	// streams are the renditions by quality ("480p", "direct" / "max").
 	streams map[string]*Stream
@@ -109,6 +123,11 @@ type ProbeVideoData struct {
 	BitRate        int
 	Rotation       int
 	HDR            bool
+	DolbyVision    bool
+	ColorTransfer  string
+	ColorPrimaries string
+	ColorSpace     string
+	ColorRange     string
 	BitDepth       int
 	Audio          ffmpeg.AudioInfo
 }
@@ -133,33 +152,28 @@ type NewManagerArgs struct {
 
 func NewManager(a NewManagerArgs) (*Manager, error) {
 	m := &Manager{
-		c:              a.C,
-		tc:             a.TConfig,
-		url:            a.URL,
-		input:          a.URL,
-		usesTemp:       a.UsesTemp,
-		serviceToken:   a.ServiceToken,
-		id:             a.StreamID,
-		fileid:         a.FileID,
-		etag:           a.Etag,
-		generation:     a.Generation,
-		idle:           a.Idle,
-		playableCodecs: a.PlayableCodecs,
+		c:               a.C,
+		tc:              a.TConfig,
+		url:             a.URL,
+		input:           a.URL,
+		usesTemp:        a.UsesTemp,
+		serviceToken:    a.ServiceToken,
+		tokenAt:         time.Now(),
+		id:              a.StreamID,
+		fileid:          a.FileID,
+		etag:            a.Etag,
+		generation:      a.Generation,
+		idle:            a.Idle,
+		playableCodecs:  a.PlayableCodecs,
+		closeBridgeFile: a.CloseBridgeFile,
 	}
 	m.streams = make(map[string]*Stream)
 
-	h := fnv.New32a()
-	h.Write([]byte(m.url))
-	ph := fmt.Sprint(h.Sum32())
-	m.tempDir = fmt.Sprintf("%s/%s-%s-%d", m.c.TempDir, m.id, ph, a.Generation)
-
-	// Delete temp dir if exists
-	if err := os.RemoveAll(m.tempDir); err != nil {
-		return nil, fmt.Errorf("reset stream directory: %w", err)
-	}
-	if err := os.MkdirAll(m.tempDir, 0755); err != nil {
-		return nil, fmt.Errorf("create stream directory: %w", err)
-	}
+	// Unique per Manager: a replaced Manager's Destroy must not delete
+	// the temp dir of the Manager replacing it.
+	m.tempDir = filepath.Join(m.c.TempDir, fmt.Sprintf("%s-%d", m.id, m.generation))
+	os.RemoveAll(m.tempDir)
+	os.MkdirAll(m.tempDir, 0755)
 
 	// Temp-file inputs need full file downloaded.
 	if m.usesTemp {
@@ -183,7 +197,7 @@ func NewManager(a NewManagerArgs) (*Manager, error) {
 
 	// height is our primary dimension for scaling
 	// using the probed size, we adjust the width of the stream
-	// the smaller dimension of the output should match the height here
+	// the smaller dimemension of the output should match the height here
 	smDim, lgDim := m.probe.Height, m.probe.Width
 	if m.probe.Height > m.probe.Width {
 		smDim, lgDim = lgDim, smDim
@@ -260,7 +274,7 @@ func NewManager(a NewManagerArgs) (*Manager, error) {
 		if (stream.height > smDim || stream.width > lgDim) || // no upscaling; we're not AI
 			(!rkmpp && float64(stream.bitrate) > float64(m.probe.BitRate)*0.8) ||
 			(rkmpp && stream.height == smDim/2*2 && stream.width == lgDim/2*2) || // avoid duplicating max
-			(stream.height%2 != 0 || stream.width%2 != 0) { // no odd dimensions
+			(rkmpp && (stream.height%2 != 0 || stream.width%2 != 0)) { // no odd dimensions for RGA
 
 			// remove stream
 			delete(m.streams, k)
@@ -269,6 +283,18 @@ func NewManager(a NewManagerArgs) (*Manager, error) {
 	}
 
 	maxWidth, maxHeight := m.probe.Width, m.probe.Height
+	// Keep 480p as the minimum encoded resolution. Weak links get lower
+	// bitrate 480p variants instead of smaller pictures. Each job is lazy.
+	if rkmpp && smDim >= 480 {
+		width := int(math.Round(float64(lgDim)*480/float64(smDim)/2)) * 2
+		for quality, budget := range map[string]int{"480plow": 400000, "480pmobile": 700000} {
+			rate := max(minRKMPPBitrate, budget)
+			if base := m.streams["480p"]; base != nil && base.bitrate <= rate*11/10 {
+				continue
+			}
+			m.streams[quality] = &Stream{c: m.c, m: m, quality: quality, width: width, height: 480, bitrate: rate}
+		}
+	}
 	if rkmpp {
 		maxWidth, maxHeight = maxWidth/2*2, maxHeight/2*2
 	}
@@ -296,12 +322,36 @@ func NewManager(a NewManagerArgs) (*Manager, error) {
 		}
 	}
 
-	if rkmpp && m.IsCopyEligible() && len(m.streams) > 1 {
+	if rkmpp && m.IsCopyEligible() {
 		m.streams[QUALITY_MAX] = &Stream{c: m.c, m: m, quality: QUALITY_MAX, height: maxHeight, width: maxWidth, bitrate: refBitrate, order: 1}
+		// Keep the original as the highest same-codec quality. Re-encoding
+		// an already compatible HEVC source loses detail for no benefit.
+		direct := m.streams[QUALITY_DIRECT]
+		audioRate := 0
+		if m.probe.Audio.CodecName != "" {
+			audioRate = max(128000, m.probe.Audio.BitRate)
+		}
+		direct.bitrate = (m.probe.BitRate + audioRate) * 11 / 10
+		for _, stream := range m.streams {
+			if stream != direct {
+				stream.bitrate = min(stream.bitrate, direct.bitrate*85/100)
+			}
+		}
 	}
 
-	if rkmpp && ffmpeg.NormalizeRKMPPAudio(m.probe.Audio) {
-		m.streams[QUALITY_AUDIO] = &Stream{c: m.c, m: m, quality: QUALITY_AUDIO, bitrate: 128000}
+	// Add a shared audio-only stream so all video renditions can mute their
+	// own audio and the player switches quality without audio gaps.
+	// Alternate bitrates are lazy: only the selected track starts a job.
+	if rkmpp && m.probe.Audio.CodecName != "" {
+		m.streams[QUALITY_AUDIO] = &Stream{
+			c:       m.c,
+			m:       m,
+			quality: QUALITY_AUDIO,
+			bitrate: 192000,
+		}
+		for quality, rate := range map[string]int{QUALITY_AUDIO96: 96000, QUALITY_AUDIO64: 64000, QUALITY_AUDIO32: 32000} {
+			m.streams[quality] = &Stream{c: m.c, m: m, quality: quality, bitrate: rate}
+		}
 	}
 
 	// Start all streams
@@ -319,7 +369,7 @@ func NewManager(a NewManagerArgs) (*Manager, error) {
 		for {
 			<-t.C
 
-			if m.destroyed.Load() {
+			if m.inactive.Load() == -1 {
 				t.Stop()
 				return
 			}
@@ -337,8 +387,8 @@ func NewManager(a NewManagerArgs) (*Manager, error) {
 				}
 			}
 
-			// Expire once the configured manager idle interval has elapsed.
-			if m.inactive.Load() >= int32(m.c.ManagerIdleTime/5) {
+			// Nothing done for ManagerIdleTime
+			if m.inactive.Load() >= int32(idleTicks(m.c.ManagerIdleTime)) {
 				t.Stop()
 				m.Destroy()
 				m.idle <- IdleEvent{ID: m.id, Generation: m.generation}
@@ -352,10 +402,8 @@ func NewManager(a NewManagerArgs) (*Manager, error) {
 
 // Destroys streams. DOES NOT emit on the close channel.
 func (m *Manager) Destroy() {
-	if !m.destroyed.CompareAndSwap(false, true) {
-		return
-	}
 	log.Printf("%s: destroying manager", m.id)
+	m.inactive.Store(-1)
 
 	for _, stream := range m.streams {
 		stream.Stop()
@@ -363,19 +411,29 @@ func (m *Manager) Destroy() {
 
 	// Delete temp dir
 	os.RemoveAll(m.tempDir)
+
+	if m.closeBridgeFile != nil {
+		m.closeBridgeFile()
+	}
 }
 
 func (m *Manager) Renditions() []Rendition {
+	hasAudio := m.HasStream(QUALITY_AUDIO)
+	hasLowerVideo := false
+	for quality := range m.streams {
+		if quality != QUALITY_MAX && quality != QUALITY_DIRECT && !isAudioQuality(quality) {
+			hasLowerVideo = true
+			break
+		}
+	}
 	out := make([]Rendition, 0, len(m.streams))
 	for _, s := range m.streams {
-		if s.quality == QUALITY_AUDIO {
+		// The audio stream appears in the master playlist as an EXT-X-MEDIA
+		// group referenced by video variants; it is not itself a variant.
+		if isAudioQuality(s.quality) {
 			continue
 		}
-		videoCount := len(m.streams)
-		if m.HasStream(QUALITY_AUDIO) {
-			videoCount--
-		}
-		if m.c.RKMPP && s.quality == QUALITY_DIRECT && videoCount > 1 {
+		if m.c.RKMPP && m.IsCopyEligible() && s.quality == QUALITY_MAX && hasLowerVideo {
 			continue
 		}
 		width, height := s.width, s.height
@@ -388,9 +446,11 @@ func (m *Manager) Renditions() []Rendition {
 			width, height = height, width
 		}
 		codecs := ""
-		if m.OutputCodec() == "hevc" && s.quality != QUALITY_DIRECT {
+		if m.OutputCodec() == "hevc" {
 			codecs = ffmpeg.HEVCCodecs(width, height, m.FrameRate(), m.probe.Audio.CodecName != "")
 		}
+		// Video renditions link to the shared audio group when present.
+		separateAudio := hasAudio
 		out = append(out, Rendition{
 			Quality:       s.quality,
 			Width:         width,
@@ -398,10 +458,21 @@ func (m *Manager) Renditions() []Rendition {
 			Bitrate:       s.bitrate,
 			Order:         s.order,
 			Codecs:        codecs,
-			SeparateAudio: m.HasStream(QUALITY_AUDIO),
+			SeparateAudio: separateAudio,
 		})
 	}
 	return out
+}
+
+// idleTicks converts an idle time in seconds to 5s ticks, at least one, so
+// a short idle time can't tear down on the first tick.
+func idleTicks(seconds int) int {
+	return max(1, seconds/5)
+}
+
+// ChunkSize is the segment length the streams were created with.
+func (m *Manager) ChunkSize() int {
+	return m.tc.ChunkSize
 }
 
 func (m *Manager) Duration() time.Duration {
@@ -414,11 +485,14 @@ func (m *Manager) getServiceToken() string {
 	return m.serviceToken
 }
 
+// refreshServiceToken replaces the token once it is an hour old, well
+// within the 12 hours PHP tokens are valid.
 func (m *Manager) refreshServiceToken(serviceToken string) {
-	if serviceToken != "" {
-		m.tokenMu.Lock()
-		defer m.tokenMu.Unlock()
+	m.tokenMu.Lock()
+	defer m.tokenMu.Unlock()
+	if serviceToken != "" && time.Since(m.tokenAt) >= time.Hour {
 		m.serviceToken = serviceToken
+		m.tokenAt = time.Now()
 	}
 }
 
@@ -433,6 +507,20 @@ func (m *Manager) CopySegments() ([]ffmpeg.Segment, bool) {
 		return nil, false
 	}
 	return m.srcSegments, true
+}
+
+// AlignedGrid returns an immutable cached grid for encoded RKMPP HLS video.
+// Audio remains on its independent AAC clock. No request runs a keyframe scan.
+func (m *Manager) AlignedGrid(quality string) *ffmpeg.RKMPPKeyframeGrid {
+	if m.c == nil || !m.c.RKMPP || !m.copyEligible || quality == QUALITY_DIRECT || isAudioQuality(quality) || !m.HasStream(quality) {
+		return nil
+	}
+	m.gridOnce.Do(func() {
+		if segs, ok := m.TryCacheCopySegments(); ok {
+			m.videoGrid = ffmpeg.NewRKMPPKeyframeGrid(segs, m.FrameRate())
+		}
+	})
+	return m.videoGrid
 }
 
 // CopyProbed reports whether a keyframe attempt has finished.
@@ -451,11 +539,11 @@ func (m *Manager) TryCacheCopySegments() ([]ffmpeg.Segment, bool) {
 	if segs, ok := m.CopySegments(); ok {
 		return segs, true
 	}
-	keys, ok := LoadCachedKeyframes(m.c.CacheDir(), m.fileid, m.etag)
+	frames, ok := LoadCachedTimeline(m.c.CacheDir(), m.fileid, m.etag)
 	if !ok {
 		return nil, false
 	}
-	segs := ffmpeg.CopySegments(keys, m.probe.Duration, m.tc.ChunkSize)
+	segs := ffmpeg.SourceSegments(frames, m.probe.Duration)
 	if len(segs) == 0 {
 		return nil, false
 	}
@@ -532,33 +620,54 @@ func (m *Manager) HasStream(quality string) bool {
 }
 
 func (m *Manager) ServeChunk(w http.ResponseWriter, quality string, id int) bool {
+	// Reject impossible segment requests before they can start an encoder.
+	// In particular, a negative id must never be passed to Stream.ServeChunk.
+	if id < 0 {
+		return false
+	}
 	stream, ok := m.streams[quality]
 	if !ok {
 		return false
 	}
-	// Reject stale or malformed requests before starting an encoder or probe.
-	startChunk := float64(id)
-	if quality != QUALITY_DIRECT && m.AdaptiveStartBuffer() && id > 0 {
-		startChunk++
+	if quality == QUALITY_DIRECT {
+		// Stream-copy direct uses its own keyframe grid, which may contain
+		// more segments than the fixed-duration transcode ladder.
+		m.EnsureCopySegments()
+		if segs, copied := m.CopySegments(); copied {
+			if id >= len(segs) {
+				return false
+			}
+		} else if m.chunkOutsideDuration(id) {
+			return false
+		}
+	} else if grid := m.AlignedGrid(quality); grid != nil {
+		if id >= len(grid.Segments) {
+			return false
+		}
+	} else if m.chunkOutsideDuration(id) {
+		return false
 	}
-	if id < 0 || m.tc.ChunkSize <= 0 || startChunk*float64(m.tc.ChunkSize) >= m.Duration().Seconds() {
+	stream.ServeChunk(w, id)
+	return true
+}
+
+// chunkOutsideDuration bounds fixed-length rendition requests; unlike
+// stream-copy direct, these segments follow the configured ChunkSize grid.
+func (m *Manager) chunkOutsideDuration(id int) bool {
+	return m.probe != nil && m.tc.ChunkSize > 0 && m.probe.Duration > 0 &&
+		float64(id)*float64(m.tc.ChunkSize) >= m.probe.Duration.Seconds()
+}
+
+func (m *Manager) ServeInit(w http.ResponseWriter, quality string) bool {
+	stream, ok := m.streams[quality]
+	if !ok {
 		return false
 	}
 	if quality == QUALITY_DIRECT {
-		// Trigger the probe; on empty grid the stream re-encodes.
-		if segments, ok := m.EnsureCopySegments(); ok && id >= len(segments) {
-			return false
-		}
+		// Copy and re-encode inits differ; settle the grid first.
+		m.EnsureCopySegments()
 	}
-	if quality != QUALITY_DIRECT && m.AdaptiveStartBuffer() {
-		if id == 0 {
-			stream.ServeStartupChunk(w)
-		} else {
-			stream.ServeChunk(w, id+1)
-		}
-	} else {
-		stream.ServeChunk(w, id)
-	}
+	stream.ServeInit(w)
 	return true
 }
 
@@ -579,25 +688,66 @@ func (m *Manager) ServeFullVideo(w http.ResponseWriter, r *http.Request, quality
 }
 
 func (m *Manager) ffprobe() error {
-	probe, err := m.probeVideo()
-	if err != nil {
-		return err
-	}
-	m.probe = probe
+	if probe, ok := LoadCachedProbe(m.c.CacheDir(), m.fileid, m.etag); ok {
+		log.Printf("%s: probe cache hit", m.id)
+		m.probe = probe
+	} else {
+		log.Printf("%s: probe cache miss", m.id)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
 
-	// Copy eligibility is cheap (codec + rotation); keyframes come later
-	// via EnsureCopySegments on direct.m3u8, so creation stays fast.
+		info, err := ffmpeg.Probe(ctx, m.c.FFprobe, m.ffmpegInput(), m.inputHeaders())
+		if err != nil {
+			return err
+		}
+
+		m.probe = &ProbeVideoData{
+			Width:          info.Width,
+			Height:         info.Height,
+			Duration:       info.Duration,
+			FrameRate:      info.FrameRate,
+			FrameRateExact: info.FrameRateExact,
+			PixelFormat:    info.PixelFormat,
+			CodecName:      info.CodecName,
+			BitRate:        info.BitRate,
+			Rotation:       info.Rotation,
+			HDR:            info.HDR,
+			DolbyVision:    info.DolbyVision,
+			ColorTransfer:  info.ColorTransfer,
+			ColorPrimaries: info.ColorPrimaries,
+			ColorSpace:     info.ColorSpace,
+			ColorRange:     info.ColorRange,
+			BitDepth:       info.BitDepth,
+			Audio:          info.Audio,
+		}
+
+		StoreCachedProbe(m.c.CacheDir(), m.fileid, m.etag, m.probe)
+	}
+
+	if m.c.RKMPP && m.probe.DolbyVision {
+		return fmt.Errorf("Dolby Vision is not supported by the v11 RKMPP pipeline")
+	}
+	if m.c.RKMPP && m.c.RKMPPStrict {
+		if !ffmpeg.SupportsRKMPPDecode(ffmpeg.Spec{CodecName: m.probe.CodecName, PixelFormat: m.probe.PixelFormat, BitDepth: m.probe.BitDepth}) {
+			return fmt.Errorf("source %s/%s cannot use RKMPP hardware decoding; software video fallback is disabled", m.probe.CodecName, m.probe.PixelFormat)
+		}
+		if m.probe.HDR && !m.c.RKMPPOpenCL {
+			return fmt.Errorf("HDR requires Mali OpenCL; CPU video fallback is disabled")
+		}
+	}
 	if m.probe.Width <= 0 || m.probe.Height <= 0 || m.probe.Duration <= 0 ||
 		(m.c.RKMPP && (m.probe.Width < 2 || m.probe.Height < 2)) {
 		return fmt.Errorf("invalid video dimensions or duration for file %d", m.fileid)
 	}
-	m.copyEligible = m.probe.Rotation == 0 && IsCodecPlayable(m.probe.CodecName, m.playableCodecs)
+
+	// Copy eligibility is cheap (codec + rotation); keyframes come later
+	// via EnsureCopySegments on direct.m3u8, so creation stays fast.
+	m.copyEligible = m.probe.Rotation == 0 && IsCodecPlayable(m.probe.CodecName, m.playableCodecs) &&
+		IsCodecFMP4(m.probe.CodecName)
 
 	if m.c.RKMPP {
-		m.copyEligible = m.copyEligible && m.probe.CodecName == CODEC_H264 && !m.probe.HDR && m.probe.BitDepth <= 8
-		if m.OutputCodec() == "hevc" {
-			m.copyEligible = false
-		}
+		m.copyEligible = m.copyEligible && m.probe.CodecName == m.OutputCodec() &&
+			!m.probe.HDR && m.probe.BitDepth <= 8
 	}
 
 	return nil
@@ -606,11 +756,25 @@ func (m *Manager) ffprobe() error {
 // probeCopy extracts keyframes and derives the copy grid.
 // Lock-free; EnsureCopySegments publishes the result under copyMu.
 func (m *Manager) probeCopy() ([]ffmpeg.Segment, error) {
-	keys, err := m.probeKeyframes()
+	cachePath := KeyframeCachePath(m.c.CacheDir(), m.fileid)
+	if frames, ok := LoadCachedTimeline(m.c.CacheDir(), m.fileid, m.etag); ok {
+		log.Printf("%s: keyframe cache hit %s", m.id, cachePath)
+		segs := ffmpeg.SourceSegments(frames, m.probe.Duration)
+		if len(segs) == 0 {
+			return nil, fmt.Errorf("no keyframe grid for file %d", m.fileid)
+		}
+		return segs, nil
+	}
+	log.Printf("%s: keyframe cache miss %s", m.id, cachePath)
+
+	frames, err := ffmpeg.ProbeTimeline(context.Background(), m.c.FFprobe, m.ffmpegInput(), m.inputHeaders())
 	if err != nil {
 		return nil, err
 	}
-	segs := ffmpeg.CopySegments(keys, m.probe.Duration, m.tc.ChunkSize)
+	if err := StoreCachedTimeline(m.c.CacheDir(), m.fileid, m.etag, frames); err != nil {
+		log.Printf("%s: keyframe cache store failed: %v", m.id, err)
+	}
+	segs := ffmpeg.SourceSegments(frames, m.probe.Duration)
 	if len(segs) == 0 {
 		return nil, fmt.Errorf("no keyframe grid for file %d", m.fileid)
 	}
@@ -627,7 +791,11 @@ func (m *Manager) downloadTemp() error {
 		req.Header.Set(ServiceTokenHeader, token)
 	}
 
-	res, err := UpstreamClient.Do(req)
+	client := &http.Client{
+		Timeout:   10 * time.Second,
+		Transport: m.c.Transport(),
+	}
+	res, err := client.Do(req)
 	if err != nil {
 		return err
 	}
@@ -683,27 +851,21 @@ func (m *Manager) ffmpegInput() string {
 	return m.url
 }
 
-func (m *Manager) AdaptiveStartBuffer() bool {
-	if !m.c.RKMPP {
-		return false
-	}
-	count := 0
-	for quality := range m.streams {
-		if quality != QUALITY_DIRECT && quality != QUALITY_AUDIO {
-			count++
-		}
-	}
-	return count > 1
-}
-
 // OutputCodec keeps the entire adaptive ladder on one codec. Missing or
 // negative client capability reports always select the H.264 fallback.
 func (m *Manager) OutputCodec() string {
+	// Keep a compatible AVC original and its fallback ladder on AVC rather
+	// than re-encoding it only because the browser also supports HEVC.
+	if m.c.RKMPP && m.c.RKMPPOutputCodec == "auto" && m.probe != nil &&
+		m.probe.CodecName == "h264" && !m.probe.HDR && m.probe.BitDepth <= 8 {
+		return "h264"
+	}
 	if m.c.RKMPP && m.c.RKMPPOutputCodec != "h264" && slices.Contains(m.playableCodecs, "hevc") {
 		return "hevc"
 	}
 	return "h264"
 }
+
 func balancedRKMPPBitrate(width, height, fps int) int {
 	return max(256000, int(float64(width)*float64(height)*2.4*math.Sqrt(float64(max(1, fps))/30)))
 }

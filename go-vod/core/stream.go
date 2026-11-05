@@ -2,6 +2,7 @@ package core
 
 import (
 	"bufio"
+	"context"
 	"io"
 	"log"
 	"net/http"
@@ -42,15 +43,27 @@ type Stream struct {
 	mutex  sync.Mutex
 	chunks map[int]*Chunk
 
-	coder        *exec.Cmd
-	coderDone    chan struct{}
-	coderFailed  bool
-	backpressure bool
-	resumed      *sync.Cond
+	// coder is the current transcode. It stays set after exiting, which
+	// keeps the Manager alive until the stream idles out; exited marks that.
+	coder  *exec.Cmd
+	exited bool
+	// Hardware input pacing replaces process suspension for this run.
+	paced bool
+	// closed is set by Stop; a stopped stream never starts another coder.
+	closed bool
 
-	tonemapOnce sync.Once
-	vaapiOpenCL bool
-	rkmppOpenCL bool
+	// run numbers transcode runs; each writes its own init file.
+	run int
+	// initPath is the first init a run finished; runs write identical inits.
+	initPath string
+	// initChunk signals the current run's init, like a segment chunk.
+	initChunk *Chunk
+
+	tonemapOnce   sync.Once
+	vaapiOpenCL   bool
+	nvencCUDA     bool
+	rkmppOpenCL   bool
+	hardwareError error
 
 	inactive int
 	stop     chan bool
@@ -59,7 +72,6 @@ type Stream struct {
 func (s *Stream) init() {
 	s.chunks = make(map[int]*Chunk)
 	s.stop = make(chan bool, 1)
-	s.resumed = sync.NewCond(&s.mutex)
 }
 
 func (s *Stream) Run() {
@@ -80,17 +92,13 @@ func (s *Stream) Run() {
 
 			s.inactive++
 
-			// Release an encoder after the configured stream idle interval.
-			if s.inactive >= s.c.StreamIdleTime/5 && s.coder != nil {
+			// Nothing done for StreamIdleTime
+			if s.inactive >= idleTicks(s.c.StreamIdleTime) && s.coder != nil {
 				s.clear()
 			}
 			s.mutex.Unlock()
 
 		case <-s.stop:
-			t.Stop()
-			s.mutex.Lock()
-			s.clear()
-			s.mutex.Unlock()
 			return
 		}
 	}
@@ -98,25 +106,33 @@ func (s *Stream) Run() {
 
 func (s *Stream) clear() {
 	log.Printf("%s-%s: stopping stream", s.m.id, s.quality)
-	coder, done := s.coder, s.coderDone
-	s.coder, s.coderDone = nil, nil
-	s.coderFailed = false
-	s.resumed.Broadcast()
-	if coder != nil && coder.Process != nil {
-		coder.Process.Kill()
-		if done != nil {
-			<-done
-		}
-	}
+
 	for _, chunk := range s.chunks {
-		chunk.signal(false)
-		os.Remove(s.getTsPath(chunk.id))
+		os.Remove(s.getSegmentPath(chunk.id))
 	}
+
 	s.chunks = make(map[int]*Chunk)
 	s.goal = 0
+
+	// Wake init waiters of the killed run; the init files stay.
+	if s.initChunk != nil {
+		s.initChunk.signal(false)
+	}
+
+	// supervise is the only waiter; it reaps the killed process.
+	if s.coder != nil {
+		s.coder.Process.Kill()
+		s.coder = nil
+	}
 }
 
+// Stop kills the transcode right away, so it can't outlive the Manager.
 func (s *Stream) Stop() {
+	s.mutex.Lock()
+	s.closed = true
+	s.clear()
+	s.mutex.Unlock()
+
 	select {
 	case s.stop <- true:
 	default:
@@ -124,51 +140,77 @@ func (s *Stream) Stop() {
 }
 
 func (s *Stream) ServeChunk(w http.ResponseWriter, id int) error {
-	status, err := s.ensureChunkReady(id)
-	if err != nil {
-		http.Error(w, "Could not start transcoder", http.StatusBadGateway)
-		return nil
-	}
-	if status != http.StatusOK {
-		w.WriteHeader(status)
-		return nil
-	}
-	s.returnChunk(w, id)
-	return nil
-}
-
-// ensureChunkReady chooses and starts an encoder under the same lock. Requests
-// for the same cold chunk then share its encoder and completion signal.
-func (s *Stream) ensureChunkReady(id int) (int, error) {
 	s.mutex.Lock()
 	s.inactive = 0
 	s.checkGoal(id)
 
 	chunk, ok := s.chunks[id]
-	restart := s.coderFailed && (!ok || !chunk.done)
 	if !ok {
-		// Restart unless a nearby chunk shows the transcode is close
-		restart = true
-		for i := id - 1; i >= id-s.c.LookBehind && i >= 0; i-- {
-			if _, ok := s.chunks[i]; ok && !s.coderFailed {
+		// Restart unless a live transcode is close: a nearby chunk exists
+		restart := true
+		for i := id - 1; s.coder != nil && !s.exited && i >= id-s.c.LookBehind && i >= 0; i-- {
+			if _, ok := s.chunks[i]; ok {
 				restart = false
 				break
 			}
 		}
-	}
-	if restart {
-		var err error
-		chunk, err = s.restartAtChunkLocked(id)
-		if err != nil {
+		if restart {
 			s.mutex.Unlock()
-			return http.StatusBadGateway, err
+			s.restartAtChunk(w, id)
+			return nil
 		}
-	} else if !ok {
 		chunk = s.createChunk(id)
 	}
 	s.mutex.Unlock()
 
-	return s.waitForChunkReady(chunk), nil
+	s.waitForChunk(w, chunk)
+	return nil
+}
+
+// ServeInit serves the init segment, starting a run when none can write it.
+// Runs write identical inits, so a waiter follows restarts instead of failing.
+func (s *Stream) ServeInit(w http.ResponseWriter) {
+	deadline := time.After(chunkWait)
+	for {
+		s.mutex.Lock()
+		s.inactive = 0
+		if s.initPath == "" && (s.coder == nil || s.exited) {
+			if s.closed {
+				s.mutex.Unlock()
+				w.WriteHeader(http.StatusConflict)
+				return
+			}
+			// Register chunk 0 like restartAtChunk, so its request
+			// waits on this run instead of restarting it.
+			s.clear()
+			s.createChunk(0)
+			s.goal = s.c.GoalBufferMax
+			s.transcode(0)
+		}
+		path, init := s.initPath, s.initChunk
+		s.mutex.Unlock()
+
+		if path != "" {
+			s.serveFile(w, path)
+			return
+		}
+
+		select {
+		case <-init.doneCh:
+		case <-deadline:
+			w.WriteHeader(http.StatusRequestTimeout)
+			return
+		}
+
+		// Our run died without writing an init and nothing replaced it.
+		s.mutex.Lock()
+		failed := s.initPath == "" && s.initChunk == init
+		s.mutex.Unlock()
+		if failed {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+	}
 }
 
 func (s *Stream) ServeFullVideo(w http.ResponseWriter, r *http.Request) error {
@@ -188,56 +230,60 @@ func (s *Stream) ServeFullVideo(w http.ResponseWriter, r *http.Request) error {
 		w.WriteHeader(http.StatusNoContent)
 		return nil
 	}
-	args := ffmpeg.MP4Args(s.transcodeSpec(0, false))
+	spec := s.transcodeSpec(0, false)
+	if s.hardwareError != nil {
+		w.WriteHeader(http.StatusUnsupportedMediaType)
+		return s.hardwareError
+	}
+	args := ffmpeg.MP4Args(spec)
 
-	coder := exec.Command(s.c.FFmpeg, args...)
+	coder := ffmpeg.Command(context.Background(), s.c.FFmpeg, args...)
 	log.Printf("%s-%s: %s", s.m.id, s.quality, strings.Join(ffmpeg.RedactArgs(coder.Args), " "))
 
-	cmdStdOut, cmdStdErr, err := startCommandPipes(coder)
+	cmdStdOut, cmdStdErr, err := startCoder(coder)
 	if err != nil {
-		http.Error(w, "Could not start transcoder", http.StatusBadGateway)
+		log.Printf("%s-%s: ffmpeg failed to start: %v", s.m.id, s.quality, err)
+		w.WriteHeader(http.StatusInternalServerError)
 		return err
 	}
-
-	defer func() {
-		if coder.Process != nil {
-			coder.Process.Kill()
-		}
-		coder.Wait()
+	stderrDone := make(chan struct{})
+	go func() {
+		s.monitorStderr(cmdStdErr)
+		close(stderrDone)
 	}()
-	go s.monitorStderr(cmdStdErr)
 
 	// Write to response
 	defer cmdStdOut.Close()
 	stdoutReader := bufio.NewReader(cmdStdOut)
 
-	// Write mov headers
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "Server does not support Flusher!",
-			http.StatusInternalServerError)
-		return nil
-	}
 	w.Header().Set("Content-Type", "video/mp4")
 	w.WriteHeader(http.StatusOK)
 
-	// Copy through a 1 MiB buffer and flush each write.
+	// Write data, flusing every 1MB
 	buf := make([]byte, 1024*1024)
 	for {
-		n, readErr := stdoutReader.Read(buf)
-		if n > 0 {
-			if _, err := w.Write(buf[:n]); err != nil {
+		n, err := stdoutReader.Read(buf)
+		if err != nil {
+			if err == io.EOF {
 				break
 			}
-			flusher.Flush()
-		}
-		if readErr != nil {
-			if readErr != io.EOF {
-				log.Printf("transcoder output: %v", readErr)
-			}
+			log.Printf("FATAL: ffmpeg command failed with %s\n", err)
 			break
 		}
+
+		_, err = w.Write(buf[:n])
+		if err != nil {
+			log.Printf("%s-%s: client closed connection", s.m.id, s.quality)
+			log.Println(err)
+			break
+		}
+		w.(http.Flusher).Flush()
 	}
+
+	// Terminate ffmpeg; Wait closes the pipes, so drain stderr first
+	coder.Process.Kill()
+	<-stderrDone
+	coder.Wait()
 
 	return nil
 }
@@ -255,44 +301,27 @@ func (s *Stream) pruneChunk(id int) {
 	delete(s.chunks, id)
 
 	// Remove file
-	filename := s.getTsPath(id)
+	filename := s.getSegmentPath(id)
 	os.Remove(filename)
 }
 
 func (s *Stream) returnChunk(w http.ResponseWriter, id int) {
-	f, status := s.openChunk(id)
-	if status != http.StatusOK {
-		w.WriteHeader(status)
+	s.serveFile(w, s.getSegmentPath(id))
+}
+
+func (s *Stream) serveFile(w http.ResponseWriter, filename string) {
+	f, err := os.Open(filename)
+	if err != nil {
+		log.Println(err)
+		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 	defer f.Close()
-	w.Header().Set("Content-Type", "video/MP2T")
+	w.Header().Set("Content-Type", "video/mp4")
 	io.Copy(w, f)
 }
 
-func (s *Stream) openChunk(id int) (*os.File, int) {
-	f, err := os.Open(s.getTsPath(id))
-	if err != nil {
-		log.Println(err)
-		return nil, http.StatusInternalServerError
-	}
-	info, err := f.Stat()
-	if err != nil || info.Size() == 0 {
-		f.Close()
-		return nil, http.StatusBadGateway
-	}
-	return f, http.StatusOK
-}
-
 func (s *Stream) waitForChunk(w http.ResponseWriter, chunk *Chunk) {
-	if status := s.waitForChunkReady(chunk); status != http.StatusOK {
-		w.WriteHeader(status)
-		return
-	}
-	s.returnChunk(w, chunk.id)
-}
-
-func (s *Stream) waitForChunkReady(chunk *Chunk) int {
 	s.mutex.Lock()
 	done := chunk.done
 	doneCh := chunk.doneCh
@@ -300,7 +329,8 @@ func (s *Stream) waitForChunkReady(chunk *Chunk) int {
 	s.mutex.Unlock()
 
 	if done {
-		return http.StatusOK
+		s.returnChunk(w, chunk.id)
+		return
 	}
 
 	select {
@@ -313,28 +343,34 @@ func (s *Stream) waitForChunkReady(chunk *Chunk) int {
 	s.mutex.Lock()
 	current, ok := s.chunks[chunk.id]
 	finished := ok && current.done
-	restarted := coder != s.coder
-	failed := s.coderFailed
+	restarted := coder != s.coder && s.coder != nil
 	s.mutex.Unlock()
 
 	if finished {
-		return http.StatusOK
+		s.returnChunk(w, chunk.id)
+		return
 	}
 
-	// Check if coder was changed
+	// Check if coder was replaced, not merely exited or cleared
 	if restarted {
-		return http.StatusConflict
-	}
-	if failed {
-		return http.StatusBadGateway
+		w.WriteHeader(http.StatusConflict)
+		return
 	}
 
 	// Return timeout error
-	return http.StatusRequestTimeout
+	w.WriteHeader(http.StatusRequestTimeout)
 }
 
-// restartAtChunkLocked requires s.mutex and leaves it held.
-func (s *Stream) restartAtChunkLocked(id int) (*Chunk, error) {
+func (s *Stream) restartAtChunk(w http.ResponseWriter, id int) {
+	s.mutex.Lock()
+
+	// A request raced Manager teardown; the retry reaches a new Manager.
+	if s.closed {
+		s.mutex.Unlock()
+		w.WriteHeader(http.StatusConflict)
+		return
+	}
+
 	// Stop current transcoder
 	s.clear()
 
@@ -342,12 +378,10 @@ func (s *Stream) restartAtChunkLocked(id int) (*Chunk, error) {
 
 	// Start the transcoder
 	s.goal = id + s.c.GoalBufferMax
-	if err := s.transcode(id); err != nil {
-		delete(s.chunks, id)
-		chunk.signal(false)
-		return nil, err
-	}
-	return chunk, nil
+	s.transcode(id)
+	s.mutex.Unlock()
+
+	s.waitForChunk(w, chunk) // this is also a request
 }
 
 func (s *Stream) spec(startAt float64, isHls bool) ffmpeg.Spec {
@@ -356,25 +390,46 @@ func (s *Stream) spec(startAt float64, isHls bool) ffmpeg.Spec {
 	// fine without keyframes, so it always copies.
 	_, grid := s.m.CopySegments()
 	width, height := s.width, s.height
-	if s.quality != QUALITY_MAX && s.quality != QUALITY_DIRECT && s.m.probe.Width < s.m.probe.Height {
+	// The ladder stores low qualities as long-edge x short-edge, but FFmpeg
+	// scales *before* applying display-matrix rotation. Feed RGA dimensions
+	// in the source's raw orientation. Max/direct already use raw dimensions.
+	if s.c.RKMPP && s.quality != QUALITY_MAX && s.quality != QUALITY_DIRECT &&
+		!isAudioQuality(s.quality) && s.m.probe.Width < s.m.probe.Height {
 		width, height = height, width
 	}
-	return ffmpeg.Spec{
-		AudioOnly:     s.quality == QUALITY_AUDIO,
-		SeparateAudio: isHls && s.quality != QUALITY_AUDIO && s.m.HasStream(QUALITY_AUDIO),
-		EndAt:         s.m.Duration().Seconds(),
-		Bin:           s.c.FFmpeg,
-		Input:         s.m.ffmpegInput(),
-		Headers:       s.m.inputHeaders(),
-		StartAt:       startAt,
-		HLS:           isHls,
 
-		RKMPP:          s.c.RKMPP,
-		OutputCodec:    s.m.OutputCodec(),
-		Bitrate:        s.bitrate,
-		CodecName:      s.m.probe.CodecName,
-		FrameRateExact: s.m.probe.FrameRateExact,
-		PixelFormat:    s.m.probe.PixelFormat,
+	// The shared audio stream is audio-only; video renditions mute their own
+	// audio so the player uses the single shared AAC track instead.
+	audioOnly := s.c.RKMPP && isAudioQuality(s.quality)
+	separateAudio := s.c.RKMPP && isHls && !audioOnly && s.m.HasStream(QUALITY_AUDIO)
+	var keyframeGrid *ffmpeg.RKMPPKeyframeGrid
+	if isHls {
+		keyframeGrid = s.m.AlignedGrid(s.quality)
+	}
+
+	// EndAt bounds the audio padding so the stream doesn't outlast the video.
+	endAt := 0.0
+	if audioOnly {
+		endAt = s.m.probe.Duration.Seconds()
+	}
+	forceSwTranspose := s.m.tc.ForceSwTranspose
+	if s.c.RKMPP && s.c.RKMPPStrict {
+		forceSwTranspose = false
+	}
+
+	return ffmpeg.Spec{
+		Bin:     s.c.FFmpeg,
+		Input:   s.m.ffmpegInput(),
+		Headers: s.m.inputHeaders(),
+		StartAt: startAt,
+		HLS:     isHls,
+
+		RKMPP:            s.c.RKMPP,
+		RKMPPOutputCodec: s.m.OutputCodec(),
+		Bitrate:          s.bitrate,
+		PixelFormat:      s.m.probe.PixelFormat,
+		FrameRateExact:   s.m.probe.FrameRateExact,
+
 		Quality:        s.quality,
 		Width:          width,
 		Height:         height,
@@ -382,10 +437,20 @@ func (s *Stream) spec(startAt float64, isHls bool) ffmpeg.Spec {
 		FrameRate:      s.m.probe.FrameRate,
 		Rotation:       s.m.probe.Rotation,
 		HDR:            s.m.probe.HDR,
+		ColorTransfer:  s.m.probe.ColorTransfer,
+		ColorPrimaries: s.m.probe.ColorPrimaries,
+		ColorSpace:     s.m.probe.ColorSpace,
+		ColorRange:     s.m.probe.ColorRange,
 		BitDepth:       s.m.probe.BitDepth,
 		Audio:          s.m.probe.Audio,
+		AudioOnly:      audioOnly,
+		AudioBitrate:   s.bitrate,
+		SeparateAudio:  separateAudio,
+		EndAt:          endAt,
 		ChunkSize:      s.m.tc.ChunkSize,
+		KeyframeGrid:   keyframeGrid,
 		Copy:           s.quality == QUALITY_DIRECT && (!isHls || grid),
+		CodecName:      s.m.probe.CodecName,
 
 		VAAPI:           s.m.tc.VAAPI,
 		VAAPILowPower:   s.m.tc.VAAPILowPower,
@@ -395,12 +460,12 @@ func (s *Stream) spec(startAt float64, isHls bool) ffmpeg.Spec {
 		NVENCScale:      s.m.tc.NVENCScale,
 
 		UseTranspose:     s.m.tc.UseTranspose,
-		ForceSwTranspose: s.m.tc.ForceSwTranspose,
+		ForceSwTranspose: forceSwTranspose,
 		UseGopSize:       s.m.tc.UseGopSize,
 	}
 }
 
-func (s *Stream) transcode(startId int) error {
+func (s *Stream) transcode(startId int) {
 	var startNumber int
 	var startAt float64
 
@@ -411,11 +476,18 @@ func (s *Stream) transcode(startId int) error {
 		startNumber = startId
 		startAt = 0
 		if startId > 0 {
-			startAt = segs[startId].Start + copySeekEpsilon
+			startAt = segs[startId].Start
+			if segs[startId].KeyframeAt != 0 {
+				startAt = segs[startId].KeyframeAt
+			}
+			startAt += copySeekEpsilon
 		}
+	} else if grid := s.m.AlignedGrid(s.quality); grid != nil {
+		startNumber = startId
+		startAt = grid.Segments[startId].Start
 	} else if startId > 0 {
-		// Other backends warm up one segment earlier. RKMPP uses the exact
-		// requested segment clock shared by every adaptive rendition.
+		// Start one frame before.
+		// This ensures that the keyframes are aligned.
 		startNumber = startId - 1
 		if s.c.RKMPP {
 			startNumber = startId
@@ -423,33 +495,60 @@ func (s *Stream) transcode(startId int) error {
 		startAt = float64(startNumber * s.m.tc.ChunkSize)
 	}
 
-	spec := s.transcodeSpec(startAt, true)
-	s.backpressure = ffmpeg.IsRKMPPEncoder(ffmpeg.Encoder(spec))
-	args := ffmpeg.SegmentArgs(spec, startNumber, s.getTsPath(-1))
+	s.run++
+	initPath := ffmpeg.InitPath(s.m.tempDir, s.quality, s.run)
+	s.initChunk = NewChunk(-1)
 
-	// Start the process
-	s.coder = exec.Command(s.c.FFmpeg, args...)
-	s.coderFailed = false
+	spec := s.transcodeSpec(startAt, true)
+	if s.hardwareError != nil {
+		log.Printf("%s-%s: hardware video required: %v", s.m.id, s.quality, s.hardwareError)
+		s.exited = true
+		s.failChunks()
+		return
+	}
+	args := ffmpeg.SegmentArgs(spec, startNumber, s.getSegmentPath(-1), initPath)
+	s.paced = ffmpeg.RKMPPInputPaced(spec)
+	coder := ffmpeg.Command(context.Background(), s.c.FFmpeg, args...)
 
 	// Log command, quoting the args as needed
-	log.Printf("%s-%s: %s", s.m.id, s.quality, ffmpeg.QuoteForLog(ffmpeg.RedactArgs(s.coder.Args)))
+	log.Printf("%s-%s: %s", s.m.id, s.quality, ffmpeg.QuoteForLog(ffmpeg.RedactArgs(coder.Args)))
 
-	coder := s.coder
-	cmdStdOut, cmdStdErr, err := startCommandPipes(coder)
+	cmdStdOut, cmdStdErr, err := startCoder(coder)
 	if err != nil {
-		log.Printf("%s-%s: could not start transcoder: %v", s.m.id, s.quality, err)
-		s.coder = nil
-		return err
+		log.Printf("%s-%s: ffmpeg failed to start: %v", s.m.id, s.quality, err)
+		s.failChunks()
+		return
 	}
-	if s.backpressure {
-		boundProgressPipe(cmdStdOut)
+	s.coder = coder
+	s.exited = false
+
+	go s.supervise(coder, initPath, cmdStdOut, cmdStdErr)
+}
+
+// startCoder starts the command with stdout and stderr piped.
+func startCoder(cmd *exec.Cmd) (stdout, stderr io.ReadCloser, err error) {
+	if stdout, err = cmd.StdoutPipe(); err != nil {
+		return nil, nil, err
 	}
-	done := make(chan struct{})
-	s.coderDone = done
-	go s.monitorTranscodeOutput(cmdStdOut, coder)
-	go s.monitorStderr(cmdStdErr)
-	go s.monitorExit(coder, done)
-	return nil
+	if stderr, err = cmd.StderrPipe(); err != nil {
+		return nil, nil, err
+	}
+	return stdout, stderr, cmd.Start()
+}
+
+// failChunks wakes and drops unfinished chunks, so waiters fail fast and
+// retries restart the transcode instead of waiting on a dead one.
+// Caller must hold s.mutex.
+func (s *Stream) failChunks() {
+	if s.initChunk != nil {
+		s.initChunk.signal(false)
+	}
+	for id, chunk := range s.chunks {
+		if !chunk.done {
+			chunk.signal(false)
+			delete(s.chunks, id)
+		}
+	}
 }
 
 func (s *Stream) checkGoal(id int) {
@@ -458,18 +557,14 @@ func (s *Stream) checkGoal(id int) {
 		s.goal = id + s.c.GoalBufferMax
 
 		// resume encoding
-		if s.coder != nil {
+		if s.coder != nil && !s.exited && !s.paced {
 			log.Printf("%s-%s: resuming transcoding", s.m.id, s.quality)
-			if s.backpressure {
-				s.resumed.Broadcast()
-			} else {
-				s.coder.Process.Signal(syscall.SIGCONT)
-			}
+			s.coder.Process.Signal(syscall.SIGCONT)
 		}
 	}
 }
 
-func (s *Stream) getTsPath(id int) string {
+func (s *Stream) getSegmentPath(id int) string {
 	if id == -1 {
 		return ffmpeg.SegmentPattern(s.m.tempDir, s.quality)
 	}
@@ -477,11 +572,11 @@ func (s *Stream) getTsPath(id int) string {
 }
 
 // Separate goroutine
-func (s *Stream) monitorTranscodeOutput(cmdStdOut io.ReadCloser, coder *exec.Cmd) {
-
+func (s *Stream) monitorTranscodeOutput(coder *exec.Cmd, initPath string, cmdStdOut io.ReadCloser) {
 	defer cmdStdOut.Close()
 	stdoutReader := bufio.NewReader(cmdStdOut)
 	seen := make(map[int]bool)
+	initSeen := false
 
 	for {
 		s.mutex.Lock()
@@ -518,19 +613,24 @@ func (s *Stream) monitorTranscodeOutput(cmdStdOut io.ReadCloser, coder *exec.Cmd
 			s.mutex.Lock()
 			// The coder has changed; do nothing
 			if s.coder == coder {
+				// The muxer writes the init before listing any segment. Runs
+				// write identical inits, so keep the first: replacing it could
+				// delete a file ServeInit is about to open.
+				if !initSeen {
+					initSeen = true
+					if s.initPath == "" {
+						s.initPath = initPath
+					} else {
+						os.Remove(initPath)
+					}
+					s.initChunk.signal(true)
+				}
 				s.createChunk(id).signal(true)
 
 				// Check goal satisfied
-				if id >= s.goal {
+				if id >= s.goal && !s.paced {
 					log.Printf("%s-%s: goal satisfied: %d", s.m.id, s.quality, s.goal)
-					if s.backpressure {
-						// Block the muxer pipe while asynchronous hardware workers finish.
-						for s.coder == coder && id >= s.goal {
-							s.resumed.Wait()
-						}
-					} else {
-						s.coder.Process.Signal(syscall.SIGSTOP)
-					}
+					s.coder.Process.Signal(syscall.SIGSTOP)
 				}
 			}
 			s.mutex.Unlock()
@@ -539,7 +639,6 @@ func (s *Stream) monitorTranscodeOutput(cmdStdOut io.ReadCloser, coder *exec.Cmd
 }
 
 func (s *Stream) monitorStderr(cmdStdErr io.ReadCloser) {
-	defer cmdStdErr.Close()
 	stderrReader := bufio.NewReader(cmdStdErr)
 
 	for {
@@ -558,66 +657,31 @@ func (s *Stream) monitorStderr(cmdStdErr io.ReadCloser) {
 	}
 }
 
-func (s *Stream) monitorExit(coder *exec.Cmd, done chan struct{}) {
-	err := coder.Wait()
-	close(done)
-
-	// Try to get exit status
-	if exitError, ok := err.(*exec.ExitError); ok {
-		exitcode := exitError.ExitCode()
-		log.Printf("%s-%s: ffmpeg exited with status: %d", s.m.id, s.quality, exitcode)
-
-		s.mutex.Lock()
-		defer s.mutex.Unlock()
-
-		// An unsuccessful exit must not leave a dead encoder cached forever.
-		if s.coder == coder {
-			s.coderFailed = true
-			// Wake pending requests to report the failure immediately.
-			// The next request restarts the encoder; completed chunks remain usable.
-			for _, chunk := range s.chunks {
-				chunk.signal(false)
-			}
-		}
-	}
-}
-
-func (s *Stream) ServeStartupChunk(w http.ResponseWriter) {
-	parts := 1
-	if s.m.Duration().Seconds() > float64(s.m.tc.ChunkSize) {
-		parts = 2
-	}
-	for i := 0; i < parts; i++ {
-		status, err := s.ensureChunkReady(i)
-		if err != nil {
-			http.Error(w, "Could not start transcoder", http.StatusBadGateway)
-			return
-		}
-		if status != http.StatusOK {
-			w.WriteHeader(status)
-			return
-		}
-	}
-	// Open and validate every part before writing a response. Holding the files
-	// open also keeps them readable if supervision prunes their paths meanwhile.
-	files := make([]*os.File, 0, parts)
-	defer func() {
-		for _, f := range files {
-			f.Close()
-		}
+// supervise reads the coder's output to EOF before reaping it, since Wait
+// closes the pipes and would drop the final segment lines.
+func (s *Stream) supervise(coder *exec.Cmd, initPath string, stdout, stderr io.ReadCloser) {
+	stderrDone := make(chan struct{})
+	go func() {
+		s.monitorStderr(stderr)
+		close(stderrDone)
 	}()
-	for i := 0; i < parts; i++ {
-		f, status := s.openChunk(i)
-		if status != http.StatusOK {
-			w.WriteHeader(status)
-			return
-		}
-		files = append(files, f)
+	s.monitorTranscodeOutput(coder, initPath, stdout)
+	<-stderrDone
+	err := coder.Wait()
+
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	// Our own kills clear or replace s.coder first; nothing to do then.
+	if s.coder != coder {
+		return
 	}
-	w.Header().Set("Content-Type", "video/MP2T")
-	for _, f := range files {
-		if _, err := io.Copy(w, f); err != nil {
-			return
-		}
+	if err != nil {
+		log.Printf("%s-%s: ffmpeg exited: %v", s.m.id, s.quality, err)
 	}
+
+	// Chunks still pending will never be produced, even on a clean exit
+	// (e.g. past EOF). Wake them, and let the next request restart.
+	s.exited = true
+	s.failChunks()
 }

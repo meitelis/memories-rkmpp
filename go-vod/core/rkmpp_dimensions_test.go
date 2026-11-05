@@ -17,6 +17,7 @@ func TestRKMPPUnusualAspectRatiosKeepLowerRenditions(t *testing.T) {
 			cfg := config.Defaults("test")
 			cfg.RKMPP = true
 			cfg.TempDir = t.TempDir()
+			cfg.CacheDir_ = t.TempDir()
 			probe := fmt.Sprintf("{\"streams\":[{\"codec_type\":\"video\",\"codec_name\":\"hevc\",\"width\":%d,\"height\":%d,\"duration\":\"12\",\"avg_frame_rate\":\"30/1\",\"bit_rate\":\"7000000\",\"side_data_list\":[{\"side_data_type\":\"Display Matrix\",\"rotation\":%d}]}]}", source.width, source.height, source.rotation)
 			cfg.FFprobe = stubCopyProbe(t, probe, "", false)
 			m, err := NewManager(NewManagerArgs{C: cfg, ManagerParams: ManagerParams{StreamID: "aspect", URL: "http://localhost/video", PlayableCodecs: []string{"hevc"}, TConfig: config.TCfg{ChunkSize: 3}}, Idle: make(chan IdleEvent, 1)})
@@ -32,6 +33,10 @@ func TestRKMPPUnusualAspectRatiosKeepLowerRenditions(t *testing.T) {
 					width, height = height, width
 				}
 				args := strings.Join(ffmpeg.BuildArgs(spec), " ")
+				if spec.Copy {
+					require.Contains(t, args, "-c:v copy")
+					continue
+				}
 				require.Contains(t, args, fmt.Sprintf("w=%d:h=%d", width, height))
 			}
 		})
@@ -42,6 +47,7 @@ func TestRKMPPMaxDimensionsAreEven(t *testing.T) {
 	cfg := config.Defaults("test")
 	cfg.RKMPP = true
 	cfg.TempDir = t.TempDir()
+	cfg.CacheDir_ = t.TempDir()
 	cfg.FFprobe = stubCopyProbe(t, "{\"streams\":[{\"codec_type\":\"video\",\"codec_name\":\"hevc\",\"width\":1281,\"height\":721,\"duration\":\"2\",\"bit_rate\":\"1000000\"}]}", "", false)
 	m, err := NewManager(NewManagerArgs{C: cfg, ManagerParams: ManagerParams{StreamID: "odd", URL: "http://localhost/video", TConfig: config.TCfg{ChunkSize: 3}}, Idle: make(chan IdleEvent, 1)})
 	require.NoError(t, err)
@@ -56,7 +62,7 @@ func TestRKMPPMaxDimensionsAreEven(t *testing.T) {
 
 func TestOutOfRangeChunksDoNotStartAnEncoder(t *testing.T) {
 	m := &Manager{c: &config.Config{RKMPP: true}, tc: config.TCfg{ChunkSize: 3}, probe: &ProbeVideoData{Duration: 10 * time.Second}, streams: map[string]*Stream{"720p": {quality: "720p"}, "max": {quality: "max"}}}
-	for _, id := range []int{-1, 3, 999999} {
+	for _, id := range []int{-1, 4, 999999} {
 		require.False(t, m.ServeChunk(nil, "720p", id))
 	}
 }

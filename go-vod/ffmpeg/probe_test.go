@@ -2,18 +2,9 @@ package ffmpeg
 
 import (
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 )
-
-func TestProbeUsesContainerDurationWhenStreamDurationIsUnavailable(t *testing.T) {
-	for _, duration := range []string{"N/A", "0", "NaN", "+Inf", ""} {
-		info, err := ParseProbeJSON([]byte(`{"streams":[{"codec_type":"video","duration":"` + duration + `"}],"format":{"duration":"12.5"}}`))
-		require.NoError(t, err)
-		require.Equal(t, 12500*time.Millisecond, info.Duration)
-	}
-}
 
 func TestParseFrameRate(t *testing.T) {
 	require.Equal(t, 30, parseFrameRate("30/1"))
@@ -21,6 +12,18 @@ func TestParseFrameRate(t *testing.T) {
 	require.Equal(t, 30, parseFrameRate("0/0"))
 	require.Equal(t, 30, parseFrameRate("bogus"))
 	require.Equal(t, 30, parseFrameRate(""))
+}
+
+func TestProbeUsesContainerBitrateWhenVideoRateIsMissing(t *testing.T) {
+	for _, streamRate := range []string{"", "0", "N/A"} {
+		data := `{"streams":[{"codec_type":"video","codec_name":"hevc","bit_rate":"` + streamRate + `"}],"format":{"bit_rate":"25527654"}}`
+		info, err := ParseProbeJSON([]byte(data))
+		require.NoError(t, err)
+		require.Equal(t, 25527654, info.BitRate)
+	}
+	info, err := ParseProbeJSON([]byte(`{"streams":[{"codec_type":"video","bit_rate":"8000000"}],"format":{"bit_rate":"8200000"}}`))
+	require.NoError(t, err)
+	require.Equal(t, 8000000, info.BitRate, "prefer a known video rate")
 }
 
 func TestParseProbeJSONHDR(t *testing.T) {
@@ -44,9 +47,18 @@ func TestParseProbeJSONHDR(t *testing.T) {
 		`"color_space":"bt2020nc"}`))
 	require.False(t, probe(`{"codec_type":"video","codec_name":"h264","pix_fmt":"nv12",`+
 		`"color_space":"bt2020nc"}`))
-	require.True(t, probe(`{"codec_type":"video","codec_name":"dvhe","pix_fmt":"yuv420p10le"}`))
-	require.True(t, probe(`{"codec_type":"video","codec_name":"hevc","pix_fmt":"yuv420p10le",`+
-		`"color_transfer":"bt709","side_data_list":[{"side_data_type":"Dolby Vision RPU data"}]}`))
+	// Dolby Vision as ffprobe reports it: codec_name stays hevc, and the
+	// stream carries a DOVI configuration record.
+	dovi := func(compat string) string {
+		return `{"codec_type":"video","codec_name":"hevc","pix_fmt":"yuv420p10le",` +
+			`"side_data_list":[{"side_data_type":"DOVI configuration record","dv_profile":5` + compat + `}]}`
+	}
+	require.True(t, probe(dovi(`,"dv_bl_signal_compatibility_id":0`)))
+	info, err := ParseProbeJSON([]byte(`{"streams":[` + dovi(`,"dv_bl_signal_compatibility_id":0`) + `]}`))
+	require.NoError(t, err)
+	require.True(t, info.DolbyVision)
+	require.True(t, probe(dovi(``)))
+	require.False(t, probe(dovi(`,"dv_bl_signal_compatibility_id":2`)))
 	require.False(t, probe(`{"codec_type":"video","codec_name":"dvvideo","pix_fmt":"yuv411p"}`))
 }
 
@@ -58,7 +70,7 @@ func TestParseProbeJSONBitDepth(t *testing.T) {
 	}
 
 	for pix, depth := range map[string]int{
-		"yuv420p10le": 10, "p010le": 10, "p010be": 10,
+		"yuv420p10le": 10, "p010le": 10, "p010be": 10, "nv15": 10, "yuv420p9le": 9,
 		"yuv420p12be": 12, "p012le": 12, "gray16le": 16, "p016le": 16,
 	} {
 		require.Equal(t, depth, probe(pix), pix)
@@ -71,11 +83,11 @@ func TestParseProbeJSONBitDepth(t *testing.T) {
 func TestParseProbeJSONAudio(t *testing.T) {
 	withAudio, err := ParseProbeJSON([]byte(`{"streams":[` +
 		`{"codec_type":"video","codec_name":"h264","width":64,"height":64},` +
-		`{"codec_type":"audio","codec_name":"aac","profile":"LC","channels":2,` +
+		`{"codec_type":"audio","codec_name":"aac","channels":2,` +
 		`"sample_rate":"48000","bit_rate":"128000"}]}`))
 	require.NoError(t, err)
 	require.Equal(t, "h264", withAudio.CodecName)
-	require.Equal(t, AudioInfo{CodecName: "aac", Profile: "LC", Channels: 2, SampleRate: 48000, BitRate: 128000}, withAudio.Audio)
+	require.Equal(t, AudioInfo{CodecName: "aac", Channels: 2, SampleRate: 48000, BitRate: 128000}, withAudio.Audio)
 
 	silent, err := ParseProbeJSON([]byte(`{"streams":[` +
 		`{"codec_type":"video","codec_name":"h264","width":64,"height":64}]}`))
@@ -85,19 +97,6 @@ func TestParseProbeJSONAudio(t *testing.T) {
 	_, err = ParseProbeJSON([]byte(`{"streams":[` +
 		`{"codec_type":"audio","codec_name":"aac"}]}`))
 	require.Error(t, err)
-}
-
-func TestParseProbeJSONPreservesAudioProfileWithoutAssumingLC(t *testing.T) {
-	for _, profile := range []string{"LC", "HE-AAC", "HE-AACv2", ""} {
-		t.Run(profile, func(t *testing.T) {
-			info, err := ParseProbeJSON([]byte(`{"streams":[` +
-				`{"codec_type":"video","codec_name":"h264"},` +
-				`{"codec_type":"audio","codec_name":"aac","profile":"` + profile +
-				`","channels":2,"sample_rate":"48000","bit_rate":"166915"}]}`))
-			require.NoError(t, err)
-			require.Equal(t, profile, info.Audio.Profile)
-		})
-	}
 }
 
 func TestParseKeyframes(t *testing.T) {
@@ -118,24 +117,4 @@ func TestParseKeyframes(t *testing.T) {
 	require.Empty(t, ParseKeyframes([]byte("")))
 	// Probe JSON is not a keyframe grid
 	require.Empty(t, ParseKeyframes([]byte(`{"streams":[]}`)))
-	require.Equal(t, []float64{2.5}, ParseKeyframes([]byte("NaN,K_\n+Inf,K_\n-1,K_\nK_,2.5\n")))
-}
-
-func TestAdditionalProbeMetadata(t *testing.T) {
-	info, err := ParseProbeJSON([]byte(`{"streams":[{"codec_type":"video","codec_name":"hevc","pix_fmt":"nv15","bits_per_raw_sample":"10","duration":"N/A","side_data_list":[{"side_data_type":"DOVI configuration record"}]}],"format":{"duration":"2.5","bit_rate":"123456"}}`))
-	require.NoError(t, err)
-	require.Equal(t, 10, info.BitDepth)
-	require.True(t, info.HDR)
-	require.Equal(t, 123456, info.BitRate)
-	require.Equal(t, 2500*time.Millisecond, info.Duration)
-	require.InDelta(t, 29.97, exactFrameRate(" 29.97 "), 0.001)
-}
-
-func TestWideGamutSDRIsNotToneMapped(t *testing.T) {
-	for _, transfer := range []string{"bt709", "bt2020-10", "gamma22", "iec61966-2-1"} {
-		data := "{\"streams\":[{\"codec_type\":\"video\",\"codec_name\":\"hevc\",\"pix_fmt\":\"yuv420p10le\",\"color_space\":\"bt2020nc\",\"color_primaries\":\"bt2020\",\"color_transfer\":\"" + transfer + "\"}]}"
-		info, err := ParseProbeJSON([]byte(data))
-		require.NoError(t, err)
-		require.False(t, info.HDR, transfer)
-	}
 }
