@@ -74,6 +74,7 @@
       const criticalBuffer = Math.min(4, targetBuffer * 0.25);
       if (!playing || !auto || (seeking && this.phase !== 'seeking')) {
         this.healthySince = null;
+        this.recoveryHealthySince = null;
         return this.result(cancel);
       }
       // A metadata-sized buffer is normal before playback has warmed up.
