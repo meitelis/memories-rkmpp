@@ -47,6 +47,13 @@ func buildRKMPPAudioArgs(s Spec) []string {
 		}
 		args = append(args, remoteInputArgs(s.Headers)...)
 		args = append(args, "-i", s.Input, "-copyts", "-fflags", "+genpts", "-vn", "-map", "0:a:0", "-c:a", "copy")
+		if s.HLS {
+			// AAC priming can have negative DTS/PTS even when the MP4's
+			// presentation starts at zero. tfdt is unsigned: retaining that
+			// packet wraps browser audio timing and stalls after segment 0.
+			// Drop preroll packets without decoding/re-encoding source audio.
+			args = append(args, "-bsf:a", "noise=amount=0:drop='lt(pts,0)'")
+		}
 		if s.StartAt > 0 {
 			args = append(args, "-copypriorss:a", "0")
 		}

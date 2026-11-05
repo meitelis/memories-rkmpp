@@ -1,6 +1,17 @@
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
-const {chooseLevel, audioProfile, selectQuality, selectAudio, renditionText, configure} = require('./player.js');
+const {chooseLevel, audioProfile, selectQuality, selectAudio, beginSeek, renditionText, configure} = require('./player.js');
+
+test('a seek respects an earlier downshift while Original pictures are still buffered',()=>{
+  const state={selected:'auto',cap:0,hls:{currentLevel:6},policy:{beginSeek(){this.seeking=true}},inflight:{}};
+  beginSeek(state);
+  assert.equal(state.hls.loadLevel,0);
+  assert.equal(state.seekLevel,0);
+  assert.equal(state.inflight,null);
+  assert.equal(state.policy.seeking,true);
+  state.cap=6;beginSeek(state);
+  assert.equal(state.hls.loadLevel,6,'a fast-network seek keeps Original');
+});
 
 test('runtime audio changes schedule the next track without flushing current audio', () => {
   const hls={set audioTrack(_) {throw Error('immediate audio flush');}};

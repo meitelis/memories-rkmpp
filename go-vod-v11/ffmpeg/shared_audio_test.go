@@ -32,6 +32,15 @@ func TestSharedAudioArgsAreAudioOnly(t *testing.T) {
 	}
 }
 
+func TestSharedCopiedAACDoesNotPublishNegativePriming(t *testing.T) {
+	s := Spec{RKMPP: true, HLS: true, AudioOnly: true, EndAt: 12,
+		Audio: AudioInfo{CodecName: "aac", Profile: "LC", Channels: 2,
+			SampleRate: 48000, BitRate: 160000, DurationSeconds: 12}}
+	args := BuildArgs(s)
+	assertHasPair(t, args, "-c:a", "copy")
+	assertHasPair(t, args, "-bsf:a", "noise=amount=0:drop='lt(pts,0)'")
+}
+
 // TestSharedAudioArgsContainApad checks the apad filter is inserted when
 // EndAt > StartAt, keeping audio duration equal to video duration.
 func TestSharedAudioArgsContainApad(t *testing.T) {

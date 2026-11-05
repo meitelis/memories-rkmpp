@@ -3,6 +3,12 @@
 Do not merge while the reported Android startup/seek failures remain unverified.
 Use actual library videos; keep filenames, file IDs, credentials and captures out of Git.
 
+Latest blocker: the two-second freeze is reproduced. Copied AAC priming produced
+an invalid unsigned MP4 decode timestamp and a nearly 25-hour browser audio jump.
+The r3 source drops negative priming packets without re-encoding audio; its new
+raw-box regression and live retest are in progress. Runtime r2 remains deployed
+until that validation completes. Adapter 1.1.10 adds local loader-state diagnostics.
+
 ## Deployment and checks
 
 - Native adapter 1.1.7; runtime image memories-11.0.2-govod-0.7.0-r2.
@@ -49,3 +55,9 @@ unnecessary 480p drop. Those reports remain acceptance failures until retested.
 Record measured waiting time, resolution, decoder cap, buffer, errors and hardware
 execution. A zero waiting counter alone does not establish visual/audio acceptance.
 Only merge after those failures are resolved; then recheck mainline and clean up branches.
+
+Run `bash scripts/test-v11-network.sh nextcloud 443` on the board for the bounded
+mobile profile. This affects that container's IPv4 HTTPS responses to the proxy,
+including the speed probe. Internal HTTP bridge traffic remains unshaped. Verify
+nonzero shaped-byte counters and actual transfer speeds; a nominal rate alone is
+insufficient. The EXIT/INT/TERM handlers restore the original noqueue state.

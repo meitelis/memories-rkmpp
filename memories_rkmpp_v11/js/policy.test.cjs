@@ -55,7 +55,7 @@ test('a cold seek preserves quality after seeked until the producer has warmed',
   const p=normal();p.beginSeek();
   p.sample({loaded:2000000,loading:{start:0,first:4500,end:4600}});
   assert.equal(p.bps,30000000,'cold generation must not poison the network estimate');
-  const pending=tick(p,{buffer:0,requestAge:4500});
+  const pending=tick(p,{buffer:0,seeking:true,requestAge:4500});
   assert.deepEqual([pending.phase,pending.cap,pending.cancel],['seeking',6,false]);
   assert.equal(tick(p,{buffer:12}).phase,'normal');
 });
@@ -69,6 +69,6 @@ test('byte-limited high-bitrate playback can warm up without ten buffered second
 
 test('a seek does not suppress recovery indefinitely on an actually stalled link',()=>{
   const p=normal();p.beginSeek();
-  const stalled=tick(p,{buffer:0,requestAge:6500});
+  const stalled=tick(p,{buffer:0,seeking:true,requestAge:6500});
   assert.equal(stalled.cap,0);assert.equal(stalled.cancel,true);
 });

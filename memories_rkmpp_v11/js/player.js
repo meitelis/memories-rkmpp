@@ -27,6 +27,16 @@
     else hls.nextAudioTrack = index;
   }
 
+  function beginSeek(state) {
+    if (state.selected !== 'auto' || !(state.hls?.currentLevel >= 0)) return;
+    state.policy?.beginSeek();
+    state.inflight = null;
+    // Buffered Original pictures can outlive a bandwidth downshift.
+    // A new seek must respect the already-known network/decoder cap.
+    state.seekLevel = Math.min(state.hls.currentLevel, state.cap ?? state.hls.currentLevel);
+    state.hls.loadLevel = state.seekLevel;
+  }
+
   function renditionText(video, hls) {
     if (!video.videoWidth || !video.videoHeight) return 'Loading video…';
     const level = hls?.levels?.[hls.currentLevel];
@@ -37,9 +47,10 @@
   }
 
   if (typeof module !== 'undefined' && module.exports) {
-    module.exports = {chooseLevel, audioProfile, selectQuality, selectAudio, renditionText, configure};
+    module.exports = {chooseLevel, audioProfile, selectQuality, selectAudio, beginSeek, renditionText, configure};
   }
   if (typeof document === 'undefined') return;
+  const debug = new URLSearchParams(location.search).has('rkmpp_debug');
 
   const attached = new Map();
   function bufferAhead(video) {
@@ -77,7 +88,10 @@
           if (bytes) estimate = bytes * 8000 / Math.max(25, performance.now() - start);
           reader.releaseLock();
         }
-        if (estimate < 4000000 || (size >= 393216 && estimate < 25000000)) break;
+        // The small request warms the connection. TCP slow start, mobile
+        // latency and browser scheduling can make it severely pessimistic.
+        // Continue the bounded larger sample; the overall timer limits cost
+        // even on a genuinely slow link.
       }
     } catch { /* Timeout uses partial bytes; unavailable probe starts low. */ }
     finally {
@@ -258,12 +272,7 @@
     metric('seeking', () => {
       state.waitingAt = 0;
       state.seekAt = Date.now();
-      if (state.selected === 'auto' && state.hls?.currentLevel >= 0) {
-        state.policy?.beginSeek();
-        state.inflight = null;
-        state.seekLevel = state.hls.currentLevel;
-        state.hls.loadLevel = state.seekLevel;
-      }
+      beginSeek(state);
     });
     metric('seeked', () => { badge.dataset.seekMs = String(Date.now() - state.seekAt); });
     attached.set(video, state);
@@ -292,7 +301,8 @@
       const action = state.policy.step({
         now, buffer, playing:!video.paused && !video.ended, seeking:video.seeking,
         auto:state.selected === 'auto', originalReady:state.originalReady, decoderCap:state.decoderCap,
-        requestAge:stats?.loading?.start > 0 ? performance.now() - stats.loading.start : 0,
+        requestAge:Math.max(stats?.loading?.start > 0 ? performance.now() - stats.loading.start : 0,
+          state.policy.phase === 'seeking' ? now-state.seekAt : 0),
         loaded:stats?.loaded || 0,
         targetBuffer:Math.min(hls.config.maxMaxBufferLength,
           Math.max(hls.config.maxBufferLength, 8*hls.config.maxBufferSize/bandwidth(hls.levels[hls.currentLevel]))),
@@ -325,6 +335,7 @@
       cap:String(state.cap ?? ''), audio:state.audioProfile || '',
       decoderCap:String(state.decoderCap), originalReady:String(Boolean(state.originalReady)),
       requestedQuality:state.selected || '',
+      seekPendingMs:String(video.seeking && state.seekAt ? now-state.seekAt : 0),
       waitingCount:String(state.waitingCount || 0),
       waitingMs:String((state.waitingMs || 0) + (state.waitingAt ? now - state.waitingAt : 0)),
     });
@@ -332,6 +343,14 @@
       const q = video.getVideoPlaybackQuality();
       state.badge.dataset.droppedFrames = String(q.droppedVideoFrames);
       state.badge.dataset.totalFrames = String(q.totalVideoFrames);
+    }
+    if (hls && debug) {
+      const info = controller => ({state:controller?.state,sn:controller?.fragCurrent?.sn,
+        next:controller?.nextLoadPosition,loaded:controller?.fragCurrent?.stats?.loaded,
+        loadStart:controller?.fragCurrent?.stats?.loading?.start});
+      state.badge.dataset.pipeline = JSON.stringify({loading:hls.loadingEnabled,buffering:hls.bufferingEnabled,
+        auto:hls.autoLevelEnabled,manual:hls.manualLevel,current:hls.currentLevel,next:hls.nextLoadLevel,
+        main:info(hls.streamController),audio:info(hls.audioStreamController)});
     }
   }
 

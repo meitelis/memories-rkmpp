@@ -46,7 +46,7 @@
       this.cap = Math.min(this.cap, limit);
       const healthyBuffer = Math.min(10, targetBuffer * 0.6);
       const criticalBuffer = Math.min(4, targetBuffer * 0.25);
-      if (!playing || seeking || !auto) {
+      if (!playing || !auto || (seeking && this.phase !== 'seeking')) {
         this.healthySince = null;
         return this.result(cancel);
       }
