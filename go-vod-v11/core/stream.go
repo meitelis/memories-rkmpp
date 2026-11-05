@@ -402,6 +402,10 @@ func (s *Stream) spec(startAt float64, isHls bool) ffmpeg.Spec {
 	// audio so the player uses the single shared AAC track instead.
 	audioOnly := s.c.RKMPP && isAudioQuality(s.quality)
 	separateAudio := s.c.RKMPP && isHls && !audioOnly && s.m.HasStream(QUALITY_AUDIO)
+	var keyframeGrid *ffmpeg.RKMPPKeyframeGrid
+	if isHls {
+		keyframeGrid = s.m.AlignedGrid(s.quality)
+	}
 
 	// EndAt bounds the audio padding so the stream doesn't outlast the video.
 	endAt := 0.0
@@ -444,6 +448,7 @@ func (s *Stream) spec(startAt float64, isHls bool) ffmpeg.Spec {
 		SeparateAudio:  separateAudio,
 		EndAt:          endAt,
 		ChunkSize:      s.m.tc.ChunkSize,
+		KeyframeGrid:   keyframeGrid,
 		Copy:           s.quality == QUALITY_DIRECT && (!isHls || grid),
 		CodecName:      s.m.probe.CodecName,
 
@@ -473,6 +478,9 @@ func (s *Stream) transcode(startId int) {
 		if startId > 0 {
 			startAt = segs[startId].Start + copySeekEpsilon
 		}
+	} else if grid := s.m.AlignedGrid(s.quality); grid != nil {
+		startNumber = startId
+		startAt = grid.Segments[startId].Start
 	} else if startId > 0 {
 		// Start one frame before.
 		// This ensures that the keyframes are aligned.

@@ -22,9 +22,13 @@ No original media or Nextcloud credentials are needed. It runs:
   8-bit BT.709 output. The upstream software fMP4 restart regression also runs.
   A 30-second 50 fps test checks every packet timestamp/duration and independent
   decoding beyond the initial input-pacing burst, for both hardware encoders.
+  The source-grid regression uses irregular fractional GOPs, VBR hardware output
+  at two sizes, exact first/last packet timestamps and byte-identical cold init.
 - `core.test`: real manager/stream publication, cached init use, cold video and
   shared AAC seeks, and video-quality requests that leave the audio encoder
   running. The upstream HTTP copy/transcode restart regression also runs.
+  Source-aligned serving also tests a segment ID that would be out of range on
+  the old three-second grid, a cold restart and unchanged shared-audio workers.
 - `api.test`: go-vod 0.7.0 ping and Memories 11 POST envelope, authenticated
   Range callbacks to a local fixture server, codec negotiation, a single audio
   group, token propagation and decoding of served init/seek segments. The

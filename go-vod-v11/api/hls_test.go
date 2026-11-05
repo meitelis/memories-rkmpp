@@ -64,7 +64,7 @@ func TestCopyVariantPlaylist(t *testing.T) {
 	require.True(t, strings.HasSuffix(strings.TrimSpace(got), "#EXT-X-ENDLIST"))
 }
 
-func stubVariantManager(t *testing.T, keyFail bool) *core.Manager {
+func stubVariantManager(t *testing.T, keyFail bool, rkmpp ...bool) *core.Manager {
 	t.Helper()
 	dir := t.TempDir()
 	probeJSON := `{"streams":[{"codec_type":"video","codec_name":"h264","width":1280,"height":720,"avg_frame_rate":"30/1","duration":"12","bit_rate":"1000000"}],"format":{}}`
@@ -80,6 +80,9 @@ func stubVariantManager(t *testing.T, keyFail bool) *core.Manager {
 	require.NoError(t, os.WriteFile(bin, []byte(script), 0755))
 
 	cfg := config.Defaults("test")
+	if len(rkmpp) > 0 && rkmpp[0] {
+		cfg.RKMPP, cfg.RKMPPOutputCodec = true, "h264"
+	}
 	cfg.TempDir = t.TempDir()
 	cfg.FFprobe = bin
 	m, err := core.NewManager(core.NewManagerArgs{
@@ -95,6 +98,23 @@ func stubVariantManager(t *testing.T, keyFail bool) *core.Manager {
 	require.NoError(t, err)
 	t.Cleanup(m.Destroy)
 	return m
+}
+
+func TestVariantPlaylistAlignedHardwareGrid(t *testing.T) {
+	m := stubVariantManager(t, false, true)
+	_, ok := m.EnsureCopySegments()
+	require.True(t, ok)
+	for _, quality := range []string{"direct", "480p", core.QUALITY_MAX} {
+		got, err := VariantPlaylist(m, quality, "?t=123")
+		require.NoError(t, err)
+		require.Contains(t, got, "#EXT-X-TARGETDURATION:4")
+		require.Equal(t, 3, strings.Count(got, "#EXTINF:"))
+		require.Contains(t, got, quality+"-000002.m4s?t=123")
+	}
+	audio, err := VariantPlaylist(m, core.QUALITY_AUDIO, "")
+	require.NoError(t, err)
+	require.Contains(t, audio, "#EXT-X-TARGETDURATION:3")
+	require.Equal(t, 4, strings.Count(audio, "#EXTINF:"), "audio retains its independent timeline")
 }
 
 func TestVariantPlaylistLazyDirect(t *testing.T) {

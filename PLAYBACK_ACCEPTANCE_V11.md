@@ -18,9 +18,9 @@ identified timestamp defect, not every possible cause of a two-second freeze.
 
 ## Deployment and checks
 
-- Native adapter 1.1.17; runtime image memories-11.0.2-govod-0.7.0-r4. Faster
+- Native adapter 1.1.22; runtime image memories-11.0.2-govod-0.7.0-r4. Faster
   manual handoff is opt-in with rkmpp_fast_switch; default behavior remains 1.1.13's conservative handoff.
-- All 26 JavaScript regressions pass in working source. Linux Go tests, vet, formatting and ARM64
+- All 28 JavaScript regressions pass in working source. The deployed r4 Linux Go tests, vet, formatting and ARM64
   image build passed. The complete isolated hardware matrix passed, including
   both encoders, HDR, rotations, cold starts, shared audio and new 50 fps cadence checks.
 - r4 uses measured container bitrate when Matroska omits stream bitrate. Probe
@@ -32,6 +32,32 @@ identified timestamp defect, not every possible cause of a two-second freeze.
   produced 25 complete 150-frame segments. The identical run with 11 STOP/CONT
   pauses lost a frame. Completed production-cache captures showed the same
   missing-frame pattern. r2 replaces hardware-process suspension with input pacing.
+
+## Source-aligned hardware candidate (not deployed)
+
+The opt-in early handoff exposed incompatible Original and encoded GOP boundaries.
+Preparing the target alone did not prevent a picture gap. Adapter 1.1.22 refuses
+an early cut unless the old GOP ends exactly where a new independently decodable
+GOP starts; ordinary URLs retain the established buffer-preserving handoff.
+
+An isolated RK3588 experiment found that explicit source timestamps plus
+`-flags:v +low_delay` align both hardware encoders exactly. Without blocking
+packet retrieval, the global MPP IDR request could affect an earlier queued frame.
+Short real 4K tests remained faster than real time: approximately 2.78x for
+AVC-to-1080p AVC and 1.82–1.88x for 1440p HEVC. These are bounded throughput
+measurements, not full playback or visual-quality acceptance.
+
+The server candidate shares one immutable cached keyframe grid across encoded
+video renditions, preserves fractional source timestamps and leaves the AAC
+timeline independent. It never scans the source during playlist startup. A cache
+miss keeps the fixed grid for that whole manager; a later session may use the
+warmed cache. Long, dense, incomplete or oversized grids retain the fixed path.
+HDR, rotated, incompatible-codec and progressive outputs keep their existing path.
+
+New regressions cover VBR H.264/HEVC, two sizes, irregular fractional GOPs,
+independent fragment decoding, byte-identical cold-start init, serving segment IDs
+beyond the old fixed-grid limit and unchanged audio workers. Full Linux build and
+hardware execution are pending for this candidate. Production remains r4.
 
 ## Real-media baseline before 1.1.7
 
@@ -97,11 +123,14 @@ Record measured waiting time, resolution, decoder cap, buffer, errors and hardwa
 execution. A zero waiting counter alone does not establish visual/audio acceptance.
 Only merge after those failures are resolved; then recheck mainline and clean up branches.
 
-The faster manual-switch preview is not accepted: aligned HEVC switches measured
-2.06-3.88 seconds without recorded waits, but a high-bitrate AVC downward switch
-showed a 1.3-second presentation hold despite a zero wait counter. The same source
-using the conservative control showed no such hold. Keep the faster path opt-in
-until this regression is resolved; see PROGRESS_MEMORIES_11.md for the measurements.
+The faster manual-switch preview remains unaccepted. Its initial high-bitrate AVC
+hold was traced to appending the preceding GOP over already-playing pictures.
+Boundary-sample retention corrected first-fragment selection in later repeats:
+4.454 s to 1080p, 2.046 s up to Original and 4.616 s down to 480p, without recorded
+waits or the earlier dropped-frame burst. However an HEVC repeat required an
+automatic clock correction (bufferSeekOverHole). Keep the faster path opt-in
+until clock/segment alignment and visual/audio acceptance pass. Background-throttled
+frame callbacks cannot establish smoothness; see PROGRESS_MEMORIES_11.md.
 
 Run `bash scripts/test-v11-network.sh nextcloud 443` on the board for the bounded
 mobile profile. This affects that container's IPv4 HTTPS responses to the proxy,

@@ -3,6 +3,15 @@
 Latest deployment/results are tracked in [PLAYBACK_ACCEPTANCE_V11.md](PLAYBACK_ACCEPTANCE_V11.md).
 Earlier sections below retain the investigation history.
 
+Current work: adapter 1.1.22 is installed with faster switching restricted to an
+explicit preview flag. Twenty-eight JavaScript regressions pass. The deployed
+backend remains r4. An isolated hardware experiment established exact source-GOP
+alignment using explicit timestamps and blocking MPP packet retrieval; a bounded,
+cache-only server implementation and full/cold hardware regressions are under
+validation. No mainline merge or branch deletion is authorized by these isolated
+results alone. Remove superseded player workarounds after the aligned pipeline
+passes real playback, rather than accumulating more switch strategies.
+
 ## User's required behaviour
 
 1. Measure actual download speed through Nextcloud before starting video.
@@ -180,3 +189,13 @@ No credentials or private-media contents belong in this repository. Keep diagnos
 - High-bitrate AVC exposed a visual regression that wait counters missed: downward switch 5.782 s and about 1.3 s picture hold, with dropped frames. Its upward switch took 1.518 s. Rapid replacement selected the last requested 480p rate, but also showed the picture hold. An isolated conservative control switched in 6.282 s with zero dropped frames and no comparable hold. Do not promote the faster path based on wait counters.
 - Added opt-in fragment PTS traces. Investigating the warm-init request starting an unnecessary encode at zero while the future-fragment request starts the desired run; the latest source removes that competing init request because publishing a fragment already guarantees its init exists. This refinement is not live-accepted yet.
 - Production adapter is currently 1.1.17 with normal behavior unchanged; working source is 1.1.18. All test captures stay private. Clean up the final implementation before acceptance/merge, preserve regressions and discard failed approaches. No merge or branch deletion.
+
+## Manual-switch timeline trace and boundary-sample refinement
+
+- Checkpoint 51eb4d6 passed Source checks and the v11 baseline workflow. The preview remains explicitly opt-in; all normal URLs still use the established conservative behavior.
+- Fragment PTS traces reproduced the harmful overlap: with a requested cut at 9 s, the first new rendition fragment covered 6-9 s and was appended after playback had reached 9 s. This explains the backward-looking presentation defect more directly than wait counters. Preserving loader history alone did not remove it; do not treat that intermediate hypothesis as a complete fix.
+- The current preview pauses new buffering, lets an active main fragment finish, and resumes without resetting the loader or audio. It retains a boundary sample (cut + 1 ms), so floating-point rounding of the retained range cannot direct zero-tolerance first-load lookup to the preceding GOP. No private hls.js controller fields are mutated. Preparation uses one fragment HEAD; publishing that fragment already guarantees the init exists.
+- On adapter 1.1.20, a repeated high-bitrate AVC switch selected exactly the prepared 87 s fragment, took 4.454 s, and added no dropped frames or waits. The upward repeat took 2.046 s; another downward 480p repeat took 4.616 s. Those two repeats each added one dropped frame rather than the earlier burst of about 50-79.
+- An HEVC repeat took 5.761 s with no recorded waiting event but did report bufferSeekOverHole and an automatic seek near 27.023 s. This prevents a gapless-acceptance claim. Original's keyframe grid and the encoded 3 s grid differ; inspect the retained boundary/clock alignment before promoting the preview or adding further overrides.
+- Some later presentation callbacks were throttled to roughly one per second while backgrounded. Exclude those callback traces as proof of visual smoothness. Packet timing, first appended fragment, clock, wait counters and dropped-frame deltas remain separate observations.
+- All 27 JS regressions pass, including cancellation during removal and waiting for an active old fragment. Adapter 1.1.20 is deployed with the faster path restricted to explicit test URLs. Current source also clears stale switch diagnostics and scopes fragment tracing to opt-in debug state. No mainline merge or branch deletion; Android native controls and weak-startup acceptance remain open.

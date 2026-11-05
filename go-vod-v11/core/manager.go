@@ -103,6 +103,10 @@ type Manager struct {
 	copyProbed bool
 	// copySF dedupes concurrent keyframe probes so they share one ffprobe.
 	copySF singleflight.Group
+	// Decide the encoded grid once, before its first playlist/init/segment.
+	// A cache miss keeps startup nonblocking and the choice stable thereafter.
+	gridOnce  sync.Once
+	videoGrid *ffmpeg.RKMPPKeyframeGrid
 
 	// streams are the renditions by quality ("480p", "direct" / "max").
 	streams map[string]*Stream
@@ -505,6 +509,20 @@ func (m *Manager) CopySegments() ([]ffmpeg.Segment, bool) {
 	return m.srcSegments, true
 }
 
+// AlignedGrid returns an immutable cached grid for encoded RKMPP HLS video.
+// Audio remains on its independent AAC clock. No request runs a keyframe scan.
+func (m *Manager) AlignedGrid(quality string) *ffmpeg.RKMPPKeyframeGrid {
+	if m.c == nil || !m.c.RKMPP || !m.copyEligible || quality == QUALITY_DIRECT || isAudioQuality(quality) || !m.HasStream(quality) {
+		return nil
+	}
+	m.gridOnce.Do(func() {
+		if segs, ok := m.TryCacheCopySegments(); ok {
+			m.videoGrid = ffmpeg.NewRKMPPKeyframeGrid(segs, m.FrameRate())
+		}
+	})
+	return m.videoGrid
+}
+
 // CopyProbed reports whether a keyframe attempt has finished.
 func (m *Manager) CopyProbed() bool {
 	m.copyMu.Lock()
@@ -620,6 +638,10 @@ func (m *Manager) ServeChunk(w http.ResponseWriter, quality string, id int) bool
 				return false
 			}
 		} else if m.chunkOutsideDuration(id) {
+			return false
+		}
+	} else if grid := m.AlignedGrid(quality); grid != nil {
+		if id >= len(grid.Segments) {
 			return false
 		}
 	} else if m.chunkOutsideDuration(id) {

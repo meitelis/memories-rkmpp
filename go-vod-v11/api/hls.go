@@ -58,6 +58,9 @@ func VariantPlaylist(m *core.Manager, quality string, query string) (string, err
 		m.StartCopyProbeAsync()
 		return "", core.ErrCopyPending
 	}
+	if grid := m.AlignedGrid(quality); grid != nil {
+		return CopyVariantPlaylist(quality, grid.Segments, query)
+	}
 	return TranscodeVariantPlaylist(quality, m.Duration(), m.ChunkSize(), query)
 }
 

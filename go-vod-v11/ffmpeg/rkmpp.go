@@ -157,7 +157,13 @@ func RKMPPInputPaced(s Spec) bool {
 func buildRKMPPArgs(s Spec) []string {
 	args := []string{"-hide_banner", "-loglevel", "warning"}
 	if s.StartAt > 0 {
-		args = append(args, "-ss", fmt.Sprintf("%.6f", s.StartAt))
+		seek := fmt.Sprintf("%.6f", s.StartAt)
+		if s.HLS && s.KeyframeGrid != nil {
+			// Seek just past rounded keyframe metadata, but retain that frame
+			// with noaccurate_seek and the trim threshold below.
+			seek = fmt.Sprintf("%.9f", s.StartAt+10*rkmppKeyframeEpsilon)
+		}
+		args = append(args, "-ss", seek)
 		if s.HLS {
 			args = append(args, "-noaccurate_seek")
 		}
@@ -184,9 +190,16 @@ func buildRKMPPArgs(s Spec) []string {
 	}
 	args = append(args, "-i", s.Input, "-copyts", "-fflags", "+genpts")
 
-	filters := []string{fmt.Sprintf("fps=fps=%d:round=near", RKMPPFrameRate(s))}
+	filters := []string{}
+	if s.KeyframeGrid == nil {
+		filters = append(filters, fmt.Sprintf("fps=fps=%d:round=near", RKMPPFrameRate(s)))
+	}
 	if s.HLS && s.StartAt > 0 {
-		filters = append(filters, fmt.Sprintf("trim=start=%.6f", s.StartAt))
+		trim := fmt.Sprintf("trim=start=%.6f", s.StartAt)
+		if s.KeyframeGrid != nil {
+			trim = fmt.Sprintf("trim=start=%.9f", max(0, s.StartAt-rkmppKeyframeEpsilon))
+		}
+		filters = append(filters, trim)
 	}
 	dims := ""
 	if s.Width > 0 && s.Height > 0 {

@@ -112,6 +112,9 @@ type Spec struct {
 	// UseGopSize uses a fixed GOP (ChunkSize*FrameRate) instead of forced
 	// keyframes, for encoders whose forced keyframes drift (notably NVENC).
 	UseGopSize bool
+	// KeyframeGrid aligns hardware HLS renditions with a cached Original grid.
+	// Nil retains the fixed-duration encoding path.
+	KeyframeGrid *RKMPPKeyframeGrid
 	// Copy stream-copies the video (-c:v copy) instead of re-encoding it,
 	// for copy-eligible sources.
 	Copy bool
@@ -415,12 +418,12 @@ const copyHLSTime = "0.001"
 func SegmentArgs(s Spec, startID int, pattern, init string) []string {
 	// Rockchip's hardware encoders obey GOP sizing more reliably than
 	// forced-keyframe expressions. Preserve v11's fMP4 muxer and timeline.
-	if s.RKMPP && !s.Copy && !s.AudioOnly {
+	if s.RKMPP && !s.Copy && !s.AudioOnly && s.KeyframeGrid == nil {
 		s.UseGopSize = true
 		s.FrameRate = RKMPPFrameRate(s)
 	}
 	hlsTime := fmt.Sprintf("%d", s.ChunkSize)
-	if s.Copy {
+	if s.Copy || s.KeyframeGrid != nil {
 		hlsTime = copyHLSTime
 	}
 
@@ -445,7 +448,12 @@ func SegmentArgs(s Spec, startID int, pattern, init string) []string {
 		// the same segment on every level switch.
 		args = append(args, "-bf", "0")
 
-		if s.UseGopSize && s.FrameRate > 0 {
+		if s.RKMPP && s.KeyframeGrid != nil {
+			// Blocking packet retrieval prevents a forced-IDR command from
+			// taking effect on an earlier frame still queued in asynchronous MPP.
+			args = append(args, "-flags:v", "+low_delay", "-g", strconv.Itoa(s.KeyframeGrid.GOPSize),
+				"-force_key_frames", s.KeyframeGrid.forceTimes(s.StartAt))
+		} else if s.UseGopSize && s.FrameRate > 0 {
 			gop := fmt.Sprintf("%d", s.ChunkSize*s.FrameRate)
 			args = append(args, "-g", gop, "-keyint_min", gop)
 		} else {

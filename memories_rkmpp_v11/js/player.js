@@ -16,7 +16,7 @@
     return pending;
   }
 
-  async function prepareRendition(level, time, signal) {
+  async function prepareRendition(level, time, signal, oldCuts) {
     const playlist = Array.isArray(level.url) ? level.url[0] : level.url;
     const response = await fetch(playlist, {cache:'no-store', signal});
     if (!response.ok) throw Error('Rendition unavailable');
@@ -30,7 +30,7 @@
     for (const line of text.split(/\r?\n/).map(s => s.trim())) {
       if (line.startsWith('#EXTINF:')) duration = Number.parseFloat(line.slice(8));
       else if (line && !line.startsWith('#') && duration > 0) {
-        fragments.push({start, url:line});
+        fragments.push({start, end:start + duration, url:line});
         start += duration;
         duration = 0;
       }
@@ -42,7 +42,10 @@
       const part = await fetch(new URL(path, playlist).href, {method:'HEAD', cache:'no-store', signal});
       if (!part.ok) throw Error('Rendition not ready');
     };
-    const upcoming = fragments.filter(f => f.start >= clock() + 1.5).slice(0, 2);
+    // A fast handoff must be an old GOP end and a new IDR start. Never
+    // truncate an irregular Original GOP to force a 3s encoded boundary.
+    const cuts = new Set(oldCuts.map(t => t.toFixed(4)));
+    const upcoming = fragments.filter(f => f.start >= clock() + 1.5 && cuts.has(f.start.toFixed(4))).slice(0, 2);
     for (const fragment of upcoming) {
       // Publishing a complete fragment also guarantees its init is ready.
       // Warming init first can start an unnecessary encode at zero, racing
@@ -55,46 +58,64 @@
 
   function commitPreparedSwitch(video, hls, level, start, signal, ownerSignal) {
     const {Events} = hls.constructor;
-    // Both the old forward buffer and the new load must meet at the new
-    // rendition's IDR boundary. nextLevel's old-grid padding can retain a
-    // partial GOP and stall a switch between irregular Original and 3s HLS.
+    // Both GOP grids meet here; retain the playing clock and shared audio.
     hls.loadLevel = level;
     if (start >= video.currentTime + bufferAhead(video) - 0.5) return;
     return new Promise((resolve, reject) => {
       const clear = () => {
         hls.off(Events.BUFFER_FLUSHED, resume);
+        hls.off(Events.FRAG_BUFFERED, buffered);
         signal.removeEventListener('abort', cancel);
       };
       const resume = (_event, data) => {
         if (data.type !== 'video') return;
         clear();
-        hls.startLoad(start, true);
+        hls.resumeBuffering();
         resolve();
       };
       const cancel = () => {
         clear();
-        if (hls.media === video && !ownerSignal?.aborted) hls.startLoad(-1, true);
+        if (hls.media === video && !ownerSignal?.aborted) hls.resumeBuffering();
         reject(Error('Switch canceled'));
       };
-      hls.stopLoad();
+      const flush = () => {
+        hls.off(Events.FRAG_BUFFERED, buffered);
+        if (start < video.currentTime + 0.5) { cancel(); return; }
+        // Retain the boundary sample until the new IDR replaces it. A cut
+        // exactly at start can round the buffered end just below start;
+        // first-load lookup then selects the preceding GOP with zero tolerance.
+        hls.trigger(Events.BUFFER_FLUSHING, {startOffset:start + 0.001, endOffset:Infinity, type:'video'});
+      };
+      const buffered = (_event, data) => { if (data.frag?.type === 'main') flush(); };
+      // Preserve fragPrevious: stopLoad/startLoad clears it and can make
+      // hls.js backtrack into an old GOP, overwriting already-playing video.
+      // Let any active request finish before removing its future pictures.
+      hls.pauseBuffering();
       hls.on(Events.BUFFER_FLUSHED, resume);
       signal.addEventListener('abort', cancel, {once:true});
-      hls.trigger(Events.BUFFER_FLUSHING, {startOffset:start, endOffset:Infinity, type:'video'});
+      const active = hls.inFlightFragments?.main?.frag;
+      if (active && !active.stats?.buffering?.end) hls.on(Events.FRAG_BUFFERED, buffered);
+      else flush();
     });
   }
 
   function selectQuality(video, hls, id, state) {
     cancelPreparation(state);
-    if (state) { state.switchAt = 0; state.switchLevel = -1; }
+    if (state) {
+      state.switchAt = 0;
+      state.switchLevel = -1;
+      delete state.badge.dataset.switchBoundary;
+    }
     if (id === 'auto') {
       hls.loadLevel = -1;
     } else {
       const option = video.qualityList?.find(o => o.id === id);
       if (!option || !Number.isInteger(option.index)) return;
       const level = hls.levels[option.index];
+      const oldGrid = hls.levels[hls.currentLevel]?.details?.fragments;
       const canPrepare = state?.fastSwitch !== false && state?.abort && !state.abort.signal.aborted &&
         !video.paused && !video.seeking && video.readyState >= 3 &&
-        hls.currentLevel >= 0 && hls.currentLevel !== option.index && bufferAhead(video) > 4 &&
+        oldGrid?.length && hls.currentLevel !== option.index && bufferAhead(video) > 4 &&
         bandwidth(level) * 1.3 < Math.max(state.bps || 0, hls.bandwidthEstimate || 0);
       if (!canPrepare) hls.loadLevel = option.index;
       else {
@@ -107,7 +128,7 @@
         const cancel = () => pending.abort.abort();
         ownerSignal.addEventListener('abort', cancel, {once:true});
         const timeout = setTimeout(cancel, 4000);
-        void prepareRendition(level, () => video.currentTime, pending.abort.signal).then(start => {
+        void prepareRendition(level, () => video.currentTime, pending.abort.signal, oldGrid.map(f => f.end)).then(start => {
           if (state.preparing === pending && !pending.abort.signal.aborted) {
             state.badge.dataset.switchBoundary = String(start);
             return commitPreparedSwitch(video, hls, option.index, start, pending.abort.signal, ownerSignal);
@@ -358,7 +379,7 @@
       }
     });
     listen(Events.FRAG_BUFFERED, (_event, data) => {
-      if (debug && data.frag?.type === 'main') {
+      if (state.debug && data.frag?.type === 'main') {
         state.fragmentTrace ||= [];
         const f = data.frag;
         state.fragmentTrace.push({time:video.currentTime,level:f.level,sn:f.sn,
@@ -397,7 +418,7 @@
     badge.className = 'mr-v11-status';
     badge.setAttribute('role', 'status');
     parent.appendChild(badge);
-    const state = {badge, hls:null, decoderCap:Infinity, bps:0, audioChanged:0,
+    const state = {badge, debug, hls:null, decoderCap:Infinity, bps:0, audioChanged:0,
       fastSwitch:new URLSearchParams(location.search).has('rkmpp_fast_switch')};
     const diagnostics = new AbortController();
     const metric = (name, fn) => video.addEventListener(name, fn, {signal:diagnostics.signal});
