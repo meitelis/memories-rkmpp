@@ -71,8 +71,11 @@
         this.bps = Math.min(this.deliveryBps, bitrate(this.levels[0]) / 0.72);
         this.healthySince = null;
         cancel = true;
-      } else if (this.phase === 'recovering') {
-        if (this.cap === limit) this.phase = 'normal';
+      } else if (this.phase === 'recovering' && buffer >= healthyBuffer &&
+                 this.healthySince !== null && now - this.healthySince >= 10000) {
+        // Recovery depends on sustained playable buffer, not on whether the
+        // connection can afford the highest level permitted by the decoder.
+        this.phase = 'normal';
       }
       if (buffer < Math.min(6, healthyBuffer)) this.healthySince = null;
       else if (this.healthySince === null) this.healthySince = now;
