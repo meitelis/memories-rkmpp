@@ -11,7 +11,9 @@ test('startup budgets headroom and selects the original only when ready and affo
   assert.equal(chooseLevel(levels,150000),0);
 });
 test('draining buffers downshift quickly; recovery needs sustained headroom', () => {
-  assert.equal(adaptLevel(3,3,4,-0.8,500,3000),2);
+  assert.equal(adaptLevel(3,3,4,-0.8,500,3000),1);
+  assert.equal(adaptLevel(6,6,7,-1,500,3000),3);
+  assert.equal(adaptLevel(6,6,2,-1,500,3000),0);
   assert.equal(adaptLevel(3,1,10,0,1000,3000),1);
   assert.equal(adaptLevel(1,4,12,0,9000,20000),1);
   assert.equal(adaptLevel(1,4,2,0,20000,20000),0);

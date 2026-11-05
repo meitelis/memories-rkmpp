@@ -69,3 +69,10 @@ No credentials or private-media contents belong in this repository. Keep diagnos
 - Existing real video reached Original HEVC 3200×1800 with about 18 seconds buffered and source audio copied once. This verifies the no-generational-video-loss path, not final smoothness acceptance.
 - A backend replacement during the live manual-switch test interrupted requests; the native player stayed stopped after a fatal network error. Added bounded retries that resume from the current clock without replacing the media source or flushing shared audio. Adapter 1.0.4 is being installed for stable-server and constrained-link validation.
 - Mainline merge and branch cleanup remain pending real playback acceptance.
+
+## Constrained-link acceptance test
+
+- Stable-server manual Original-to-1080p switching continued with shared audio and a full buffer. Original video remained stream-copy; hardware renditions use MPP/RGA.
+- A 50-second 800 kbps limit was applied only inside the transcoder container network namespace, then automatically removed. The player downshifted to 480p but stalled during the gradual descent. This is a failed acceptance case, not smooth-playback completion.
+- Adapter 1.0.5 adds faster emergency descent (halving the level cap when the buffer is draining, minimum level when under three seconds) and samples in-flight transfer progress instead of waiting for a complete large fragment. Six JS regressions pass; live retesting is ongoing.
+- Network shaping was removed and the original noqueue configuration verified. Main is still unmerged.

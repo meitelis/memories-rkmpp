@@ -24,7 +24,8 @@
   // Buffer time, not byte count: predict exhaustion when a mobile link slows.
   function adaptLevel(current, target, buffer, slope, stableMs, sinceSwitch) {
     const draining = slope < -0.15 && buffer / -slope < 8;
-    if ((buffer < 3 || draining) && current > 0 && sinceSwitch > 1500) return Math.min(target, current - 1);
+    if (buffer < 3 && current > 0 && sinceSwitch > 1000) return 0;
+    if (draining && current > 0 && sinceSwitch > 1000) return Math.min(target, Math.floor(current / 2));
     if (target < current && sinceSwitch > 1500) return target;
     if (target > current && buffer >= 9 && stableMs >= 10000 && sinceSwitch > 10000) return target;
     return current;
@@ -204,12 +205,16 @@
     listen(Events.AUDIO_TRACKS_UPDATED, () => setAudio(state, state.checking));
     listen(Events.FRAG_LOADED, (_event, data) => {
       if (data.frag?.type !== 'main') return;
+      state.inflight = null;
       const stats = data.stats || data.frag.stats;
       const elapsed = stats?.loading?.end - stats?.loading?.first;
       if (!(elapsed > 0) || !stats.loaded) return;
       const sample = stats.loaded * 8000 / Math.max(25, elapsed);
       // Fast downward response, slower recovery. Exclude the encoder's TTFB.
       state.bps = state.bps * (sample < state.bps ? 0.35 : 0.8) + sample * (sample < state.bps ? 0.65 : 0.2);
+    });
+    listen(Events.FRAG_LOADING, (_event, data) => {
+      if (data.frag?.type === 'main') state.inflight = data.frag;
     });
     listen(Events.FRAG_BUFFERED, () => {
       state.failure = '';
@@ -262,6 +267,11 @@
     if (hls && state.hls !== hls) configure(video, state, hls);
     const buffer = bufferAhead(video);
     const now = Date.now();
+    const stats = state.inflight?.stats;
+    if (stats?.loaded > 0 && stats.loading?.first > 0) {
+      const elapsed = performance.now() - stats.loading.first;
+      if (elapsed >= 1000) state.bps = Math.min(state.bps, stats.loaded * 10000 / elapsed);
+    }
     if (hls?.levels?.length && !state.checking && state.selected === 'auto' && !video.seeking && !video.paused) {
       const target = chooseLevel(hls.levels, state.bps, state.originalReady, state.decoderCap);
       if (target !== state.candidate) { state.candidate = target; state.candidateSince = now; }
