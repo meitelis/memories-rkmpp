@@ -1,6 +1,12 @@
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
-const {chooseLevel, audioProfile, selectQuality, renditionText, configure} = require('./player.js');
+const {chooseLevel, audioProfile, selectQuality, selectAudio, renditionText, configure} = require('./player.js');
+
+test('runtime audio changes schedule the next track without flushing current audio', () => {
+  const hls={set audioTrack(_) {throw Error('immediate audio flush');}};
+  selectAudio(hls,2,false);
+  assert.equal(hls.nextAudioTrack,2);
+});
 
 
 const levels = [350000,700000,1800000,4000000,9000000].map((bitrate,i)=>({bitrate,url:[i===4?'/direct.m3u8?x=y':`/${i}.m3u8`]}));

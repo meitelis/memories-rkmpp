@@ -101,3 +101,6 @@ No credentials or private-media contents belong in this repository. Keep diagnos
 - The replacement adapter 1.1.0 is installed; live acceptance is underway. Do not claim completion from the policy tests alone.
 - Hardware profiling during a transition confirmed both MPP decoder cores active (about 80-88% in sampled bursts), both encoder cores active, and RGA3 schedulers active (sampled about 53-70%). Transcoder CPU use was modest relative to total cores. These driver loads confirm hardware execution; cold-start latency and end-to-end delivery still require measurement. Private raw profiling logs include process headers and must stay outside Git.
 - Temporary network shaping and MPP sampling were restored to noqueue and load_interval=0 after the profiling run.
+
+- Live 1.1.0 baseline held Original 1800p with zero waiting events. The 800 kbps run selected 480p/64 kbps audio but recorded one 1.27-second wait. Source review identified that the adapter selected runtime audio with hls.audioTrack (immediate switching), despite hls.js 1.7.4 providing nextAudioTrack for a non-interrupting scheduled switch.
+- Adapter 1.1.1 now uses nextAudioTrack during playback, preserving direct audioTrack selection only for startup. A regression rejects immediate runtime audio flushing. All 13 tests pass; live recheck is underway.

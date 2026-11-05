@@ -22,6 +22,11 @@
     video.dispatchEvent(new CustomEvent('quality-selected'));
   }
 
+  function selectAudio(hls, index, startup) {
+    if (startup) hls.audioTrack = index;
+    else hls.nextAudioTrack = index;
+  }
+
   function renditionText(video, hls) {
     if (!video.videoWidth || !video.videoHeight) return 'Loading video…';
     const level = hls?.levels?.[hls.currentLevel];
@@ -32,7 +37,7 @@
   }
 
   if (typeof module !== 'undefined' && module.exports) {
-    module.exports = {chooseLevel, audioProfile, selectQuality, renditionText, configure};
+    module.exports = {chooseLevel, audioProfile, selectQuality, selectAudio, renditionText, configure};
   }
   if (typeof document === 'undefined') return;
 
@@ -111,7 +116,7 @@
     const tracks = state.hls.audioTracks || [];
     const index = tracks.findIndex(t => (t.url || '').split('?')[0].endsWith('/' + desired + '.m3u8'));
     if (index >= 0 && state.hls.audioTrack !== index) {
-      state.hls.audioTrack = index;
+      selectAudio(state.hls, index, startup);
       state.audioChanged = now;
     }
     if (index >= 0) state.audioProfile = desired;
