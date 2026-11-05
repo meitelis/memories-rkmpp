@@ -69,6 +69,13 @@ test('fluctuating buffers do not restart lowest 480p segment or prematurely reco
     assert.equal(a.phase,'recovering','one high buffer sample is not sustained recovery');
   }
 });
+test('pause does not count toward sustained playable recovery',()=>{
+  const p=normal();tick(p,{now:1000,buffer:3,requestAge:3000});
+  assert.equal(tick(p,{now:2000,buffer:12}).phase,'recovering');
+  tick(p,{now:8000,buffer:12,playing:false});
+  assert.equal(tick(p,{now:12000,buffer:12}).phase,'recovering');
+  assert.equal(tick(p,{now:22000,buffer:12}).phase,'normal');
+});
 test('full buffer must remain healthy for ten consecutive seconds',()=>{
   const p=normal();tick(p,{now:1000,buffer:3,requestAge:3000});
   tick(p,{now:2000,buffer:10,currentLevel:0});
