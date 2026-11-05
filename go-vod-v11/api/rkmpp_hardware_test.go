@@ -75,12 +75,12 @@ func TestRKMPPHardwareAPI(t *testing.T) {
 	s.routes().ServeHTTP(w, httptest.NewRequest("GET", "/ping", nil))
 	require.Contains(t, w.Body.String(), `"version":"0.7.0"`)
 	master := string(fetch("index.m3u8"))
-	require.Equal(t, 1, strings.Count(master, "#EXT-X-MEDIA:"))
+	require.Equal(t, 4, strings.Count(master, "#EXT-X-MEDIA:"))
 	require.Contains(t, master, `AUDIO="audio"`)
 	require.Contains(t, master, "hvc1.")
 	require.Contains(t, master, "mp4a.40.2")
 	require.Contains(t, master, "fixture-share-token")
-	for _, quality := range []string{"480p", "max", "audio"} {
+	for _, quality := range []string{"240p", "480p", "max", "audio", "audio96", "audio64", "audio32"} {
 		playlist := string(fetch(quality + ".m3u8"))
 		require.Contains(t, playlist, "#EXT-X-MAP:")
 		require.Contains(t, playlist, quality+"-init.m4s")

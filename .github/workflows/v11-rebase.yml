@@ -3,10 +3,14 @@ on:
   push:
     paths:
       - 'go-vod-v11/**'
+      - 'memories_rkmpp_v11/**'
+      - 'scripts/deploy-v11.sh'
       - '.github/workflows/v11-rebase.yml'
   pull_request:
     paths:
       - 'go-vod-v11/**'
+      - 'memories_rkmpp_v11/**'
+      - 'scripts/deploy-v11.sh'
       - '.github/workflows/v11-rebase.yml'
 permissions:
   contents: read
@@ -36,3 +40,9 @@ jobs:
           gofmt -d cmd/rkmpp-smoke/main.go cmd/rkmpp-smoke/main_test.go
           gofmt -l .
           test -z "$(gofmt -l .)"
+      - name: Native player and deployment checks
+        working-directory: .
+        run: |
+          node --test memories_rkmpp_v11/js/player.test.cjs
+          sh -n scripts/deploy-v11.sh
+          find memories_rkmpp_v11 -name '*.php' -print0 | xargs -0 -n1 php -l

@@ -76,6 +76,8 @@ type Spec struct {
 	Audio AudioInfo
 	// AudioOnly builds a shared AAC audio stream for HLS without video.
 	AudioOnly bool
+	// AudioBitrate selects a shared AAC profile; zero uses 192 kbps.
+	AudioBitrate int
 	// SeparateAudio marks video renditions paired with a shared audio stream.
 	SeparateAudio bool
 	// EndAt is the duration upper bound for audio padding/trimming.

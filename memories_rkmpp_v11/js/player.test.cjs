@@ -1,27 +1,41 @@
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
-const {autoCap, selectQuality, renditionText} = require('./player.js');
+const {chooseLevel, audioProfile, adaptLevel, selectQuality, renditionText} = require('./player.js');
 
-test('Auto avoids 1800p/50fps on a small display while respecting high-density screens', () => {
-  const levels = [480, 720, 1080, 1440, 1800, 2160].map(height => ({height, width:height*16/9}));
-  assert.equal(autoCap(levels, 640, 360, 1), 2);
-  assert.equal(autoCap(levels, 1920, 1080, 2), 5);
+const levels = [350000,700000,1800000,4000000,9000000].map((bitrate,i)=>({bitrate,url:[i===4?'/direct.m3u8?x=y':`/${i}.m3u8`]}));
+test('startup budgets headroom and selects the original only when ready and affordable', () => {
+  assert.equal(chooseLevel(levels,20000000),4);
+  assert.equal(chooseLevel(levels,5000000),2);
+  assert.equal(chooseLevel(levels,20000000,false),3);
+  assert.equal(chooseLevel(levels,20000000,true,2),2);
+  assert.equal(chooseLevel(levels,150000),0);
 });
-
-test('quality changes keep the playing fragment and muxed AAC buffer', () => {
-  const video = {qualityList:[{id:'1080:6000000',index:1}],dispatchEvent(){}};
-  const hls = {levels:[{},{}],set currentLevel(_) {throw Error('playing buffer flushed');}};
+test('draining buffers downshift quickly; recovery needs sustained headroom', () => {
+  assert.equal(adaptLevel(3,3,4,-0.8,500,3000),2);
+  assert.equal(adaptLevel(3,1,10,0,1000,3000),1);
+  assert.equal(adaptLevel(1,4,12,0,9000,20000),1);
+  assert.equal(adaptLevel(1,4,2,0,20000,20000),0);
+  assert.equal(adaptLevel(1,4,12,0,11000,20000),4);
+  assert.equal(adaptLevel(2,1,2,-1,20000,500),2);
+});
+test('audio budget is independent of video resolution', () => {
+  assert.equal(audioProfile(8000000),'audio');
+  assert.equal(audioProfile(2000000),'audio96');
+  assert.equal(audioProfile(700000),'audio64');
+  assert.equal(audioProfile(300000),'audio32');
+});
+test('manual and Auto selection never flush the playing fragment', () => {
+  const video={qualityList:[{id:'1080:6000000',index:1}],dispatchEvent(){}};
+  const hls={levels:[{},{}],set currentLevel(_) {throw Error('playing buffer flushed');}};
   selectQuality(video,hls,'1080:6000000');
   assert.equal(hls.loadLevel,1);
-  assert.equal(hls.nextLevel,undefined);
   hls.levels[1].audioGroupIds=['audio'];
   selectQuality(video,hls,'1080:6000000');
   assert.equal(hls.nextLevel,1);
   selectQuality(video,hls,'auto');
   assert.equal(hls.loadLevel,-1);
 });
-
-test('resolution label describes presented frames, not the requested quality', () => {
+test('label reports presented resolution and original codec', () => {
   const video={videoWidth:1920,videoHeight:1080};
   const hls={autoLevelEnabled:true,currentLevel:0,levels:[{videoCodec:'hvc1.1.6.L120.80',url:['/1080p.m3u8']}]};
   assert.equal(renditionText(video,hls),'Auto · 1080p (1920×1080) · HEVC');

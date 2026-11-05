@@ -22,10 +22,17 @@ import (
 )
 
 const (
-	QUALITY_MAX    = "max"
-	QUALITY_DIRECT = "direct"
-	QUALITY_AUDIO  = "audio"
+	QUALITY_MAX     = "max"
+	QUALITY_DIRECT  = "direct"
+	QUALITY_AUDIO   = "audio"
+	QUALITY_AUDIO96 = "audio96"
+	QUALITY_AUDIO64 = "audio64"
+	QUALITY_AUDIO32 = "audio32"
 )
+
+func isAudioQuality(quality string) bool {
+	return quality == QUALITY_AUDIO || quality == QUALITY_AUDIO96 || quality == QUALITY_AUDIO64 || quality == QUALITY_AUDIO32
+}
 
 // ErrCopyPending means the keyframe probe is still running; answer 409
 // so the client fails over and retries later once the grid is warm.
@@ -200,6 +207,10 @@ func NewManager(a NewManagerArgs) (*Manager, error) {
 	}
 
 	rkmpp := m.c.RKMPP
+	if rkmpp {
+		m.streams["240p"] = &Stream{c: m.c, m: m, quality: "240p", height: 240, width: 426, bitrate: 150}
+		m.streams["360p"] = &Stream{c: m.c, m: m, quality: "360p", height: 360, width: 640, bitrate: 300}
+	}
 	minRKMPPBitrate := 0
 	if rkmpp {
 		minRKMPPBitrate = ffmpeg.RKMPPMinBitrate(m.probe.Audio)
@@ -318,14 +329,16 @@ func NewManager(a NewManagerArgs) (*Manager, error) {
 
 	// Add a shared audio-only stream so all video renditions can mute their
 	// own audio and the player switches quality without audio gaps.
-	// Only create it when audio needs normalization; copyable AAC-LC is
-	// handled inline by each rendition's -c:a copy path instead.
+	// Alternate bitrates are lazy: only the selected track starts a job.
 	if rkmpp && m.probe.Audio.CodecName != "" {
 		m.streams[QUALITY_AUDIO] = &Stream{
 			c:       m.c,
 			m:       m,
 			quality: QUALITY_AUDIO,
-			bitrate: 128000,
+			bitrate: 192000,
+		}
+		for quality, rate := range map[string]int{QUALITY_AUDIO96: 96000, QUALITY_AUDIO64: 64000, QUALITY_AUDIO32: 32000} {
+			m.streams[quality] = &Stream{c: m.c, m: m, quality: quality, bitrate: rate}
 		}
 	}
 
@@ -394,14 +407,21 @@ func (m *Manager) Destroy() {
 
 func (m *Manager) Renditions() []Rendition {
 	hasAudio := m.HasStream(QUALITY_AUDIO)
+	hasLowerVideo := false
+	for quality := range m.streams {
+		if quality != QUALITY_MAX && quality != QUALITY_DIRECT && !isAudioQuality(quality) {
+			hasLowerVideo = true
+			break
+		}
+	}
 	out := make([]Rendition, 0, len(m.streams))
 	for _, s := range m.streams {
 		// The audio stream appears in the master playlist as an EXT-X-MEDIA
 		// group referenced by video variants; it is not itself a variant.
-		if s.quality == QUALITY_AUDIO {
+		if isAudioQuality(s.quality) {
 			continue
 		}
-		if m.c.RKMPP && m.IsCopyEligible() && s.quality == QUALITY_MAX {
+		if m.c.RKMPP && m.IsCopyEligible() && s.quality == QUALITY_MAX && hasLowerVideo {
 			continue
 		}
 		width, height := s.width, s.height

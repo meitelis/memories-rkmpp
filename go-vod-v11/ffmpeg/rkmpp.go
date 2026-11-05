@@ -23,7 +23,7 @@ func IsRKMPPEncoder(encoder string) bool {
 func copyRKMPPAudio(audio AudioInfo) bool {
 	return strings.EqualFold(audio.CodecName, "aac") && strings.EqualFold(audio.Profile, "LC") &&
 		(audio.Channels == 1 || audio.Channels == 2) && (audio.SampleRate == 44100 || audio.SampleRate == 48000) &&
-		audio.BitRate > 0 && audio.BitRate <= 256000
+		audio.BitRate > 0 && audio.BitRate <= 320000
 }
 
 func NormalizeRKMPPAudio(audio AudioInfo) bool {
@@ -34,13 +34,18 @@ func NormalizeRKMPPAudio(audio AudioInfo) bool {
 // hardware video decoder or encoder, and uses the same source timestamp clock.
 func buildRKMPPAudioArgs(s Spec) []string {
 	args := []string{"-hide_banner", "-loglevel", "warning"}
-	if s.StartAt > 0 {
-		args = append(args, "-ss", fmt.Sprintf("%.6f", s.StartAt))
+	rate := s.AudioBitrate
+	if rate <= 0 {
+		rate = 192000
 	}
-	args = append(args, remoteInputArgs(s.Headers)...)
 	// A complete compatible AAC source can keep its original packets. It
 	// still has one separate audio playlist shared by every video quality.
-	if copyRKMPPAudio(s.Audio) && s.Audio.DurationSeconds > 0 && s.Audio.DurationSeconds >= s.EndAt-0.03 {
+	if rate >= 192000 && copyRKMPPAudio(s.Audio) && s.Audio.SampleRate == 48000 && s.Audio.Channels == 2 &&
+		s.Audio.DurationSeconds > 0 && s.Audio.DurationSeconds >= s.EndAt-0.03 {
+		if s.StartAt > 0 {
+			args = append(args, "-ss", fmt.Sprintf("%.9f", s.StartAt))
+		}
+		args = append(args, remoteInputArgs(s.Headers)...)
 		args = append(args, "-i", s.Input, "-copyts", "-fflags", "+genpts", "-vn", "-map", "0:a:0", "-c:a", "copy")
 		if s.StartAt > 0 {
 			args = append(args, "-copypriorss:a", "0")
@@ -50,15 +55,24 @@ func buildRKMPPAudioArgs(s Spec) []string {
 		}
 		return args
 	}
-	filter := fmt.Sprintf("aresample=async=1:first_pts=%d", int64(math.Round(s.StartAt*48000)))
-	if remaining := s.EndAt - s.StartAt; remaining > 0 {
+	// AAC encodes 1024 samples per frame. Restart every profile on the same
+	// global frame grid with one warm-up frame for the encoder delay, rather
+	// than rebasing each cold seek on an arbitrary sample.
+	start := 0.0
+	if s.StartAt > 0 {
+		start = max(0, (math.Floor(s.StartAt*48000/1024)-1)*1024/48000)
+		args = append(args, "-ss", fmt.Sprintf("%.9f", start))
+	}
+	args = append(args, remoteInputArgs(s.Headers)...)
+	filter := fmt.Sprintf("aresample=async=1:first_pts=%d", int64(math.Round(start*48000)))
+	if remaining := s.EndAt - start; remaining > 0 {
 		// A shorter audio source must not make HLS wait for nonexistent tail
 		// fragments. Silence is cheap to encode and keeps the video playable.
 		filter += fmt.Sprintf(",apad=whole_dur=%.6f", remaining)
 	}
-	filter += fmt.Sprintf(",asetpts=N/SR/TB+%.6f/TB", s.StartAt)
+	filter += fmt.Sprintf(",asetpts=N/SR/TB+%.9f/TB", start)
 	args = append(args, "-i", s.Input, "-copyts", "-fflags", "+genpts", "-vn", "-map", "0:a:0",
-		"-c:a", "aac", "-ac", "2", "-ar", "48000", "-b:a", "128k", "-af", filter)
+		"-c:a", "aac", "-ac", "2", "-ar", "48000", "-b:a", strconv.Itoa(rate), "-af", filter)
 	if s.EndAt > s.StartAt {
 		// copyts preserves absolute source timestamps, including on cold seeks.
 		args = append(args, "-to", fmt.Sprintf("%.6f", s.EndAt))
@@ -71,9 +85,9 @@ func rkmppAudioBitrate(audio AudioInfo) int {
 		return 0
 	}
 	if copyRKMPPAudio(audio) {
-		return audio.BitRate
+		return max(192000, audio.BitRate)
 	}
-	return 128000
+	return 192000
 }
 
 // RKMPPMinBitrate is the minimum advertised bandwidth for a hardware encode:

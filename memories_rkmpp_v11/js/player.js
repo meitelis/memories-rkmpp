@@ -1,19 +1,33 @@
 (function () {
   'use strict';
 
-  function codecName(level) {
-    const codec = level?.videoCodec || level?.attrs?.CODECS || '';
-    return /hvc1|hev1/i.test(codec) ? 'HEVC' : /avc1/i.test(codec) ? 'H.264' : '';
+  const isOriginal = level => (Array.isArray(level?.url) ? level.url : [level?.url]).some(u => /\/direct\.m3u8(?:\?|$)/.test(u || ''));
+  const bandwidth = level => level?.bitrate || Number(level?.attrs?.BANDWIDTH) || Infinity;
+
+  function chooseLevel(levels, bps, originalReady = true, cap = Infinity) {
+    let best = 0;
+    let bestRate = 0;
+    levels.forEach((level, i) => {
+      const rate = bandwidth(level);
+      if (i <= cap && (originalReady || !isOriginal(level)) && rate <= bps * 0.72 && rate > bestRate) {
+        best = i;
+        bestRate = rate;
+      }
+    });
+    return best;
   }
 
-  function autoCap(levels, width, height, dpr) {
-    const physical = Math.min(width, height) * Math.max(1, dpr || 1);
-    const target = Math.max(1080, physical);
-    let cap = -1;
-    levels.forEach((l, i) => {
-      if (Math.min(l.width || Infinity, l.height || Infinity) <= target) cap = i;
-    });
-    return cap;
+  function audioProfile(bps) {
+    return bps < 450000 ? 'audio32' : bps < 1000000 ? 'audio64' : bps < 4000000 ? 'audio96' : 'audio';
+  }
+
+  // Buffer time, not byte count: predict exhaustion when a mobile link slows.
+  function adaptLevel(current, target, buffer, slope, stableMs, sinceSwitch) {
+    const draining = slope < -0.15 && buffer / -slope < 8;
+    if ((buffer < 3 || draining) && current > 0 && sinceSwitch > 1500) return Math.min(target, current - 1);
+    if (target < current && sinceSwitch > 1500) return target;
+    if (target > current && buffer >= 9 && stableMs >= 10000 && sinceSwitch > 10000) return target;
+    return current;
   }
 
   function selectQuality(video, hls, id) {
@@ -22,11 +36,9 @@
     } else {
       const option = video.qualityList?.find(o => o.id === id);
       if (!option || !Number.isInteger(option.index)) return;
-      // currentLevel flushes the playing fragment, which causes visible
-      // jumps and can interrupt audio. Muxed AAC keeps its existing buffer;
-      // shared audio can switch at the next video fragment boundary.
-      const sharedAudio = !!hls.levels[option.index]?.audioGroupIds?.length;
-      if (sharedAudio) hls.nextLevel = option.index;
+      // Never replace the fragment currently playing. A shared audio buffer
+      // survives the next-video-fragment switch; legacy muxed audio drains.
+      if (hls.levels[option.index]?.audioGroupIds?.length) hls.nextLevel = option.index;
       else hls.loadLevel = option.index;
     }
     video._qualitySelected = id;
@@ -36,61 +48,216 @@
   function renditionText(video, hls) {
     if (!video.videoWidth || !video.videoHeight) return 'Loading video…';
     const level = hls?.levels?.[hls.currentLevel];
-    const urls = level?.url || [];
-    const original = (Array.isArray(urls) ? urls : [urls]).some(u => /\/direct\.m3u8(?:\?|$)/.test(u));
-    const mode = original ? 'Original' : (hls?.autoLevelEnabled ? 'Auto' : 'Playing');
-    const size = Math.min(video.videoWidth, video.videoHeight);
-    const codec = codecName(level);
-    return `${mode} · ${size}p (${video.videoWidth}×${video.videoHeight})${codec ? ' · ' + codec : ''}`;
+    const codec = level?.videoCodec || level?.attrs?.CODECS || '';
+    const name = /hvc1|hev1/i.test(codec) ? 'HEVC' : /avc1/i.test(codec) ? 'H.264' : '';
+    const mode = isOriginal(level) ? 'Original' : hls?.autoLevelEnabled ? 'Auto' : 'Playing';
+    return `${mode} · ${Math.min(video.videoWidth, video.videoHeight)}p (${video.videoWidth}×${video.videoHeight})${name ? ' · ' + name : ''}`;
   }
 
   if (typeof module !== 'undefined' && module.exports) {
-    module.exports = {autoCap, selectQuality, renditionText};
+    module.exports = {chooseLevel, audioProfile, adaptLevel, selectQuality, renditionText};
   }
   if (typeof document === 'undefined') return;
 
   const attached = new Map();
+  function bufferAhead(video) {
+    for (let i = 0; i < video.buffered.length; i++) {
+      if (video.buffered.start(i) <= video.currentTime + 0.1 && video.buffered.end(i) > video.currentTime) {
+        return video.buffered.end(i) - video.currentTime;
+      }
+    }
+    return 0;
+  }
+
+  async function speedProbe(signal) {
+    // Same TLS connection/path as playback. Random data cannot be compressed
+    // or cached into an unrealistically fast result. Bound startup and traffic.
+    const abort = new AbortController();
+    const onAbort = () => abort.abort();
+    signal.addEventListener('abort', onAbort, {once: true});
+    const timer = setTimeout(() => abort.abort(), 2200);
+    let estimate = 0;
+    try {
+      for (const size of [65536, 393216, 1572864]) {
+        const path = window.OC?.generateUrl('/apps/memories_rkmpp_v11/probe') || '/index.php/apps/memories_rkmpp_v11/probe';
+        const response = await fetch(`${path}?bytes=${size}&t=${Date.now()}`, {cache:'no-store', signal:abort.signal});
+        if (!response.ok || !response.headers.get('content-type')?.includes('application/octet-stream')) break;
+        const reader = response.body.getReader();
+        const start = performance.now();
+        let bytes = 0;
+        try {
+          while (true) {
+            const part = await reader.read();
+            if (part.done) break;
+            bytes += part.value.byteLength;
+          }
+        } finally {
+          if (bytes) estimate = bytes * 8000 / Math.max(25, performance.now() - start);
+          reader.releaseLock();
+        }
+        if (estimate < 4000000 || (size >= 393216 && estimate < 25000000)) break;
+      }
+    } catch { /* Timeout uses partial bytes; unavailable probe starts low. */ }
+    finally {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+    }
+    return estimate || 750000;
+  }
+
+  async function warmOriginal(state) {
+    const hls = state.hls;
+    const level = hls.levels.find(isOriginal);
+    if (!level || state.originalReady || state.warming || Date.now() - state.lastWarm < 5000) return;
+    state.warming = true;
+    state.lastWarm = Date.now();
+    try {
+      const url = Array.isArray(level.url) ? level.url[0] : level.url;
+      const response = await fetch(url, {cache:'no-store', signal:state.abort.signal});
+      state.originalReady = response.ok;
+      // A pending keyframe probe responds 409; encoded playback stays usable.
+      await response.body?.cancel();
+    } catch { /* Retry later without blocking playback. */ }
+    finally { state.warming = false; }
+  }
+
+  function setAudio(state, startup = false) {
+    const desired = audioProfile(state.bps);
+    const now = Date.now();
+    if (desired !== state.audioCandidate) {
+      state.audioCandidate = desired;
+      state.audioCandidateSince = now;
+    }
+    const current = state.audioProfile || 'audio';
+    const down = ['audio32','audio64','audio96','audio'].indexOf(desired) < ['audio32','audio64','audio96','audio'].indexOf(current);
+    if (!startup && (now - state.audioCandidateSince < (down ? 6000 : 25000) || now - state.audioChanged < 15000)) return;
+    const tracks = state.hls.audioTracks || [];
+    const index = tracks.findIndex(t => new RegExp('/' + desired + '\\.m3u8(?:\\?|$)').test(t.url || ''));
+    if (index >= 0 && state.hls.audioTrack !== index) {
+      state.hls.audioTrack = index;
+      state.audioChanged = now;
+    }
+    if (index >= 0) state.audioProfile = desired;
+  }
+
+  function configure(video, state, hls) {
+    state.hls = hls;
+    state.abort = new AbortController();
+    state.selected = 'auto';
+    state.checking = true;
+    state.originalReady = false;
+    state.lastWarm = 0;
+    state.events = [];
+    const Events = hls.constructor.Events;
+    const listen = (event, fn) => {
+      if (!event) return;
+      hls.on(event, fn);
+      state.events.push([event, fn]);
+    };
+    if (Object.getOwnPropertyDescriptor(video, 'currentQuality')?.configurable) {
+      Object.defineProperty(video, 'currentQuality', {
+        configurable:true, get:() => state.selected,
+        set:id => { state.selected = id; selectQuality(video, hls, id); },
+      });
+    }
+    Object.assign(hls.config, {
+      autoStartLoad:false, startFragPrefetch:false,
+      maxBufferLength:12, maxMaxBufferLength:18, backBufferLength:20,
+      capLevelOnFPSDrop:true, fpsDroppedMonitoringThreshold:0.05,
+      abrBandWidthFactor:0.8, abrBandWidthUpFactor:0.65,
+      abrEwmaFastVoD:3, abrEwmaSlowVoD:10,
+    });
+    hls.stopLoad();
+    let starting = false;
+    const measured = speedProbe(state.abort.signal);
+    const start = async () => {
+      if (starting || !hls.levels.length) return;
+      starting = true;
+      void warmOriginal(state);
+      state.bps = await measured;
+      if (state.abort.signal.aborted) return;
+      state.cap = chooseLevel(hls.levels, state.bps, state.originalReady);
+      state.candidate = state.cap;
+      state.candidateSince = state.changed = Date.now();
+      hls.bandwidthEstimate = state.bps;
+      hls.autoLevelCapping = state.cap;
+      hls.startLevel = state.cap;
+      setAudio(state, true);
+      state.checking = false;
+      hls.startLoad();
+    };
+    listen(Events.MANIFEST_PARSED, start);
+    listen(Events.AUDIO_TRACKS_UPDATED, () => setAudio(state, state.checking));
+    listen(Events.FRAG_LOADED, (_event, data) => {
+      if (data.frag?.type !== 'main') return;
+      const stats = data.stats || data.frag.stats;
+      const elapsed = stats?.loading?.end - stats?.loading?.first;
+      if (!(elapsed > 0) || !stats.loaded) return;
+      const sample = stats.loaded * 8000 / Math.max(25, elapsed);
+      // Fast downward response, slower recovery. Exclude the encoder's TTFB.
+      state.bps = state.bps * (sample < state.bps ? 0.35 : 0.8) + sample * (sample < state.bps ? 0.65 : 0.2);
+    });
+    listen(Events.FPS_DROP_LEVEL_CAPPING, (_event, data) => { state.decoderCap = data.level; });
+    listen(Events.ERROR, (_event, data) => {
+      state.badge.dataset.lastError = data.details || '';
+      if (data.fatal) state.failure = 'Playback error';
+    });
+    if (hls.levels.length) void start();
+  }
+
   function attach(video) {
     if (attached.has(video) || !(video instanceof HTMLVideoElement)) return;
+    const parent = video.closest('.memories-video-stage');
+    if (!parent) return;
     const badge = document.createElement('div');
     badge.className = 'mr-v11-status';
     badge.setAttribute('role', 'status');
-    const parent = video.closest('.memories-video-stage');
-    if (!parent) return;
     parent.appendChild(badge);
-    const state = {badge, hls: null, descriptor: null};
+    const state = {badge, hls:null, decoderCap:Infinity, bps:0, audioChanged:0};
     attached.set(video, state);
-    video.addEventListener('resize', () => update(video, state));
-    video.addEventListener('loadedmetadata', () => update(video, state));
+    const refresh = () => update(video, state);
+    for (const event of ['resize','loadedmetadata','quality-list']) video.addEventListener(event, refresh);
+    state.detach = () => {
+      state.abort?.abort();
+      for (const [event, fn] of state.events || []) state.hls.off(event, fn);
+      for (const event of ['resize','loadedmetadata','quality-list']) video.removeEventListener(event, refresh);
+      badge.remove();
+    };
     update(video, state);
   }
 
   function update(video, state) {
     const hls = video._qualityHls;
-    if (hls && state.hls !== hls) {
-      state.hls = hls;
-      state.descriptor = Object.getOwnPropertyDescriptor(video, 'currentQuality');
-      if (state.descriptor?.configurable) {
-        Object.defineProperty(video, 'currentQuality', {
-          configurable: true,
-          get: () => video._qualitySelected || 'auto',
-          set: id => selectQuality(video, hls, id),
-        });
+    if (hls && state.hls !== hls) configure(video, state, hls);
+    const buffer = bufferAhead(video);
+    const now = Date.now();
+    if (hls?.levels?.length && !state.checking && state.selected === 'auto' && !video.seeking) {
+      const target = chooseLevel(hls.levels, state.bps, state.originalReady, state.decoderCap);
+      if (target !== state.candidate) { state.candidate = target; state.candidateSince = now; }
+      const slope = state.previous && !video.paused ? (buffer - state.previous.buffer) * 1000 / (now - state.previous.time) : 0;
+      const cap = adaptLevel(state.cap, target, buffer, slope, now - state.candidateSince, now - state.changed);
+      if (cap !== state.cap) {
+        const down = cap < state.cap;
+        state.cap = cap;
+        state.changed = now;
+        hls.autoLevelCapping = cap;
+        if (down && hls.currentLevel > cap) {
+          // Drop future video fragments, retain currently playing audio/video.
+          hls.nextLevel = cap;
+          hls.loadLevel = -1;
+        }
+        hls.nextAutoLevel = cap;
       }
-      hls.config.maxBufferLength = 12;
-      hls.config.maxMaxBufferLength = 18;
-      hls.config.backBufferLength = 20;
+      setAudio(state);
+      void warmOriginal(state);
     }
-    if (hls?.levels?.length && hls.autoLevelEnabled) {
-      const rect = video.getBoundingClientRect();
-      const aspect = video.videoWidth / video.videoHeight || 16 / 9;
-      const width = Math.min(rect.width, rect.height * aspect);
-      const height = Math.min(rect.height, rect.width / aspect);
-      hls.autoLevelCapping = autoCap(hls.levels, width, height, window.devicePixelRatio);
-    }
-    const text = renditionText(video, hls);
+    state.previous = {buffer,time:now};
+    const text = state.failure || (state.checking ? 'Checking connection…' : renditionText(video, hls));
     if (state.badge.textContent !== text) state.badge.textContent = text;
-    // Local diagnostics only; no telemetry leaves the browser.
+    Object.assign(state.badge.dataset, {
+      bandwidth: String(Math.round(state.bps)), buffer:buffer.toFixed(2),
+      cap:String(state.cap ?? ''), audio:state.audioProfile || '',
+    });
     if (typeof video.getVideoPlaybackQuality === 'function') {
       const q = video.getVideoPlaybackQuality();
       state.badge.dataset.droppedFrames = String(q.droppedVideoFrames);
@@ -104,14 +271,12 @@
       if (node.matches('video')) attach(node);
       node.querySelectorAll('video').forEach(attach);
     }
-  }).observe(document.documentElement, {childList: true, subtree: true});
+  }).observe(document.documentElement, {childList:true, subtree:true});
   document.querySelectorAll('video').forEach(attach);
   setInterval(() => {
     for (const [video, state] of attached) {
-      if (!video.isConnected) {
-        state.badge.remove();
-        attached.delete(video);
-      } else update(video, state);
+      if (!video.isConnected) { state.detach(); attached.delete(video); }
+      else update(video, state);
     }
-  }, 1000);
+  }, 500);
 })();

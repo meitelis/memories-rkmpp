@@ -31,9 +31,12 @@ func MasterPlaylist(renditions []core.Rendition, frameRate int, query string) (s
 		}
 		if r.SeparateAudio {
 			params.Audio = "audio"
-			params.Alternatives = []*m3u8.Alternative{{
-				GroupId: "audio", Type: "AUDIO", Name: "Audio", Default: true, Autoselect: "YES", URI: "audio.m3u8" + query,
-			}}
+			params.Alternatives = []*m3u8.Alternative{
+				{GroupId: "audio", Type: "AUDIO", Name: "Original / high", Default: true, Autoselect: "YES", URI: "audio.m3u8" + query},
+				{GroupId: "audio", Type: "AUDIO", Name: "96 kbps", Autoselect: "NO", URI: "audio96.m3u8" + query},
+				{GroupId: "audio", Type: "AUDIO", Name: "64 kbps", Autoselect: "NO", URI: "audio64.m3u8" + query},
+				{GroupId: "audio", Type: "AUDIO", Name: "32 kbps", Autoselect: "NO", URI: "audio32.m3u8" + query},
+			}
 		}
 		m.Append(r.Quality+".m3u8"+query, nil, params)
 	}

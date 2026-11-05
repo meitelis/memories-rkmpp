@@ -43,3 +43,12 @@
 - Existing PRs 6 and 8 were already closed/unmerged. PR 5 contains legacy 10.2 direct-play work. No mainline merge or branch deletion has been performed.
 
 No credentials or private-media contents belong in this repository. Keep diagnostic logs containing private URLs/tokens outside Git.
+
+## Adaptive implementation checkpoint
+
+- Implemented bounded startup throughput probing through Nextcloud, bandwidth/headroom selection, buffer exhaustion prediction and delayed quality recovery in the native adapter (1.0.1).
+- Added independently selected 192/high, 96, 64 and 32 kbps shared audio profiles; complete compatible stereo 48 kHz AAC may keep source packets. Normalized profiles restart on the global AAC frame grid.
+- Added 240p/360p hardware renditions and an encoded fallback for small originals while their copy grid is pending.
+- Linux ARM64 Go tests, vet, formatting and server/test-image builds passed for the first adaptive backend iteration. Five focused JavaScript regression tests pass. The subsequent small fallback/profile-test changes still need the next Linux build.
+- Production runtime build succeeded. Hardware matrix and live adaptive-player validation are in progress; this checkpoint is not acceptance of smooth playback.
+- Replaced stale default documentation with the v11 deployment path; removed the duplicate v11 Compose file. No merge or branch cleanup yet.

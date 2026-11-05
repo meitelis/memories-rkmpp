@@ -44,7 +44,7 @@ func TestRKMPPHardwareServing(t *testing.T) {
 			require.NoError(t, err)
 			t.Cleanup(m.Destroy)
 			require.True(t, m.HasStream(QUALITY_AUDIO))
-			for _, quality := range []string{"480p", QUALITY_MAX, QUALITY_AUDIO} {
+			for _, quality := range []string{"240p", "480p", QUALITY_MAX, QUALITY_AUDIO, QUALITY_AUDIO96, QUALITY_AUDIO64, QUALITY_AUDIO32} {
 				require.True(t, m.HasStream(quality))
 				serve := func(id int) []byte {
 					w := httptest.NewRecorder()
@@ -69,7 +69,7 @@ func TestRKMPPHardwareServing(t *testing.T) {
 				out, err := exec.Command(bin, "-v", "error", "-xerror", "-i", joined, "-map", "0", "-f", "null", "-").CombinedOutput()
 				require.NoError(t, err, string(out))
 				track := "v:0"
-				if quality == QUALITY_AUDIO {
+				if isAudioQuality(quality) {
 					track = "a:0"
 				}
 				out, err = exec.Command(probe, "-v", "error", "-select_streams", track,

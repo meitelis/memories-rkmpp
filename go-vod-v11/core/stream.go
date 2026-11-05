@@ -392,13 +392,13 @@ func (s *Stream) spec(startAt float64, isHls bool) ffmpeg.Spec {
 	// scales *before* applying display-matrix rotation. Feed RGA dimensions
 	// in the source's raw orientation. Max/direct already use raw dimensions.
 	if s.c.RKMPP && s.quality != QUALITY_MAX && s.quality != QUALITY_DIRECT &&
-		s.quality != QUALITY_AUDIO && s.m.probe.Width < s.m.probe.Height {
+		!isAudioQuality(s.quality) && s.m.probe.Width < s.m.probe.Height {
 		width, height = height, width
 	}
 
 	// The shared audio stream is audio-only; video renditions mute their own
 	// audio so the player uses the single shared AAC track instead.
-	audioOnly := s.c.RKMPP && s.quality == QUALITY_AUDIO
+	audioOnly := s.c.RKMPP && isAudioQuality(s.quality)
 	separateAudio := s.c.RKMPP && isHls && !audioOnly && s.m.HasStream(QUALITY_AUDIO)
 
 	// EndAt bounds the audio padding so the stream doesn't outlast the video.
@@ -438,6 +438,7 @@ func (s *Stream) spec(startAt float64, isHls bool) ffmpeg.Spec {
 		BitDepth:       s.m.probe.BitDepth,
 		Audio:          s.m.probe.Audio,
 		AudioOnly:      audioOnly,
+		AudioBitrate:   s.bitrate,
 		SeparateAudio:  separateAudio,
 		EndAt:          endAt,
 		ChunkSize:      s.m.tc.ChunkSize,

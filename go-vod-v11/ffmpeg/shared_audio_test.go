@@ -20,7 +20,7 @@ func TestSharedAudioArgsAreAudioOnly(t *testing.T) {
 	args := BuildArgs(s)
 	joined := strings.Join(args, " ")
 
-	for _, want := range []string{"-vn", "-c:a", "aac", "-ac", "2", "-ar", "48000", "-b:a", "128k", "-af"} {
+	for _, want := range []string{"-vn", "-c:a", "aac", "-ac", "2", "-ar", "48000", "-b:a", "192000", "-af"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("missing %q in audio-only args: %s", want, joined)
 		}
