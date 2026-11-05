@@ -28,13 +28,46 @@ test('a delayed proxy burst stays constrained for the full weak-link trace',()=>
     assert.equal(a.cancel,false);
   }
 });
-test('recovery increases one level after sustained healthy buffering',()=>{
+test('recovery remeasures capacity after healthy buffering instead of trusting paced segment waits',()=>{
   const p=normal();tick(p,{now:1000,buffer:9,requestAge:2500});
   for(let i=0;i<6;i++)p.sample({loaded:200000,loading:{start:1000,first:1050,end:1075}});
   tick(p,{now:2000,buffer:12});
-  assert.equal(tick(p,{now:11000,buffer:12}).cap,0);
-  assert.equal(tick(p,{now:12000,buffer:12}).cap,1);
-  assert.equal(tick(p,{now:22000,buffer:12}).cap,2);
+  assert.equal(tick(p,{now:10000,buffer:12}).probe,false);
+  const recheck=tick(p,{now:12000,buffer:12});
+  assert.equal(recheck.probe,true);
+  assert.equal(recheck.cap,0);
+  p.measured(30000000,12000,true);
+  assert.equal(tick(p,{now:12500,buffer:12}).cap,6);
+  assert.equal(p.phase,'normal');
+});
+
+test('recovery measurements respect affordability, Original readiness and decoder limits',()=>{
+  const p=normal();tick(p,{now:1000,buffer:9,requestAge:2500});
+  p.measured(800000,12000,true);
+  assert.equal(tick(p,{now:12500}).cap,0);
+  assert.equal(tick(p,{now:26000}).probe,false);
+  assert.equal(tick(p,{now:27000}).probe,true);
+  p.measured(30000000,28000,false,3);
+  assert.equal(tick(p,{now:28500,originalReady:false,decoderCap:3}).cap,3);
+});
+
+test('weak-startup playback rechecks capacity even without a buffer rescue',()=>{
+  const p=new PlaybackPolicy(levels,750000,true);
+  tick(p,{now:1000,currentLevel:0});
+  assert.equal(p.phase,'normal');
+  assert.equal(p.cap,0,'buffer warmup does not invalidate the measured network budget');
+  p.sample({loaded:800000,loading:{start:2000,first:9900,end:10000}});
+  assert.equal(p.bps,750000,'a proxy burst does not change the measured audio budget');
+  assert.equal(tick(p,{now:11000,currentLevel:0}).probe,true);
+  assert.equal(tick(p,{now:12000,currentLevel:0}).probe,false);
+  assert.equal(tick(p,{now:30000,currentLevel:6}).probe,false);
+  assert.equal(tick(p,{now:30000,currentLevel:0,playing:false}).probe,false);
+});
+
+test('recovery does not wait for a paced producer to fill ten seconds of buffer',()=>{
+  const p=normal();tick(p,{now:1000,buffer:9,requestAge:2500});
+  tick(p,{now:2000,buffer:7,currentLevel:0});
+  assert.equal(tick(p,{now:12000,buffer:7,currentLevel:0}).probe,true);
 });
 test('pause, seeking and manual selection never trigger a rescue',()=>{
   for(const override of [{playing:false},{seeking:true},{auto:false}]){
@@ -49,6 +82,7 @@ test('an encoded-only ladder is not accidentally capped to its lowest level',()=
 test('unready original and decoder limits remain respected',()=>{
   const p=normal();assert.equal(tick(p,{originalReady:false}).cap,5);
   assert.equal(tick(p,{decoderCap:3}).cap,3);
+  assert.equal(tick(p).cap,6,'availability and decoder gates do not erase the measured network budget');
 });
 
 test('a cold seek preserves quality after seeked until the producer has warmed',()=>{

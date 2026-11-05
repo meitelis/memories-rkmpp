@@ -21,8 +21,9 @@
       this.deliveryBps = initialBps;
       this.latency = 200;
       this.cap = chooseLevel(levels, initialBps, ready);
+      this.networkCap = chooseLevel(levels, initialBps);
       this.healthySince = null;
-      this.lastChange = 0;
+      this.probeAt = 0;
     }
     sample(stats) {
       // A cold seek includes producer startup, not just network delivery.
@@ -33,17 +34,24 @@
       const effectiveMs = Math.max(25, load.end - load.start - this.latency);
       const rate = stats.loaded * 8000 / effectiveMs;
       this.deliveryBps = rate < this.deliveryBps ? rate : Math.min(rate, this.deliveryBps * 2);
-      this.bps = this.phase === 'recovering' ? this.deliveryBps : stats.loaded * 8000 / Math.max(25, load.end - load.first);
     }
     beginSeek() {
       this.phase = 'seeking';
       this.healthySince = null;
     }
-    step({now, buffer, playing, seeking, auto, requestAge = 0, loaded = 0, originalReady = false, decoderCap = Infinity, targetBuffer = 18}) {
+    measured(bps, now, originalReady, decoderCap = Infinity) {
+      this.bps = this.deliveryBps = bps;
+      this.networkCap = chooseLevel(this.levels, bps);
+      this.cap = chooseLevel(this.levels, bps, originalReady, decoderCap);
+      this.healthySince = now;
+      this.probeAt = now + 15000;
+    }
+    step({now, buffer, playing, seeking, auto, requestAge = 0, loaded = 0, originalReady = false, decoderCap = Infinity, targetBuffer = 18, currentLevel = this.cap}) {
       const originalIndex = this.levels.findIndex(original);
       const limit = Math.min(decoderCap, originalReady || originalIndex < 0 ? this.levels.length - 1 : Math.max(0, originalIndex - 1));
       let cancel = false;
-      this.cap = Math.min(this.cap, limit);
+      let probe = false;
+      this.cap = Math.min(this.networkCap, limit);
       const healthyBuffer = Math.min(10, targetBuffer * 0.6);
       const criticalBuffer = Math.min(4, targetBuffer * 0.25);
       if (!playing || !auto || (seeking && this.phase !== 'seeking')) {
@@ -52,31 +60,32 @@
       }
       // A metadata-sized buffer is normal before playback has warmed up.
       if (this.phase === 'startup' || this.phase === 'seeking') {
-        if (buffer >= healthyBuffer) { this.phase = 'normal'; this.cap = limit; }
+        if (buffer >= healthyBuffer) this.phase = 'normal';
         else if (requestAge < 6000) return this.result(cancel);
       }
       const endangered = (buffer < healthyBuffer && requestAge > 2000 && !loaded) || (buffer < criticalBuffer && requestAge > 1000);
       if (endangered && (this.phase !== 'recovering' || this.cap > 0)) {
         this.phase = 'recovering';
         this.cap = 0;
+        this.networkCap = 0;
         this.bps = Math.min(this.deliveryBps, bitrate(this.levels[0]) / 0.72);
         this.healthySince = null;
-        this.lastChange = now;
         cancel = true;
       } else if (this.phase === 'recovering') {
-        if (buffer < healthyBuffer) this.healthySince = null;
-        else if (this.healthySince === null) this.healthySince = now;
-        const affordable = chooseLevel(this.levels, this.deliveryBps, originalReady, limit);
-        if (this.healthySince !== null && now - this.healthySince >= 10000 && now - this.lastChange >= 10000 && affordable > this.cap) {
-          this.cap++;
-          this.lastChange = now;
-          this.healthySince = now;
-          if (this.cap === limit) this.phase = 'normal';
-        }
-      } else this.cap = limit;
-      return this.result(cancel);
+        if (this.cap === limit) this.phase = 'normal';
+      }
+      if (buffer < Math.min(6, healthyBuffer)) this.healthySince = null;
+      else if (this.healthySince === null) this.healthySince = now;
+      // A paced encoder can hold a request until the next segment exists.
+      // That wait cannot establish network capacity. Remeasure when a lower
+      // rendition has healthy buffers, including after weak-network startup.
+      if (currentLevel < limit && this.healthySince !== null && now - this.healthySince >= 10000 && now >= this.probeAt) {
+        this.probeAt = now + 15000;
+        probe = true;
+      }
+      return this.result(cancel, probe);
     }
-    result(cancel) { return {phase:this.phase, cap:this.cap, bps:this.bps, audio:audioProfile(this.bps), cancel}; }
+    result(cancel, probe = false) { return {phase:this.phase, cap:this.cap, bps:this.bps, audio:audioProfile(this.bps), cancel, probe}; }
   }
   const api = {PlaybackPolicy, chooseLevel, audioProfile};
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

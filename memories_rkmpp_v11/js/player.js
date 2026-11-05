@@ -58,7 +58,7 @@
   }
 
   if (typeof module !== 'undefined' && module.exports) {
-    module.exports = {chooseLevel, audioProfile, selectQuality, selectAudio, beginSeek, requestAge, renditionText, configure};
+    module.exports = {chooseLevel, audioProfile, selectQuality, selectAudio, beginSeek, requestAge, renditionText, configure, recheckConnection};
   }
   if (typeof document === 'undefined') return;
   const debug = new URLSearchParams(location.search).has('rkmpp_debug');
@@ -110,6 +110,18 @@
       signal.removeEventListener('abort', onAbort);
     }
     return estimate || 750000;
+  }
+
+  async function recheckConnection(video, state) {
+    const policy = state.policy;
+    const abort = state.abort;
+    const bps = await speedProbe(abort.signal);
+    if (abort.signal.aborted || state.policy !== policy || state.selected !== 'auto' || video.seeking || !['normal', 'recovering'].includes(policy.phase)) return;
+    policy.measured(bps, Date.now(), state.originalReady, state.decoderCap);
+    state.hls.bandwidthEstimate = bps;
+    state.hls.autoLevelCapping = policy.cap;
+    state.hls.nextAutoLevel = policy.cap;
+    state.badge.dataset.recoveryBandwidth = String(Math.round(bps));
   }
 
   async function warmOriginal(state, force = false) {
@@ -332,11 +344,13 @@
       const action = state.policy.step({
         now, buffer, playing:!video.paused && !video.ended, seeking:video.seeking,
         auto:state.selected === 'auto', originalReady:state.originalReady, decoderCap:state.decoderCap,
+        currentLevel:hls.currentLevel,
         requestAge:requestAge(video, state, now),
         loaded:stats?.loaded || 0,
         targetBuffer:Math.min(hls.config.maxMaxBufferLength,
           Math.max(hls.config.maxBufferLength, 8*hls.config.maxBufferSize/bandwidth(hls.levels[hls.currentLevel]))),
       });
+      const raisedCap = action.cap > state.cap;
       state.bps = action.bps;
       state.cap = action.cap;
       state.badge.dataset.phase = action.phase;
@@ -347,6 +361,7 @@
           hls.loadLevel = -1;
         }
         hls.autoLevelCapping = action.cap;
+        if (raisedCap) hls.nextAutoLevel = action.cap;
         if (action.cancel) {
           // Stop downloads only. Keep the media source and playing buffers.
           hls.stopLoad();
@@ -355,6 +370,7 @@
           hls.startLoad(video.currentTime, true);
         }
         void warmOriginal(state);
+        if (action.probe) void recheckConnection(video, state);
       }
       setAudio(state);
     }

@@ -1,6 +1,6 @@
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
-const {chooseLevel, audioProfile, selectQuality, selectAudio, beginSeek, requestAge, renditionText, configure} = require('./player.js');
+const {chooseLevel, audioProfile, selectQuality, selectAudio, beginSeek, requestAge, renditionText, configure, recheckConnection} = require('./player.js');
 const {PlaybackPolicy} = require('./policy.js');
 
 const settle=()=>new Promise(resolve=>setImmediate(resolve));
@@ -135,4 +135,30 @@ test('late audio-track discovery applies the measured startup rate immediately',
   assert.equal(hls.audioTrack,2);
   assert.equal(state.audioProfile,'audio64');
   state.abort.abort();
+});
+
+test('a fresh network measurement schedules one affordable automatic rendition without touching media or audio', async () => {
+  const previousWindow=global.window, previousFetch=global.fetch;
+  global.window={OC:{generateUrl:()=>'/probe'}};
+  global.fetch=async()=>({ok:true,headers:{get:()=> 'application/octet-stream'},body:{getReader:()=>{
+    let sent=false;
+    return {read:async()=>sent?{done:true}:(sent=true,{done:false,value:new Uint8Array(1572864)}),releaseLock(){}};
+  }}});
+  const state={selected:'auto',originalReady:true,decoderCap:Infinity,abort:new AbortController(),
+    policy:new PlaybackPolicy(levels,750000,true),badge:{dataset:{}},hls:{
+      set currentLevel(_) {throw Error('playing buffers flushed');},
+      set audioTrack(_) {throw Error('shared audio reset');},
+    }};
+  state.policy.phase='recovering';
+  try {
+    await recheckConnection({seeking:false},state);
+    assert.equal(state.hls.nextAutoLevel,4);
+    assert.equal(state.hls.autoLevelCapping,4);
+    assert.ok(state.hls.bandwidthEstimate>20000000);
+    state.hls.nextAutoLevel=undefined;
+    const pending=recheckConnection({seeking:false},state);
+    state.selected='manual';
+    await pending;
+    assert.equal(state.hls.nextAutoLevel,undefined,'a probe cannot override a later user choice');
+  } finally {global.window=previousWindow;global.fetch=previousFetch;state.abort.abort();}
 });
