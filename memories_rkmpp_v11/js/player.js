@@ -55,7 +55,7 @@
   }
 
   if (typeof module !== 'undefined' && module.exports) {
-    module.exports = {chooseLevel, audioProfile, adaptLevel, selectQuality, renditionText};
+    module.exports = {chooseLevel, audioProfile, adaptLevel, selectQuality, renditionText, configure};
   }
   if (typeof document === 'undefined') return;
 
@@ -132,7 +132,7 @@
     const down = ['audio32','audio64','audio96','audio'].indexOf(desired) < ['audio32','audio64','audio96','audio'].indexOf(current);
     if (!startup && (now - state.audioCandidateSince < (down ? 6000 : 25000) || now - state.audioChanged < 15000)) return;
     const tracks = state.hls.audioTracks || [];
-    const index = tracks.findIndex(t => new RegExp('/' + desired + '\\.m3u8(?:\\?|$)').test(t.url || ''));
+    const index = tracks.findIndex(t => (t.url || '').split('?')[0].endsWith('/' + desired + '.m3u8'));
     if (index >= 0 && state.hls.audioTrack !== index) {
       state.hls.audioTrack = index;
       state.audioChanged = now;
@@ -142,6 +142,7 @@
 
   function configure(video, state, hls) {
     state.abort?.abort();
+    clearTimeout(state.retryTimer);
     for (const [event, fn] of state.events || []) state.hls.off(event, fn);
     state.hls = hls;
     state.abort = new AbortController();
@@ -151,6 +152,7 @@
     state.lastWarm = 0;
     state.events = [];
     state.failure = '';
+    state.retries = 0;
     state.badge.dataset.hlsVersion = hls.constructor.version || '';
     const Events = hls.constructor.Events;
     const listen = (event, fn) => {
@@ -171,12 +173,17 @@
       abrBandWidthFactor:0.8, abrBandWidthUpFactor:0.65,
       abrEwmaFastVoD:3, abrEwmaSlowVoD:10,
     });
-    hls.stopLoad();
+    // stopLoad also aborts an in-flight manifest in hls.js 1.7. Wait for
+    // its normal parse event; autoStartLoad=false already holds fragments.
+    if (hls.levels.length) hls.stopLoad();
+    state.badge.dataset.phase = 'waiting-manifest';
     let starting = false;
     const measured = speedProbe(state.abort.signal);
     const start = async () => {
       if (starting || !hls.levels.length) return;
       starting = true;
+      state.badge.dataset.levels = hls.levels.map(l => `${l.width}x${l.height}:${l.bitrate}:${isOriginal(l) ? 'original' : 'encoded'}`).join(',');
+      state.badge.dataset.phase = 'probing';
       void warmOriginal(state);
       state.bps = await measured;
       if (state.abort.signal.aborted) return;
@@ -190,6 +197,7 @@
       hls.startLevel = state.cap;
       setAudio(state, true);
       state.checking = false;
+      state.badge.dataset.phase = 'loading';
       hls.startLoad();
     };
     listen(Events.MANIFEST_PARSED, start);
@@ -203,10 +211,26 @@
       // Fast downward response, slower recovery. Exclude the encoder's TTFB.
       state.bps = state.bps * (sample < state.bps ? 0.35 : 0.8) + sample * (sample < state.bps ? 0.65 : 0.2);
     });
+    listen(Events.FRAG_BUFFERED, () => {
+      state.failure = '';
+      state.retries = 0;
+      clearTimeout(state.retryTimer);
+    });
     listen(Events.FPS_DROP_LEVEL_CAPPING, (_event, data) => { state.decoderCap = data.level; });
     listen(Events.ERROR, (_event, data) => {
       state.badge.dataset.lastError = data.details || '';
-      if (data.fatal) state.failure = 'Playback error';
+      if (!data.fatal) return;
+      state.badge.dataset.fatalError = `${data.type || ''}:${data.details || ''}:${data.response?.code || ''}`;
+      if (data.type === 'networkError' && state.retries < 4 && !state.abort.signal.aborted) {
+        state.failure = 'Reconnecting…';
+        clearTimeout(state.retryTimer);
+        state.retryTimer = setTimeout(() => {
+          if (state.abort.signal.aborted) return;
+          // Resume from the existing clock and MSE buffers. Changing sources
+          // or reattaching the media here would interrupt the shared audio.
+          hls.startLoad(video.currentTime, true);
+        }, Math.min(8000, 1000 * 2 ** state.retries++));
+      } else state.failure = 'Playback error';
     });
     if (hls.levels.length) void start();
   }
@@ -225,6 +249,7 @@
     for (const event of ['resize','loadedmetadata','quality-list']) video.addEventListener(event, refresh);
     state.detach = () => {
       state.abort?.abort();
+      clearTimeout(state.retryTimer);
       for (const [event, fn] of state.events || []) state.hls.off(event, fn);
       for (const event of ['resize','loadedmetadata','quality-list']) video.removeEventListener(event, refresh);
       badge.remove();
@@ -237,7 +262,7 @@
     if (hls && state.hls !== hls) configure(video, state, hls);
     const buffer = bufferAhead(video);
     const now = Date.now();
-    if (hls?.levels?.length && !state.checking && state.selected === 'auto' && !video.seeking) {
+    if (hls?.levels?.length && !state.checking && state.selected === 'auto' && !video.seeking && !video.paused) {
       const target = chooseLevel(hls.levels, state.bps, state.originalReady, state.decoderCap);
       if (target !== state.candidate) { state.candidate = target; state.candidateSince = now; }
       const slope = state.previous && !video.paused ? (buffer - state.previous.buffer) * 1000 / (now - state.previous.time) : 0;

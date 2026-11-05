@@ -1,6 +1,6 @@
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
-const {chooseLevel, audioProfile, adaptLevel, selectQuality, renditionText} = require('./player.js');
+const {chooseLevel, audioProfile, adaptLevel, selectQuality, renditionText, configure} = require('./player.js');
 
 const levels = [350000,700000,1800000,4000000,9000000].map((bitrate,i)=>({bitrate,url:[i===4?'/direct.m3u8?x=y':`/${i}.m3u8`]}));
 test('startup budgets headroom and selects the original only when ready and affordable', () => {
@@ -41,4 +41,25 @@ test('label reports presented resolution and original codec', () => {
   assert.equal(renditionText(video,hls),'Auto · 1080p (1920×1080) · HEVC');
   hls.levels[0].url=['/direct.m3u8?codecs=hevc'];
   assert.match(renditionText(video,hls),/^Original · 1080p/);
+});
+
+test('startup holds fragments without aborting the manifest and resumes when parsed', async () => {
+  const events = new Map();
+  const hls = {
+    constructor:{Events:{MANIFEST_PARSED:'parsed'},version:'1.7'}, config:{}, levels:[],
+    audioTracks:['audio','audio96','audio64','audio32'].map(id=>({url:`https://example.test/${id}.m3u8?token=fixture`})),
+    on(event,fn){ events.set(event,fn); },
+    stopLoad(){ throw Error('manifest aborted before parsing'); },
+    startLoad(){ this.started=true; },
+  };
+  const state={badge:{dataset:{}},audioChanged:0};
+  configure({},state,hls);
+  assert.equal(hls.config.autoStartLoad,false);
+  assert.equal(hls.started,undefined);
+  hls.levels=[{bitrate:400000,url:['/480plow.m3u8']}];
+  await events.get('parsed')();
+  assert.equal(hls.started,true);
+  assert.equal(state.checking,false);
+  assert.equal(hls.audioTrack,2,'conservative startup selects the matching 64 kbps audio URI');
+  state.abort.abort();
 });

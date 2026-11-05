@@ -60,3 +60,12 @@ No credentials or private-media contents belong in this repository. Keep diagnos
 - User clarified that 480p is the minimum desired video resolution. Removed 240p/360p. Added lower-bitrate 480p variants for weak links, retaining the independent 96/64/32 kbps audio options.
 - Added an auto codec policy to preserve compatible SDR AVC originals and keep their encoded ladder on AVC. HEVC originals remain HEVC when the browser supports them; forced AVC/HEVC options remain available.
 - The 480p-minimum build passed Linux tests/vet/formatting and the video/HDR/shared-audio hardware checks; final API testing and deployment are running. Real browser acceptance is still pending. No mainline merge or branch deletion.
+
+## Live integration fixes after 82534ff
+
+- The 480p-minimum backend and adapter were deployed successfully, including the persisted Nextcloud app upgrade and real 0.7.0 handshake.
+- Live startup exposed an ordering bug: do not abort an in-flight manifest while holding fragments for the speed probe. Added a regression test that parses the manifest and resumes loading.
+- Prevent buffer-driven Auto downshifts while paused. Fixed audio URI matching. Renamed low-rate video profiles to alphanumeric labels accepted by upstream segment/init parsers; the hardware API test now fetches both profiles explicitly. The expanded board matrix passed and the corrected backend was deployed.
+- Existing real video reached Original HEVC 3200×1800 with about 18 seconds buffered and source audio copied once. This verifies the no-generational-video-loss path, not final smoothness acceptance.
+- A backend replacement during the live manual-switch test interrupted requests; the native player stayed stopped after a fatal network error. Added bounded retries that resume from the current clock without replacing the media source or flushing shared audio. Adapter 1.0.4 is being installed for stable-server and constrained-link validation.
+- Mainline merge and branch cleanup remain pending real playback acceptance.

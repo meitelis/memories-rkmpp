@@ -62,9 +62,9 @@ func TestRKMPPPreservesCompatibleHEVCOriginalInMaster(t *testing.T) {
 		}
 	}
 	require.True(t, found, "original must be visible in the master playlist")
-	require.True(t, m.HasStream("480p-low"), "weak links need a lower bitrate at the same minimum resolution")
-	require.Less(t, m.streams["480p-low"].bitrate, m.streams["480p"].bitrate)
-	require.Equal(t, m.streams["480p"].height, m.streams["480p-low"].height)
+	require.True(t, m.HasStream("480plow"), "weak links need a lower bitrate at the same minimum resolution")
+	require.Less(t, m.streams["480plow"].bitrate, m.streams["480p"].bitrate)
+	require.Equal(t, m.streams["480p"].height, m.streams["480plow"].height)
 }
 
 func TestRenditionsPreservePortraitDimensions(t *testing.T) {

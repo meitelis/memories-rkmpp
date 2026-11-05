@@ -80,7 +80,7 @@ func TestRKMPPHardwareAPI(t *testing.T) {
 	require.Contains(t, master, "hvc1.")
 	require.Contains(t, master, "mp4a.40.2")
 	require.Contains(t, master, "fixture-share-token")
-	for _, quality := range []string{"480p", "max", "audio", "audio96", "audio64", "audio32"} {
+	for _, quality := range []string{"480plow", "480pmobile", "480p", "max", "audio", "audio96", "audio64", "audio32"} {
 		playlist := string(fetch(quality + ".m3u8"))
 		require.Contains(t, playlist, "#EXT-X-MAP:")
 		require.Contains(t, playlist, quality+"-init.m4s")

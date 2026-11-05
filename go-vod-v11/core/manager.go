@@ -283,7 +283,7 @@ func NewManager(a NewManagerArgs) (*Manager, error) {
 	// bitrate 480p variants instead of smaller pictures. Each job is lazy.
 	if rkmpp && smDim >= 480 {
 		width := int(math.Round(float64(lgDim)*480/float64(smDim)/2)) * 2
-		for quality, budget := range map[string]int{"480p-low": 400000, "480p-mobile": 700000} {
+		for quality, budget := range map[string]int{"480plow": 400000, "480pmobile": 700000} {
 			rate := max(minRKMPPBitrate, budget)
 			if base := m.streams["480p"]; base != nil && base.bitrate <= rate*11/10 {
 				continue
