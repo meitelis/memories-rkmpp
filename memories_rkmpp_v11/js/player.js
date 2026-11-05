@@ -58,7 +58,7 @@
   }
 
   if (typeof module !== 'undefined' && module.exports) {
-    module.exports = {chooseLevel, audioProfile, selectQuality, selectAudio, beginSeek, requestAge, renditionText, configure, recheckConnection};
+    module.exports = {chooseLevel, audioProfile, selectQuality, selectAudio, beginSeek, requestAge, renditionText, configure, recheckConnection, update};
   }
   if (typeof document === 'undefined') return;
   const debug = new URLSearchParams(location.search).has('rkmpp_debug');
@@ -117,10 +117,13 @@
     const abort = state.abort;
     const bps = await speedProbe(abort.signal);
     if (abort.signal.aborted || state.policy !== policy || state.selected !== 'auto' || video.seeking || !['normal', 'recovering'].includes(policy.phase)) return;
+    const priorCap = state.cap ?? policy.cap;
     policy.measured(bps, Date.now(), state.originalReady, state.decoderCap);
     state.hls.bandwidthEstimate = bps;
     state.hls.autoLevelCapping = policy.cap;
-    state.hls.nextAutoLevel = policy.cap;
+    // Network probes do not measure cold RKMPP segment-production latency.
+    // Do not force an upshift; let hls.js select from the permitted ladder.
+    if (policy.cap < priorCap) state.hls.nextAutoLevel = policy.cap;
     state.badge.dataset.recoveryBandwidth = String(Math.round(bps));
   }
 
@@ -345,12 +348,12 @@
         now, buffer, playing:!video.paused && !video.ended, seeking:video.seeking,
         auto:state.selected === 'auto', originalReady:state.originalReady, decoderCap:state.decoderCap,
         currentLevel:hls.currentLevel,
+        requestedLevel:Number.isInteger(state.inflight?.level) ? state.inflight.level : -1,
         requestAge:requestAge(video, state, now),
         loaded:stats?.loaded || 0,
         targetBuffer:Math.min(hls.config.maxMaxBufferLength,
           Math.max(hls.config.maxBufferLength, 8*hls.config.maxBufferSize/bandwidth(hls.levels[hls.currentLevel]))),
       });
-      const raisedCap = action.cap > state.cap;
       state.bps = action.bps;
       state.cap = action.cap;
       state.badge.dataset.phase = action.phase;
@@ -361,7 +364,6 @@
           hls.loadLevel = -1;
         }
         hls.autoLevelCapping = action.cap;
-        if (raisedCap) hls.nextAutoLevel = action.cap;
         if (action.cancel) {
           // Stop downloads only. Keep the media source and playing buffers.
           hls.stopLoad();
