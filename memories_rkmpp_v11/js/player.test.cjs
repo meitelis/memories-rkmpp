@@ -1,6 +1,6 @@
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
-const {chooseLevel, audioProfile, selectQuality, selectAudio, beginSeek, requestAge, renditionText, configure, recheckConnection} = require('./player.js');
+const {chooseLevel, audioProfile, selectQuality, selectAudio, beginSeek, requestAge, renditionText, configure, recheckConnection, update} = require('./player.js');
 const {PlaybackPolicy} = require('./policy.js');
 
 const settle=()=>new Promise(resolve=>setImmediate(resolve));
@@ -149,11 +149,11 @@ test('a fresh network measurement schedules one affordable automatic rendition w
       set currentLevel(_) {throw Error('playing buffers flushed');},
       set audioTrack(_) {throw Error('shared audio reset');},
     }};
-  state.policy.phase='recovering';
+  state.policy.phase='normal';
   try {
     await recheckConnection({seeking:false},state);
-    assert.equal(state.hls.nextAutoLevel,4);
-    assert.equal(state.hls.autoLevelCapping,4);
+    assert.equal(state.hls.nextAutoLevel,undefined,'speed probe must not force an upshift');
+    assert.equal(state.hls.autoLevelCapping,2,'upgrade cap by at most two levels');
     assert.ok(state.hls.bandwidthEstimate>20000000);
     state.hls.nextAutoLevel=undefined;
     const pending=recheckConnection({seeking:false},state);
@@ -161,4 +161,32 @@ test('a fresh network measurement schedules one affordable automatic rendition w
     await pending;
     assert.equal(state.hls.nextAutoLevel,undefined,'a probe cannot override a later user choice');
   } finally {global.window=previousWindow;global.fetch=previousFetch;state.abort.abort();}
+});
+
+test('real update loop does not repeatedly abort low-quality worker on fluctuating buffer',()=>{
+  const trace=[{t:1000,buffer:3},{t:2000,buffer:6.2},{t:12000,buffer:6.2},
+               {t:13000,buffer:10},{t:14000,buffer:9},{t:24000,buffer:10}];
+  const originalNow=Date.now,originalPerformance=global.performance;
+  const hls={levels:[{bitrate:400000,url:['/480plow.m3u8']},{bitrate:700000,url:['/480p.m3u8']}],
+    config:{maxBufferLength:3,maxMaxBufferLength:18,maxBufferSize:48*1024*1024},
+    currentLevel:1,nextLoadLevel:1,autoLevelEnabled:true,stopLoad(){this.stops=(this.stops||0)+1},
+    startLoad(){this.starts=(this.starts||0)+1},audioTracks:[]};
+  const policy=new PlaybackPolicy(hls.levels,30000000,true);
+  policy.phase='normal';
+  const badge={dataset:{},parentElement:null,textContent:''};
+  const state={hls,policy,cap:1,bps:30000000,selected:'auto',originalReady:true,decoderCap:Infinity,
+    badge,audioInitialized:false,inflight:{level:1,stats:{loading:{start:1},loaded:0}}};
+  const video={currentTime:1,videoWidth:1280,videoHeight:720,paused:false,ended:false,
+    seeking:false,buffered:{length:1,start:()=>0,end:()=>4},closest:()=>({querySelector:()=>null})};
+  let tick=0;
+  try {
+    Date.now=()=>tick;global.performance={now:()=>4000};
+    for (const step of trace) {
+      tick=step.t;video.buffered.end=()=>1+step.buffer;
+      if(step.t>=2000){hls.currentLevel=0;hls.nextLoadLevel=0;state.inflight={level:0,stats:{loading:{start:1},loaded:0}}}
+      update(video,state);
+    }
+    assert.equal(hls.stops,1,'only the first higher-quality download is stopped');
+    assert.equal(hls.starts,1,'the already-producing 480p fragment is not discarded');
+  } finally {Date.now=originalNow;global.performance=originalPerformance}
 });
