@@ -1,0 +1,239 @@
+diff --git a/app/build.gradle b/app/build.gradle
+index c3a7678..ce5465f 100644
+--- a/app/build.gradle
++++ b/app/build.gradle
+@@ -14,11 +14,11 @@ android {
+     }
+ 
+     defaultConfig {
+-        applicationId = "gallery.memories"
++        applicationId = "gallery.memories.rkmpp"
+         minSdk = 31
+         targetSdk = 36
+         versionCode = 17
+-        versionName = "1.17"
++        versionName = "1.17-rkmpp1"
+     }
+ 
+     buildTypes {
+@@ -39,6 +39,7 @@ kotlin {
+ }
+ 
+ dependencies {
++    testImplementation 'junit:junit:4.13.2'
+     def media_version = "1.11.1"
+     def room_version = "2.8.5"
+     def ktor_version = "3.6.1"
+diff --git a/app/src/main/java/gallery/memories/NativeX.kt b/app/src/main/java/gallery/memories/NativeX.kt
+index e66716d..a72f8ec 100644
+--- a/app/src/main/java/gallery/memories/NativeX.kt
++++ b/app/src/main/java/gallery/memories/NativeX.kt
+@@ -165,6 +165,9 @@ class NativeX(private val mCtx: MainActivity) {
+         mCtx.runOnUiThread { container.holeVideo.setRect(x, y, w, h) }
+     }
+ 
++    @JavascriptInterface
++    fun getNativeVideoQualityState(): String = container.holeVideo.getQualityState()
++
+     /** Forwards one hole video control command; demuxed in [NativeHoleVideo]. */
+     @JavascriptInterface
+     fun nativeVideoCommand(json: String?) {
+diff --git a/app/src/main/java/gallery/memories/app/di/AppContainer.kt b/app/src/main/java/gallery/memories/app/di/AppContainer.kt
+index c10744e..c3e3bb7 100644
+--- a/app/src/main/java/gallery/memories/app/di/AppContainer.kt
++++ b/app/src/main/java/gallery/memories/app/di/AppContainer.kt
+@@ -70,7 +70,7 @@ class AppContainer(
+     val deleter = MediaDeleter(activity)
+     val permissions = PermissionsManager(activity, prefs).register()
+     val holeImage = NativeHoleImage(activity)
+-    val holeVideo = NativeHoleVideo(activity)
++    val holeVideo = NativeHoleVideo(activity, clients, auth)
+ 
+     val timeline: TimelineRepository
+     val observer: MediaObserver
+diff --git a/app/src/main/java/gallery/memories/server/shell/ShellPage.kt b/app/src/main/java/gallery/memories/server/shell/ShellPage.kt
+index d178a65..e8e0ab7 100644
+--- a/app/src/main/java/gallery/memories/server/shell/ShellPage.kt
++++ b/app/src/main/java/gallery/memories/server/shell/ShellPage.kt
+@@ -69,6 +69,7 @@ object ShellPage {
+                     }
+                 }
+                 link(href = "/local/static/shell-overrides.css", rel = "stylesheet")
++                link(href = "/local/static/rkmpp-player.css", rel = "stylesheet")
+                 script(src = "/local/assets/js/" + AssetCache.L10N_JS) {}
+             }
+             body {
+@@ -94,6 +95,7 @@ object ShellPage {
+                         )
+                     }
+                 }
++                script(src = "/local/static/native-video.js") { defer = true }
+                 script(src = "/local/assets/js/" + AssetCache.ENTRY_JS) { defer = true }
+             }
+         }
+diff --git a/app/src/main/java/gallery/memories/ui/video/NativeHoleVideo.kt b/app/src/main/java/gallery/memories/ui/video/NativeHoleVideo.kt
+index f93a1e5..d285118 100644
+--- a/app/src/main/java/gallery/memories/ui/video/NativeHoleVideo.kt
++++ b/app/src/main/java/gallery/memories/ui/video/NativeHoleVideo.kt
+@@ -10,6 +10,7 @@ import android.webkit.CookieManager
+ import androidx.media3.common.MediaItem
+ import androidx.media3.common.PlaybackParameters
+ import androidx.media3.common.Player
++import androidx.media3.common.Tracks
+ import androidx.media3.common.VideoSize
+ import androidx.media3.common.util.UnstableApi
+ import androidx.media3.datasource.DefaultDataSource
+@@ -34,6 +35,8 @@ import org.json.JSONObject
+  */
+ class NativeHoleVideo(
+     private val mCtx: MainActivity,
++    clients: gallery.memories.data.remote.http.HttpClients,
++    auth: gallery.memories.data.remote.http.AuthState,
+ ) {
+     companion object {
+         private val TAG = NativeHoleVideo::class.java.simpleName
+@@ -45,6 +48,9 @@ class NativeHoleVideo(
+     private val density: Float by lazy { mCtx.resources.displayMetrics.density }
+ 
+     private var player: ExoPlayer? = null
++    private val playback = NativeVideoPlayback(mCtx, clients, auth)
++    @Volatile private var qualityState = "{}"
++    fun getQualityState(): String = qualityState
+ 
+     private var lastRect: FloatArray? = null
+     private var videoW = 0
+@@ -60,6 +66,7 @@ class NativeHoleVideo(
+     private var rate = 1f
+     private var repeatLoop = true
+     private var seeking = false
++    private var suspended = false
+     private var lastError: String? = null
+ 
+     /** ExoPlayer decodes via platform decoders; queried once. Must match ffprobe codec_name. */
+@@ -144,14 +151,18 @@ class NativeHoleVideo(
+     }
+ 
+     fun pause() {
++        suspended = true
+         player?.playWhenReady = false
+     }
+ 
+     fun resume() {
++        suspended = false
+         if (wantShow && !userPaused) player?.playWhenReady = true
+     }
+ 
+     fun release() {
++        playback.cancel()
++        qualityState = "{}"
+         stopTicker()
+         runCatching { player?.release() }
+         player = null
+@@ -181,6 +192,9 @@ class NativeHoleVideo(
+                 "volume" -> setVolume(url, cmd.optDouble("volume", 1.0).toFloat())
+                 "mute" -> setMuted(url, cmd.optBoolean("muted", false))
+                 "rate" -> setPlaybackRate(url, cmd.optDouble("rate", 1.0).toFloat())
++                "quality" -> if (url == currentUrl) {
++                    player?.let { if (playback.select(it, cmd.optString("id"))) emitVideoState() }
++                }
+                 else -> Log.w(TAG, "unknown video command: $json")
+             }
+         } catch (e: Exception) {
+@@ -290,6 +304,8 @@ class NativeHoleVideo(
+     /** Pushes a full player snapshot to the web event bus. */
+     private fun emitVideoState() {
+         val exo = player
++        if (exo != null) playback.updateAudio(exo, seeking)
++        qualityState = playback.snapshot(exo, currentUrl)
+         val durationMs = exo?.duration?.takeIf { it > 0 }
+         val state = JSONObject()
+             .put("url", currentUrl ?: JSONObject.NULL)
+@@ -327,6 +343,11 @@ class NativeHoleVideo(
+             if (wantShow && !userPaused) exo.playWhenReady = true
+             return
+         }
++        playback.cancel()
++        stopTicker()
++        val previous = player
++        player = null
++        previous?.release()
+         currentUrl = url
+         hasFrame = false
+         videoW = 0
+@@ -336,33 +357,36 @@ class NativeHoleVideo(
+         lastError = null
+         setVisible(false)
+         resetViewTransform()
+-        val exo = ensurePlayer()
+-        exo.repeatMode = if (repeatLoop) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
+         val uri = Uri.parse(url)
+-        val mediaItem = MediaItem.fromUri(uri)
+-        if (isRemote(uri)) {
+-            val httpFactory = DefaultHttpDataSource.Factory().setAllowCrossProtocolRedirects(true)
+-            CookieManager.getInstance().getCookie(url)?.let { cookies ->
+-                httpFactory.setDefaultRequestProperties(mapOf("Cookie" to cookies))
++        playback.start(isRemote(uri) && isHls(uri)) { initialBps ->
++            if (currentUrl != url) return@start
++            val exo = ensurePlayer(initialBps)
++            exo.repeatMode = if (repeatLoop) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
++            val mediaItem = MediaItem.fromUri(uri)
++            if (isRemote(uri)) {
++                val httpFactory = DefaultHttpDataSource.Factory().setAllowCrossProtocolRedirects(true)
++                CookieManager.getInstance().getCookie(url)?.let { cookies ->
++                    httpFactory.setDefaultRequestProperties(mapOf("Cookie" to cookies))
++                }
++                val dataSourceFactory = DefaultDataSource.Factory(mCtx, httpFactory)
++                exo.setMediaSource(
++                    if (isHls(uri)) {
++                        HlsMediaSource.Factory(dataSourceFactory).setLoadErrorHandlingPolicy(playback.loadErrors).createMediaSource(mediaItem)
++                    } else {
++                        ProgressiveMediaSource.Factory(dataSourceFactory).createMediaSource(mediaItem)
++                    },
++                )
++            } else {
++                exo.setMediaItem(mediaItem)
+             }
+-            val dataSourceFactory = DefaultDataSource.Factory(mCtx, httpFactory)
+-            exo.setMediaSource(
+-                if (isHls(uri)) {
+-                    HlsMediaSource.Factory(dataSourceFactory).createMediaSource(mediaItem)
+-                } else {
+-                    ProgressiveMediaSource.Factory(dataSourceFactory).createMediaSource(mediaItem)
+-                },
+-            )
+-        } else {
+-            exo.setMediaItem(mediaItem)
++            exo.playWhenReady = wantShow && !userPaused && !suspended
++            exo.prepare()
+         }
+-        exo.playWhenReady = true
+-        exo.prepare()
+     }
+ 
+-    private fun ensurePlayer(): ExoPlayer {
++    private fun ensurePlayer(initialBps: Long = 750000): ExoPlayer {
+         player?.let { return it }
+-        return ExoPlayer.Builder(mCtx).build().also { exo ->
++        return playback.createPlayer(initialBps).also { exo ->
+             view.useController = false
+             view.setResizeMode(AspectRatioFrameLayout.RESIZE_MODE_FIT)
+             view.player = exo
+@@ -370,6 +394,7 @@ class NativeHoleVideo(
+             exo.setPlaybackParameters(PlaybackParameters(rate))
+             exo.repeatMode = if (repeatLoop) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
+             exo.addListener(object : Player.Listener {
++                override fun onTracksChanged(tracks: Tracks) { emitVideoState() }
+                 override fun onVideoSizeChanged(videoSize: VideoSize) {
+                     if (videoSize.width > 0 && videoSize.height > 0) {
+                         videoW = videoSize.width
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index 2bb8068..4506651 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -1,5 +1,5 @@
+ <resources>
+-    <string name="app_name">Memories</string>
++    <string name="app_name">Memories RKMPP</string>
+     <string name="min_server_version">9.0.0-rc.1</string>
+ 
+     <string name="preferences_key">memories</string>
