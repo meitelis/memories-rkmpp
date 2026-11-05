@@ -41,6 +41,23 @@ test('recovery remeasures capacity after healthy buffering instead of trusting p
   assert.equal(p.phase,'normal');
 });
 
+test('a lowest-only decoder does not alternate rescue and normal on each tick',()=>{
+  const p=normal();const stalled={buffer:0,requestAge:2500,decoderCap:0,currentLevel:0};
+  assert.equal(tick(p,{now:1000,...stalled}).cancel,true);
+  const second=tick(p,{now:1100,...stalled});
+  assert.deepEqual([second.phase,second.cancel],['recovering',false]);
+  const third=tick(p,{now:1200,...stalled});
+  assert.deepEqual([third.phase,third.cancel],['recovering',false]);
+});
+test('recovery completes after healthy buffering even below the decoder ceiling',()=>{
+  const p=normal();tick(p,{now:1000,buffer:0,requestAge:2500});
+  p.measured(2000000,2000,true);
+  assert.equal(tick(p,{now:2000,buffer:12}).phase,'recovering');
+  assert.equal(tick(p,{now:11999,buffer:12}).phase,'recovering');
+  const recovered=tick(p,{now:12000,buffer:12});
+  assert.deepEqual([recovered.phase,recovered.cap],['normal',2]);
+});
+
 test('recovery measurements respect affordability, Original readiness and decoder limits',()=>{
   const p=normal();tick(p,{now:1000,buffer:9,requestAge:2500});
   p.measured(800000,12000,true);
