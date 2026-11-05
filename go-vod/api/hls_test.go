@@ -1,8 +1,10 @@
 package api
 
 import (
+	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -24,15 +26,44 @@ func TestMasterPlaylist(t *testing.T) {
 	require.Less(t, strings.Index(got, "1080p.m3u8"), strings.Index(got, "max.m3u8"))
 	require.Contains(t, got, "BANDWIDTH=400,RESOLUTION=854x480")
 	require.Contains(t, got, "480p.m3u8?t=123")
+	require.Contains(t, got, "#EXT-X-INDEPENDENT-SEGMENTS")
+}
+
+func TestCopyPlaylistPreservesFractionalBoundaries(t *testing.T) {
+	// 4.133333 s GOPs lose a third of a second after 1000 segments when
+	// rounded to milliseconds; exact grid starts must survive serialization.
+	keys := make([]float64, 1000)
+	for i := range keys {
+		keys[i] = math.Round(float64(i)*124/30*1e6) / 1e6
+	}
+	end := keys[len(keys)-1] + 124.0/30
+	segments := ffmpeg.CopySegments(keys, time.Duration(end*float64(time.Second)))
+	text, err := CopyVariantPlaylist("direct", segments, "")
+	require.NoError(t, err)
+	var start float64
+	var id int
+	for _, line := range strings.Split(text, "\n") {
+		if !strings.HasPrefix(line, "#EXTINF:") {
+			continue
+		}
+		require.InDelta(t, segments[id].Start, start, 0.000001, "boundary %d", id)
+		duration, err := strconv.ParseFloat(strings.SplitN(strings.TrimPrefix(line, "#EXTINF:"), ",", 2)[0], 64)
+		require.NoError(t, err)
+		start += duration
+		id++
+	}
+	require.Equal(t, len(segments), id)
 }
 
 func TestTranscodeVariantPlaylist(t *testing.T) {
 	got, err := TranscodeVariantPlaylist("720p", 62*time.Second+500*time.Millisecond, 3, "?t=123")
 	require.NoError(t, err)
 	require.Equal(t, 21, strings.Count(got, "#EXTINF"))
-	require.Contains(t, got, "#EXTINF:2.500,nodesc\n720p-000020.ts?t=123")
+	require.Contains(t, got, "#EXTINF:2.500,nodesc\n720p-000020.m4s?t=123")
 	require.Contains(t, got, "#EXT-X-TARGETDURATION:3")
 	require.Contains(t, got, "#EXT-X-PLAYLIST-TYPE:VOD")
+	require.Contains(t, got, "#EXT-X-VERSION:7")
+	require.Contains(t, got, `#EXT-X-MAP:URI="720p-init.m4s?t=123"`)
 	require.True(t, strings.HasSuffix(strings.TrimSpace(got), "#EXT-X-ENDLIST"))
 }
 
@@ -55,12 +86,13 @@ func TestCopyVariantPlaylist(t *testing.T) {
 	require.Contains(t, got, "8.5")
 	require.Contains(t, got, "2.25")
 	require.Contains(t, got, "#EXT-X-TARGETDURATION:9")
-	require.Contains(t, got, "direct-000000.ts?t=123")
-	require.Contains(t, got, "direct-000002.ts?t=123")
+	require.Contains(t, got, "direct-000000.m4s?t=123")
+	require.Contains(t, got, "direct-000002.m4s?t=123")
+	require.Contains(t, got, `#EXT-X-MAP:URI="direct-init.m4s?t=123"`)
 	require.True(t, strings.HasSuffix(strings.TrimSpace(got), "#EXT-X-ENDLIST"))
 }
 
-func stubVariantManager(t *testing.T, keyFail bool) *core.Manager {
+func stubVariantManager(t *testing.T, keyFail bool, rkmpp ...bool) *core.Manager {
 	t.Helper()
 	dir := t.TempDir()
 	probeJSON := `{"streams":[{"codec_type":"video","codec_name":"h264","width":1280,"height":720,"avg_frame_rate":"30/1","duration":"12","bit_rate":"1000000"}],"format":{}}`
@@ -76,6 +108,9 @@ func stubVariantManager(t *testing.T, keyFail bool) *core.Manager {
 	require.NoError(t, os.WriteFile(bin, []byte(script), 0755))
 
 	cfg := config.Defaults("test")
+	if len(rkmpp) > 0 && rkmpp[0] {
+		cfg.RKMPP, cfg.RKMPPOutputCodec = true, "h264"
+	}
 	cfg.TempDir = t.TempDir()
 	cfg.FFprobe = bin
 	m, err := core.NewManager(core.NewManagerArgs{
@@ -93,34 +128,51 @@ func stubVariantManager(t *testing.T, keyFail bool) *core.Manager {
 	return m
 }
 
+func TestVariantPlaylistAlignedHardwareGrid(t *testing.T) {
+	m := stubVariantManager(t, false, true)
+	_, ok := m.EnsureCopySegments()
+	require.True(t, ok)
+	for _, quality := range []string{"direct", "480p", core.QUALITY_MAX} {
+		got, err := VariantPlaylist(m, quality, "?t=123")
+		require.NoError(t, err)
+		require.Contains(t, got, "#EXT-X-TARGETDURATION:4")
+		require.Equal(t, 3, strings.Count(got, "#EXTINF:"))
+		require.Contains(t, got, quality+"-000002.m4s?t=123")
+	}
+	audio, err := VariantPlaylist(m, core.QUALITY_AUDIO, "")
+	require.NoError(t, err)
+	require.Contains(t, audio, "#EXT-X-TARGETDURATION:3")
+	require.Equal(t, 4, strings.Count(audio, "#EXTINF:"), "audio retains its independent timeline")
+}
+
 func TestVariantPlaylistLazyDirect(t *testing.T) {
 	m := stubVariantManager(t, false)
 
-	got, err := VariantPlaylist(m, config.TCfg{ChunkSize: 4}, "480p", "")
+	got, err := VariantPlaylist(m, "480p", "")
 	require.NoError(t, err)
-	require.Contains(t, got, "480p-000000.ts")
+	require.Contains(t, got, "480p-000000.m4s")
 	require.False(t, m.CopyProbed())
 	_, ok := m.CopySegments()
 	require.False(t, ok)
 
 	_, ok = m.EnsureCopySegments()
 	require.True(t, ok)
-	got, err = VariantPlaylist(m, config.TCfg{ChunkSize: 4}, "direct", "")
+	got, err = VariantPlaylist(m, "direct", "")
 	require.NoError(t, err)
-	require.Contains(t, got, "direct-000000.ts")
+	require.Contains(t, got, "direct-000000.m4s")
 }
 
 func TestVariantPlaylistDirectPending(t *testing.T) {
 	m := stubVariantManager(t, false)
 
-	_, err := VariantPlaylist(m, config.TCfg{ChunkSize: 4}, "direct", "")
+	_, err := VariantPlaylist(m, "direct", "")
 	require.ErrorIs(t, err, core.ErrCopyPending)
 
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		got, err := VariantPlaylist(m, config.TCfg{ChunkSize: 4}, "direct", "")
+		got, err := VariantPlaylist(m, "direct", "")
 		if err == nil {
-			require.Contains(t, got, "direct-000000.ts")
+			require.Contains(t, got, "direct-000000.m4s")
 			return
 		}
 		require.ErrorIs(t, err, core.ErrCopyPending)
@@ -134,16 +186,16 @@ func TestVariantPlaylistDirectPending(t *testing.T) {
 func TestVariantPlaylistDirectFallback(t *testing.T) {
 	m := stubVariantManager(t, true)
 
-	_, err := VariantPlaylist(m, config.TCfg{ChunkSize: 4}, "direct", "")
+	_, err := VariantPlaylist(m, "direct", "")
 	require.ErrorIs(t, err, core.ErrCopyPending)
 
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		got, err := VariantPlaylist(m, config.TCfg{ChunkSize: 4}, "direct", "")
+		got, err := VariantPlaylist(m, "direct", "")
 		if err == nil {
-			require.Contains(t, got, "direct-000000.ts")
+			require.Contains(t, got, "direct-000000.m4s")
 			require.NotContains(t, got, "max-")
-			require.Contains(t, got, "#EXT-X-TARGETDURATION:4")
+			require.Contains(t, got, "#EXT-X-TARGETDURATION:3")
 			break
 		}
 		require.ErrorIs(t, err, core.ErrCopyPending)
@@ -154,6 +206,6 @@ func TestVariantPlaylistDirectFallback(t *testing.T) {
 	}
 
 	// Lower renditions still serve.
-	_, err = VariantPlaylist(m, config.TCfg{ChunkSize: 4}, "480p", "")
+	_, err = VariantPlaylist(m, "480p", "")
 	require.NoError(t, err)
 }

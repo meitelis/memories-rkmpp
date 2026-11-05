@@ -1,7 +1,6 @@
 package core
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +11,28 @@ import (
 	"github.com/pulsejet/memories/go-vod/ffmpeg"
 	"github.com/stretchr/testify/require"
 )
+
+// Key-only fixtures describe closed GOPs, where decode and presentation
+// boundaries coincide. Production caches the complete packet timeline.
+func StoreCachedKeyframes(dir string, id int64, etag string, keys []float64) error {
+	frames := make([]ffmpeg.Keyframe, len(keys))
+	for i, k := range keys {
+		frames[i] = ffmpeg.Keyframe{PTS: k, Start: k}
+	}
+	return StoreCachedTimeline(dir, id, etag, frames)
+}
+
+func LoadCachedKeyframes(dir string, id int64, etag string) ([]float64, bool) {
+	frames, ok := LoadCachedTimeline(dir, id, etag)
+	if !ok {
+		return nil, false
+	}
+	keys := make([]float64, len(frames))
+	for i, f := range frames {
+		keys[i] = f.PTS
+	}
+	return keys, true
+}
 
 func newCopyManagerWithEtag(t *testing.T, probeJSON, keyframes string, keyFail bool, cacheDir, etag string) *Manager {
 	t.Helper()
@@ -60,6 +81,18 @@ func TestKeyframeCacheRoundtrip(t *testing.T) {
 	require.Equal(t, keys, got)
 }
 
+func TestProbeMigrationPreservesUnchangedKeyframeIndex(t *testing.T) {
+	dir := t.TempDir()
+	keys := []float64{0, 3, 6}
+	require.NoError(t, StoreCachedKeyframes(dir, 7, "same", keys))
+	require.NoError(t, os.WriteFile(ProbeCachePath(dir, 7), []byte(`{"v":4,"etag":"same","probe":{"BitRate":5000000}}`), 0644))
+	_, ok := LoadCachedProbe(dir, 7, "same")
+	require.False(t, ok)
+	got, ok := LoadCachedKeyframes(dir, 7, "same")
+	require.True(t, ok)
+	require.Equal(t, keys, got)
+}
+
 func TestKeyframeCacheEtagMismatchEvictsFile(t *testing.T) {
 	dir := t.TempDir()
 	keys := []float64{0, 4, 8}
@@ -102,7 +135,6 @@ func TestProbeCacheRoundtrip(t *testing.T) {
 		Rotation: 90, HDR: true, BitDepth: 10,
 		Audio: ffmpeg.AudioInfo{
 			CodecName:  "aac",
-			Profile:    "LC",
 			Channels:   2,
 			SampleRate: 48000,
 			BitRate:    128000,
@@ -114,51 +146,6 @@ func TestProbeCacheRoundtrip(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, probe, got)
 	require.Equal(t, ProbeCacheFile, filepath.Base(ProbeCachePath(dir, 7)))
-}
-
-func TestProbeSchemaUpgradePreservesUnchangedSiblingCaches(t *testing.T) {
-	dir := t.TempDir()
-	keys := []float64{0, 4, 8}
-	require.NoError(t, StoreCachedKeyframes(dir, 7, "same-etag", keys))
-	siblings := map[string][]byte{
-		StoryboardPlanFile:   []byte(`{"etag":"same-etag","plan":{}}`),
-		ffmpeg.SpriteName(0): []byte("existing sprite"),
-	}
-	for name, data := range siblings {
-		require.NoError(t, os.WriteFile(filepath.Join(FileCacheDir(dir, 7), name), data, 0644))
-	}
-	legacy, err := json.Marshal(probePlan{V: probeCacheVersion - 1, Etag: "same-etag", Probe: ProbeVideoData{Width: 640, Height: 480}})
-	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(ProbeCachePath(dir, 7), legacy, 0644))
-
-	_, ok := LoadCachedProbe(dir, 7, "same-etag")
-	require.False(t, ok, "old audio metadata needs a new source probe")
-	gotKeys, ok := LoadCachedKeyframes(dir, 7, "same-etag")
-	require.True(t, ok)
-	require.Equal(t, keys, gotKeys)
-	for name, expected := range siblings {
-		got, err := os.ReadFile(filepath.Join(FileCacheDir(dir, 7), name))
-		require.NoError(t, err)
-		require.Equal(t, expected, got)
-	}
-
-	updated := &ProbeVideoData{Width: 640, Height: 480, Audio: ffmpeg.AudioInfo{CodecName: "aac", Profile: "LC", Channels: 2, SampleRate: 48000, BitRate: 166915}}
-	require.NoError(t, StoreCachedProbe(dir, 7, "same-etag", updated))
-	got, ok := LoadCachedProbe(dir, 7, "same-etag")
-	require.True(t, ok)
-	require.Equal(t, updated, got)
-}
-
-func TestProbeEtagMismatchStillEvictsSiblingsOnOldSchema(t *testing.T) {
-	dir := t.TempDir()
-	require.NoError(t, StoreCachedKeyframes(dir, 7, "old-etag", []float64{0, 4}))
-	legacy, err := json.Marshal(probePlan{V: probeCacheVersion - 1, Etag: "old-etag"})
-	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(ProbeCachePath(dir, 7), legacy, 0644))
-	_, ok := LoadCachedProbe(dir, 7, "new-etag")
-	require.False(t, ok)
-	_, err = os.Stat(FileCacheDir(dir, 7))
-	require.True(t, os.IsNotExist(err), "changed media invalidates every sibling artifact")
 }
 
 func TestManagerProbeCache(t *testing.T) {
@@ -197,4 +184,26 @@ func TestManagerProbeCache(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(m2.Destroy)
 	require.Equal(t, m1.probe, m2.probe)
+}
+
+func TestCacheWritesAreAtomic(t *testing.T) {
+	cacheDir := t.TempDir()
+	path := KeyframeCachePath(cacheDir, 7)
+	require.NoError(t, StoreCachedKeyframes(cacheDir, 7, "e", []float64{0, 4}))
+	before, err := os.Stat(path)
+	require.NoError(t, err)
+
+	// A rewrite installs a new file by rename instead of truncating the old
+	// one, so a concurrent reader never sees partial JSON (which evicts).
+	require.NoError(t, StoreCachedKeyframes(cacheDir, 7, "e", []float64{0, 4, 8}))
+	after, err := os.Stat(path)
+	require.NoError(t, err)
+	require.False(t, os.SameFile(before, after))
+	require.Equal(t, os.FileMode(0644), after.Mode().Perm())
+
+	keys, ok := LoadCachedKeyframes(cacheDir, 7, "e")
+	require.True(t, ok)
+	require.Equal(t, []float64{0, 4, 8}, keys)
+	parts, _ := filepath.Glob(filepath.Join(FileCacheDir(cacheDir, 7), "*.part"))
+	require.Empty(t, parts)
 }

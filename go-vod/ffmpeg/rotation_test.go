@@ -46,7 +46,7 @@ func TestRKMPPRotationAliases(t *testing.T) {
 func TestRKMPPFrameRateUsesSameClockAsGOP(t *testing.T) {
 	for _, fps := range []float64{23.976, 29.97, 59.94, 60} {
 		s := Spec{RKMPP: true, FrameRateExact: fps, HLS: true, ChunkSize: 3}
-		args := strings.Join(SegmentArgs(s, 0, "/tmp/%06d.ts"), " ")
+		args := strings.Join(SegmentArgs(s, 0, "/tmp/%06d.m4s", "/tmp/init.m4s"), " ")
 		rate := RKMPPFrameRate(s)
 		require.Contains(t, args, fmt.Sprintf("fps=fps=%d:round=near", rate))
 		require.Contains(t, args, fmt.Sprintf("-g %d -keyint_min %d", 3*rate, 3*rate))

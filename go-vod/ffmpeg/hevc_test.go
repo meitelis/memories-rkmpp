@@ -9,14 +9,14 @@ import (
 
 func TestRKMPPOutputCodec(t *testing.T) {
 	for _, codec := range []string{"", "h264", "hevc"} {
-		s := Spec{RKMPP: true, OutputCodec: codec, Width: 1920, Height: 1080, FrameRate: 60, Quality: QualityMax, HLS: true, ChunkSize: 3}
+		s := Spec{RKMPP: true, RKMPPOutputCodec: codec, Width: 1920, Height: 1080, FrameRate: 60, Quality: QualityMax, HLS: true, ChunkSize: 3}
 		encoder := EncoderRKMPP
 		if codec == "hevc" {
 			encoder = EncoderRKMPPHEVC
 		}
 		t.Run(codec, func(t *testing.T) {
 			require.Equal(t, encoder, Encoder(s))
-			args := strings.Join(SegmentArgs(s, 2, "/tmp/max-%06d.ts"), " ")
+			args := strings.Join(SegmentArgs(s, 2, "/tmp/max-%06d.m4s", "/tmp/max-init.m4s"), " ")
 			require.Contains(t, args, "-c:v "+encoder)
 			require.Contains(t, args, "-g 180 -keyint_min 180")
 			require.Contains(t, args, "-an")

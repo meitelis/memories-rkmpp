@@ -1,48 +1,34 @@
-FROM golang@sha256:b76020929b709ddb6202afc05410a0faefae20ae05e27ad548b3870092688a69 AS build
-WORKDIR /src
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
-COPY go.mod go.sum ./
-RUN go mod download
-COPY . .
-RUN test -z "$(gofmt -l .)" && go test -race ./... && go vet ./... && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/go-vod .
+# Build Dockerfile.rkmpp-test first. Reuse its validated server and media
+# runtime exactly, excluding the offline helper and Go test executables.
+ARG VERIFIED_IMAGE=local/memories-rkmpp:v11-smoke
+FROM ${VERIFIED_IMAGE} AS verified
 
-FROM jellyfin/jellyfin@sha256:fea863d0cd9ec445985d9c75fc6ed64e38a1d2766cf0c250a33d553f4fc1b771 AS media
-RUN set -eu; \
-    mkdir -p /rootfs/usr/lib/jellyfin-ffmpeg /rootfs/usr/local/bin /rootfs/etc/OpenCL/vendors /rootfs/tmp /rootfs/cache/tmp /rootfs/app; \
-    for bin in /usr/lib/jellyfin-ffmpeg/ffmpeg /usr/lib/jellyfin-ffmpeg/ffprobe /usr/lib/aarch64-linux-gnu/libmali.so.1; do \
-      cp -L --parents "$bin" /rootfs; \
-      LD_PRELOAD= ldd "$bin"; \
-    done | awk '/=> \// {print $3} /^[[:space:]]*\// {print $1}' | sort -u > /tmp/runtime-libraries; \
-    while IFS= read -r lib; do cp -L --parents "$lib" /rootfs; done < /tmp/runtime-libraries; \
-    ln -s /usr/lib/jellyfin-ffmpeg/ffmpeg /rootfs/usr/local/bin/ffmpeg; \
-    ln -s /usr/lib/jellyfin-ffmpeg/ffprobe /rootfs/usr/local/bin/ffprobe; \
-    printf '/usr/lib/aarch64-linux-gnu/libmali.so.1\n' > /rootfs/etc/OpenCL/vendors/mali.icd; \
-    cp -L --parents /etc/ssl/certs/ca-certificates.crt /rootfs; \
-    printf 'transcoder:x:1000:1000:Video transcoder:/tmp:/nonexistent\n' > /rootfs/etc/passwd; \
-    printf 'transcoder:x:1000:\n' > /rootfs/etc/group; \
-    printf 'hosts: files dns\n' > /rootfs/etc/nsswitch.conf; \
-    chmod 1777 /rootfs/tmp; \
-    chown -R 1000:1000 /rootfs/cache; \
-    for file in /usr/share/doc/jellyfin-ffmpeg*/copyright /usr/share/doc/libmali*/copyright; do if [ -f "$file" ]; then cp -L --parents "$file" /rootfs; fi; done
+FROM golang:1.27-bookworm@sha256:d9b6a1beb9474adc2a1ce842573639b44b2a0dd49b6669f51d3821baf9ec37c9 AS health
+WORKDIR /src
+COPY cmd/govod-health/main.go ./main.go
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/govod-health main.go
 
 FROM scratch
-COPY --from=media /rootfs/ /
-COPY --from=build /out/go-vod /app/go-vod
-COPY LICENSE /usr/share/licenses/go-vod/LICENSE
+COPY --from=verified /usr/ /usr/
+COPY --from=verified /lib/ /lib/
+COPY --from=verified /etc/ /etc/
+COPY --from=verified /cache/ /cache/
+COPY --from=verified /tmp/ /tmp/
+COPY --from=verified /app/go-vod /app/go-vod
+COPY --from=health /out/govod-health /app/govod-health
 ENV PATH=/usr/local/bin:/app \
     LD_LIBRARY_PATH=/usr/lib/jellyfin-ffmpeg/lib \
     MEMORIES_RKMPP=1 \
-    MEMORIES_RKMPP_CODEC=hevc \
+    MEMORIES_RKMPP_CODEC=auto \
     MEMORIES_RKMPP_OPENCL=true \
-    MEMORIES_EXPECTED_APP_VERSION=10.2.0 \
     CACHE_DIR=/cache \
     TMPDIR=/cache/tmp \
+    GO_VOD_TEMP_DIR=/cache/tmp/go-vod \
     HOME=/tmp
 USER 1000:1000
 WORKDIR /app
 EXPOSE 47788
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["/app/go-vod", "-healthcheck"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 CMD ["/app/govod-health"]
 ENTRYPOINT ["/app/go-vod"]
-CMD ["-version-monitor"]
-
-LABEL org.opencontainers.image.version="memories-10.2.0-govod-0.6.3-rkmpp-r7"
+LABEL org.opencontainers.image.version="memories-11.0.2-govod-0.7.0-r9" \
+      cc.memories-rkmpp.stage="memories-11-runtime"

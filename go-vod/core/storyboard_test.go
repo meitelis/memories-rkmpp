@@ -2,6 +2,7 @@ package core
 
 import (
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -48,7 +49,8 @@ func TestEnsureStoryboardCached(t *testing.T) {
 	m := testStoryboardManager(t, "false")
 	dir := FileCacheDir(m.c.CacheDir(), m.fileid)
 	require.NoError(t, os.MkdirAll(dir, 0755))
-	data, err := json.Marshal(storyboardFile{Etag: m.etag, Plan: ffmpeg.PlanStoryboard(12 * time.Second)})
+	// stubProbe is 64x64, so tiles are 120x120.
+	data, err := json.Marshal(storyboardFile{Etag: m.etag, Plan: ffmpeg.PlanStoryboard(12*time.Second, 64, 64)})
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(dir, StoryboardPlanFile), data, 0644))
 
@@ -62,7 +64,7 @@ func TestEnsureStoryboardEtagMismatchEvictsFile(t *testing.T) {
 	dir := FileCacheDir(m.c.CacheDir(), m.fileid)
 	require.NoError(t, os.MkdirAll(dir, 0755))
 	// Stale plan plus an unrelated sibling artifact.
-	data, err := json.Marshal(storyboardFile{Etag: "stale", Plan: ffmpeg.PlanStoryboard(12 * time.Second)})
+	data, err := json.Marshal(storyboardFile{Etag: "stale", Plan: ffmpeg.PlanStoryboard(12*time.Second, 64, 64)})
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(dir, StoryboardPlanFile), data, 0644))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, KeyframeCacheFile), []byte("{}"), 0644))
@@ -77,7 +79,7 @@ func TestServeStoryboardVTTBakesQuery(t *testing.T) {
 	m := testStoryboardManager(t, "false")
 	dir := FileCacheDir(m.c.CacheDir(), m.fileid)
 	require.NoError(t, os.MkdirAll(dir, 0755))
-	plan := ffmpeg.PlanStoryboard(12 * time.Second)
+	plan := ffmpeg.PlanStoryboard(12*time.Second, 64, 64)
 	data, err := json.Marshal(storyboardFile{Etag: m.etag, Plan: plan})
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(dir, StoryboardPlanFile), data, 0644))
@@ -86,7 +88,7 @@ func TestServeStoryboardVTTBakesQuery(t *testing.T) {
 	m.ServeStoryboard(w, httptest.NewRequest("GET", "/x", nil), StoryboardVTTFile, "?token=abc")
 	require.Equal(t, 200, w.Code)
 	require.Equal(t, "text/vtt", w.Header().Get("Content-Type"))
-	require.Contains(t, w.Body.String(), "storyboard-0.jpg?token=abc#xywh=0,0,160,90")
+	require.Contains(t, w.Body.String(), "storyboard-0.jpg?token=abc#xywh=0,0,120,120")
 }
 
 func TestEnsureStoryboardNoEtag(t *testing.T) {
@@ -197,4 +199,24 @@ func TestStoryboardSurvivesManagerDestroy(t *testing.T) {
 	sharedStoryboards.Serve(w, httptest.NewRequest("GET", "/x", nil), in, StoryboardVTTFile, "")
 	require.Equal(t, 200, w.Code)
 	require.Contains(t, w.Body.String(), "storyboard-0.jpg#xywh=")
+}
+
+func TestStoryboardMissingSpriteNotCached(t *testing.T) {
+	cacheDir := t.TempDir()
+	dir := FileCacheDir(cacheDir, 7)
+	require.NoError(t, os.MkdirAll(dir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, StoryboardPlanFile), []byte(`{"etag":"e","plan":{"Count":1}}`), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "storyboard-0.jpg"), []byte("jpg"), 0644))
+	in := StoryboardInput{CacheDir: cacheDir, FileID: 7, Etag: "e"}
+
+	w := httptest.NewRecorder()
+	sharedStoryboards.Serve(w, httptest.NewRequest("POST", "/vod", nil), in, "storyboard-9.jpg", "")
+	require.Equal(t, http.StatusNotFound, w.Code)
+	require.Empty(t, w.Header().Get("Cache-Control"))
+
+	w = httptest.NewRecorder()
+	sharedStoryboards.Serve(w, httptest.NewRequest("POST", "/vod", nil), in, "storyboard-0.jpg", "")
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Equal(t, "max-age=86400, public", w.Header().Get("Cache-Control"))
+	require.Equal(t, "jpg", w.Body.String())
 }

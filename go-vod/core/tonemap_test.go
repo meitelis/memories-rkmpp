@@ -43,7 +43,8 @@ func TestTonemapSelection(t *testing.T) {
 			require.Equal(t, !fail, spec.VAAPIOpenCL)
 			args := strings.Join(ffmpeg.BuildArgs(spec), " ")
 			if fail {
-				require.Contains(t, args, "hwdownload,format=nv12,scale=")
+				require.Contains(t, args, "-vf scale=")
+				require.NotContains(t, args, "hwaccel_output_format")
 				require.Contains(t, args, "zscale=")
 				require.NotContains(t, args, "opencl")
 			} else {
@@ -66,7 +67,7 @@ func TestTonemapSelection(t *testing.T) {
 }
 
 func TestTonemapProbeSkipped(t *testing.T) {
-	for _, kind := range []string{"sdr", "software", "nvenc", "copy", "software transpose"} {
+	for _, kind := range []string{"sdr", "software", "copy", "software transpose"} {
 		t.Run(kind, func(t *testing.T) {
 			s, count := tonemapStream(t, false)
 			switch kind {
@@ -74,8 +75,6 @@ func TestTonemapProbeSkipped(t *testing.T) {
 				s.m.probe.HDR = false
 			case "software":
 				s.m.tc.VAAPI = false
-			case "nvenc":
-				s.m.tc.VAAPI, s.m.tc.NVENC = false, true
 			case "copy":
 				s.quality = QUALITY_DIRECT
 				s.m.srcSegments = []ffmpeg.Segment{{Start: 0, Duration: 3}}
@@ -88,40 +87,122 @@ func TestTonemapProbeSkipped(t *testing.T) {
 	}
 }
 
-func TestRKMPPOpenCLSelectionAndFallback(t *testing.T) {
+func TestCUDATonemapSelection(t *testing.T) {
 	for _, fail := range []bool{false, true} {
-		s, calls := tonemapStream(t, fail)
-		s.c.RKMPP, s.c.RKMPPOpenCL = true, true
-		s.c.RKMPPOutputCodec = "hevc"
-		s.m.playableCodecs = []string{"hevc"}
-		s.m.probe.CodecName, s.m.probe.PixelFormat, s.m.probe.BitDepth = "hevc", "yuv420p10le", 10
-		for range 3 {
-			spec := s.transcodeSpec(0, true)
-			require.Equal(t, !fail, spec.RKMPPOpenCL)
-			args := strings.Join(ffmpeg.BuildArgs(spec), " ")
-			require.Contains(t, args, "-c:v hevc_rkmpp")
-			if fail {
-				require.Contains(t, args, "zscale=")
-				require.NotContains(t, args, "tonemap_opencl=")
-			} else {
-				require.Contains(t, args, "tonemap_opencl=")
-				require.Contains(t, args, "hwmap=derive_device=rkmpp:mode=write:reverse=1")
-				require.NotContains(t, args, "hwdownload")
-				require.NotContains(t, args, "zscale=")
+		for _, forceSw := range []bool{false, true} {
+			s, count := tonemapStream(t, fail)
+			s.m.tc.VAAPI = false
+			s.m.tc.NVENC = true
+			s.m.tc.NVENCScale = "cuda"
+			s.m.tc.NVENCTonemapCUDA = true
+			s.m.tc.ForceSwTranspose = forceSw
+			s.m.probe.BitDepth = 10
+			results := make(chan ffmpeg.Spec, 8)
+			for range 8 {
+				go func() { results <- s.transcodeSpec(0, true) }()
 			}
+			for range 8 {
+				spec := <-results
+				require.Equal(t, !fail, spec.NVENCCUDA)
+				require.False(t, spec.VAAPIOpenCL)
+				args := strings.Join(ffmpeg.BuildArgs(spec), " ")
+				require.Contains(t, args, "h264_nvenc")
+				if fail {
+					require.Contains(t, args, "-vf scale=")
+					require.NotContains(t, args, "hwaccel_output_format")
+					require.Contains(t, args, "zscale=")
+					require.NotContains(t, args, "tonemap_cuda")
+				} else {
+					require.Contains(t, args, "tonemap_cuda=")
+					require.Contains(t, args, "hwdownload,format=nv12,transpose=1,format=nv12|cuda,hwupload")
+					require.NotContains(t, args, "zscale=")
+				}
+			}
+			require.Equal(t, !fail, s.transcodeSpec(12, true).NVENCCUDA)
+			require.Equal(t, !fail, s.transcodeSpec(0, false).NVENCCUDA)
+			data, err := os.ReadFile(count)
+			require.NoError(t, err)
+			require.Equal(t, "call\n", string(data))
+
+			other := &Stream{c: s.c, m: s.m, quality: QUALITY_MAX}
+			require.Equal(t, !fail, other.transcodeSpec(0, true).NVENCCUDA)
+			data, err = os.ReadFile(count)
+			require.NoError(t, err)
+			require.Equal(t, "call\ncall\n", string(data))
 		}
-		data, err := os.ReadFile(calls)
-		require.NoError(t, err)
-		require.Equal(t, "call\n", string(data))
 	}
 }
 
-func TestRKMPPDisabledOpenCLDoesNotProbe(t *testing.T) {
-	s, calls := tonemapStream(t, false)
-	s.c.RKMPP = true
-	s.c.RKMPPOpenCL = false
-	s.m.probe.CodecName = "hevc"
-	spec := s.transcodeSpec(0, true)
-	require.False(t, spec.RKMPPOpenCL)
-	require.NoFileExists(t, calls)
+func TestCUDATonemapProbeSkipped(t *testing.T) {
+	for _, copy := range []bool{false, true} {
+		s, count := tonemapStream(t, false)
+		s.m.tc.VAAPI, s.m.tc.NVENC = false, true
+		if copy {
+			s.quality = QUALITY_DIRECT
+			s.m.srcSegments = []ffmpeg.Segment{{Start: 0, Duration: 3}}
+		} else {
+			s.m.probe.HDR = false
+		}
+		require.False(t, s.transcodeSpec(0, true).NVENCCUDA)
+		require.NoFileExists(t, count)
+	}
+}
+
+func TestTonemapProbeShared(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		s, count := tonemapStream(t, fail)
+		m := &Manager{
+			c: s.c, url: "http://localhost/other.mov", tc: s.m.tc,
+			probe: &ProbeVideoData{HDR: true, Rotation: -90, FrameRate: 60},
+		}
+		other := &Stream{c: s.c, m: m, quality: s.quality, width: s.width, height: s.height}
+
+		require.Equal(t, !fail, s.transcodeSpec(0, true).VAAPIOpenCL)
+		require.Equal(t, !fail, other.transcodeSpec(30, false).VAAPIOpenCL)
+		data, err := os.ReadFile(count)
+		require.NoError(t, err)
+		if fail {
+			require.Equal(t, "call\ncall\n", string(data), "failures are not shared")
+		} else {
+			require.Equal(t, "call\n", string(data))
+		}
+	}
+}
+
+func TestRKMPPTonemapSelection(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		dir := t.TempDir()
+		count := filepath.Join(dir, "calls")
+		t.Setenv("PROBE_CALLS", count)
+		bin := filepath.Join(dir, "ffmpeg")
+		script := "#!/bin/sh\necho call >> \"$PROBE_CALLS\"\n"
+		if fail {
+			script += "echo 'Mali OpenCL unavailable' >&2\nexit 1\n"
+		}
+		require.NoError(t, os.WriteFile(bin, []byte(script), 0755))
+		c := &config.Config{FFmpeg: bin, RKMPP: true, RKMPPOpenCL: true}
+		m := &Manager{
+			c: c, url: "http://localhost/hdr.mp4",
+			probe: &ProbeVideoData{HDR: true, CodecName: "hevc", PixelFormat: "p010le", BitDepth: 10, Width: 1920, Height: 1080},
+		}
+		s := &Stream{c: c, m: m, quality: "720p", width: 1280, height: 720}
+		spec := s.transcodeSpec(0, true)
+		require.Equal(t, !fail, spec.RKMPPOpenCL)
+		args := strings.Join(ffmpeg.BuildArgs(spec), " ")
+		if fail {
+			require.Contains(t, args, "tonemap=hable")
+			require.NotContains(t, args, "tonemap_opencl")
+		} else {
+			require.Contains(t, args, "tonemap_opencl=")
+		}
+		// Reuse on seeks within this stream, but never share a successful
+		// MPP surface import with a different source file of the same shape.
+		require.Equal(t, !fail, s.transcodeSpec(6, true).RKMPPOpenCL)
+		otherManager := Manager{c: c, url: "http://localhost/another-hdr.mp4", probe: m.probe}
+		other := &Stream{c: c, m: &otherManager, quality: "720p", width: 1280, height: 720}
+		require.Equal(t, !fail, other.transcodeSpec(0, true).RKMPPOpenCL)
+		calls, err := os.ReadFile(count)
+		require.NoError(t, err)
+		require.Equal(t, "call\ncall\n", string(calls))
+	}
 }

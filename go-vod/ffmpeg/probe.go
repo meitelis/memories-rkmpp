@@ -8,8 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
-	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -44,22 +42,29 @@ type VideoInfo struct {
 	BitRate        int
 	Rotation       int
 	HDR            bool
+	DolbyVision    bool
+	ColorTransfer  string
+	ColorPrimaries string
+	ColorSpace     string
+	ColorRange     string
 	BitDepth       int
 	Audio          AudioInfo
 }
 
 // AudioInfo describes the first audio stream; empty when silent.
 type AudioInfo struct {
-	CodecName  string
-	Profile    string
-	Channels   int
-	SampleRate int
-	BitRate    int
+	DurationSeconds float64
+	CodecName       string
+	Profile         string
+	Channels        int
+	SampleRate      int
+	BitRate         int
 }
 
 type sideData struct {
 	SideDataType string `json:"side_data_type"`
 	Rotation     int    `json:"rotation"`
+	DVCompatID   *int   `json:"dv_bl_signal_compatibility_id"`
 }
 
 type videoStream struct {
@@ -68,7 +73,7 @@ type videoStream struct {
 	SideDataList     []sideData `json:"side_data_list"`
 	ColorTransfer    string     `json:"color_transfer"`
 	ColorPrimaries   string     `json:"color_primaries"`
-	BitsPerRawSample string     `json:"bits_per_raw_sample"`
+	ColorRange       string     `json:"color_range"`
 }
 
 type probeOutput struct {
@@ -84,21 +89,14 @@ func Probe(ctx context.Context, bin, fileURL, headers string) (VideoInfo, error)
 	args := []string{
 		"-v", "error",
 	}
-	if headers != "" {
-		// Reuse the authenticated connection across Range seeks, including
-		// MP4 files whose media index is stored after their packet data.
-		args = append(args, "-multiple_requests", "1", "-seekable", "1", "-headers", headers)
-	}
+	args = append(args, remoteInputArgs(headers)...)
 	args = append(args,
 		"-show_entries", "format:stream",
 		"-of", "json",
-		"-i", fileURL,
+		fileURL,
 	)
 	out, serr, err := runFFprobe(ctx, bin, args...)
 	if err != nil {
-		if ctx.Err() != nil {
-			err = ctx.Err()
-		}
 		return VideoInfo{}, fmt.Errorf("ffprobe %s: %w: %s", fileURL, err, serr)
 	}
 	return ParseProbeJSON(out)
@@ -106,7 +104,7 @@ func Probe(ctx context.Context, bin, fileURL, headers string) (VideoInfo, error)
 
 // runFFprobe executes the binary, capturing stdout and stderr.
 func runFFprobe(ctx context.Context, bin string, args ...string) (stdout, stderr []byte, err error) {
-	cmd := exec.CommandContext(ctx, bin, args...)
+	cmd := Command(ctx, bin, args...)
 	var out, serr bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &serr
@@ -131,16 +129,22 @@ func ParseProbeJSON(data []byte) (VideoInfo, error) {
 		return VideoInfo{}, errors.New("no video streams found")
 	}
 
-	duration := parseDuration(s.Duration)
-	if duration == 0 && out.Format != nil {
-		duration = durationFromSeconds(out.Format.DurationSeconds)
+	var duration time.Duration
+	if s.Duration != "" {
+		if secs, err := strconv.ParseFloat(s.Duration, 64); err == nil {
+			duration = time.Duration(secs * float64(time.Second))
+		}
+	} else if out.Format != nil {
+		duration = out.Format.Duration()
 	}
 
-	bitRate := positiveInt(s.BitRate)
-	if bitRate == 0 && out.Format != nil {
-		bitRate = positiveInt(out.Format.BitRate)
+	bitRate, err := strconv.Atoi(s.BitRate)
+	if (err != nil || bitRate <= 0) && out.Format != nil {
+		// Matroska often omits per-stream bitrate. Its measured container
+		// rate is a conservative budget, unlike an arbitrary 5 Mbps default.
+		bitRate, err = strconv.Atoi(out.Format.BitRate)
 	}
-	if bitRate == 0 {
+	if err != nil || bitRate <= 0 {
 		bitRate = defaultBitRate
 	}
 
@@ -155,32 +159,23 @@ func ParseProbeJSON(data []byte) (VideoInfo, error) {
 		BitRate:        bitRate,
 		Rotation:       probeRotation(*s),
 		HDR:            probeHDR(*s),
-		BitDepth:       streamBitDepth(*s),
+		DolbyVision:    probeDolbyVision(*s),
+		ColorTransfer:  s.ColorTransfer,
+		ColorPrimaries: s.ColorPrimaries,
+		ColorSpace:     s.ColorSpace,
+		ColorRange:     s.ColorRange,
+		BitDepth:       probeBitDepth(s.PixFmt),
 		Audio:          probeAudio(out.Streams),
 	}, nil
 }
 
-func parseDuration(value string) time.Duration {
-	seconds, err := strconv.ParseFloat(value, 64)
-	if err != nil {
-		return 0
+func probeDolbyVision(s videoStream) bool {
+	for _, sd := range s.SideDataList {
+		if sd.SideDataType == "DOVI configuration record" {
+			return true
+		}
 	}
-	return durationFromSeconds(seconds)
-}
-
-func durationFromSeconds(seconds float64) time.Duration {
-	if math.IsNaN(seconds) || math.IsInf(seconds, 0) || seconds <= 0 || seconds >= float64(math.MaxInt64)/float64(time.Second) {
-		return 0
-	}
-	return time.Duration(seconds * float64(time.Second))
-}
-
-func positiveInt(value string) int {
-	n, err := strconv.Atoi(value)
-	if err != nil || n <= 0 {
-		return 0
-	}
-	return n
+	return false
 }
 
 // probeAudio describes the first audio stream; empty when silent.
@@ -190,12 +185,16 @@ func probeAudio(streams []videoStream) AudioInfo {
 		if st.CodecType != "audio" || st.CodecName == "" {
 			continue
 		}
+		rate, _ := strconv.Atoi(st.SampleRate)
+		br, _ := strconv.Atoi(st.BitRate)
+		duration, _ := strconv.ParseFloat(st.Duration, 64)
 		return AudioInfo{
-			CodecName:  st.CodecName,
-			Profile:    st.Profile,
-			Channels:   st.Channels,
-			SampleRate: positiveInt(st.SampleRate),
-			BitRate:    positiveInt(st.BitRate),
+			DurationSeconds: duration,
+			CodecName:       st.CodecName,
+			Profile:         st.Profile,
+			Channels:        st.Channels,
+			SampleRate:      rate,
+			BitRate:         br,
 		}
 	}
 	return AudioInfo{}
@@ -215,122 +214,7 @@ func parseFrameRate(frac string) int {
 	return int(float64(num) / float64(den))
 }
 
-// probeRotation reads rotation from display-matrix side data, else tags.
-func probeRotation(s videoStream) int {
-	for _, sd := range s.SideDataList {
-		if strings.EqualFold(sd.SideDataType, "Display Matrix") {
-			return NormalizeRotation(sd.Rotation)
-		}
-	}
-	// Legacy rotate tags are clockwise; display matrices are counterclockwise.
-	return NormalizeRotation(-s.Tags.Rotate)
-}
-
-// probeBitDepth reads sample depth from the pix_fmt name, 8 when unknown.
-// Matched on explicit suffixes since Contains "12" would match nv12.
-func probeBitDepth(pixFmt string) int {
-	pixFmt = strings.ToLower(strings.TrimSpace(pixFmt))
-	switch pixFmt {
-	case "nv15", "nv20", "nv30", "y410":
-		return 10
-	case "y412":
-		return 12
-	case "y416":
-		return 16
-	}
-	for _, depth := range []int{9, 10, 12, 14, 16} {
-		d := strconv.Itoa(depth)
-		if strings.HasSuffix(pixFmt, d+"le") || strings.HasSuffix(pixFmt, d+"be") {
-			return depth
-		}
-	}
-	return 8
-}
-
-func streamBitDepth(s videoStream) int {
-	if depth := positiveInt(s.BitsPerRawSample); depth >= 8 && depth <= 32 {
-		return depth
-	}
-	return probeBitDepth(s.PixFmt)
-}
-
-// probeHDR detects HDR from transfer and color metadata.
-func probeHDR(s videoStream) bool {
-	switch strings.ToLower(s.ColorTransfer) {
-	case "smpte2084", "arib-std-b67":
-		return true
-	}
-	// Dolby Vision by codec or RPU side data, including profile 8 tucked
-	// into HEVC streams whose transfer tags look SDR alone. Explicit names
-	// only: prefix-matching "dv" would catch SDR dvvideo.
-	switch strings.ToLower(s.CodecName) {
-	case "dvav", "dva1", "dvhe", "dvh1", "dvh2", "dvh3", "dvc1", "dav1":
-		return true
-	}
-	for _, sd := range s.SideDataList {
-		name := strings.ToLower(sd.SideDataType)
-		if strings.Contains(name, "dolby vision") || strings.Contains(name, "dovi configuration") || strings.Contains(name, "hdr dynamic metadata") {
-			return true
-		}
-	}
-	// Wide-gamut 10-bit SDR is not HDR. Infer HDR from BT.2020 only when
-	// transfer metadata is missing, never over an explicit SDR transfer tag.
-	transfer := strings.ToLower(strings.TrimSpace(s.ColorTransfer))
-	if transfer != "" && transfer != "unknown" && transfer != "unspecified" {
-		return false
-	}
-	if s.ColorSpace == "bt2020nc" || s.ColorSpace == "bt2020c" || s.ColorPrimaries == "bt2020" {
-		return streamBitDepth(s) > 8
-	}
-	return false
-}
-
-// Keyframes runs ffprobe and parses keyframe timestamps in seconds.
-func Keyframes(ctx context.Context, bin, fileURL, headers string) ([]float64, error) {
-	ctx, cancel := context.WithTimeout(ctx, keyframeTimeout)
-	defer cancel()
-
-	args := []string{
-		"-v", "error",
-	}
-	if headers != "" {
-		args = append(args, "-multiple_requests", "1", "-seekable", "1", "-headers", headers)
-	}
-	args = append(args,
-		"-select_streams", "v:0",
-		"-show_entries", "packet=pts_time,flags",
-		"-of", "csv=p=0",
-		"-i", fileURL,
-	)
-	out, serr, err := runFFprobe(ctx, bin, args...)
-	if err != nil {
-		if ctx.Err() != nil {
-			err = ctx.Err()
-		}
-		return nil, fmt.Errorf("ffprobe keyframes %s: %w: %s", fileURL, err, serr)
-	}
-	return ParseKeyframes(out), nil
-}
-
-// ParseKeyframes parses Keyframes output, keeping keyframe (K) packets,
-// so garbage yields an empty slice and callers fall back to re-encoding.
-func ParseKeyframes(data []byte) []float64 {
-	var out []float64
-	for line := range strings.SplitSeq(string(data), "\n") {
-		pts, flags, _ := strings.Cut(strings.TrimSpace(line), ",")
-		if strings.HasPrefix(pts, "K") {
-			pts, flags = flags, pts
-		}
-		if !strings.Contains(flags, "K") {
-			continue
-		}
-		if ts, err := strconv.ParseFloat(pts, 64); err == nil && ts >= 0 && !math.IsNaN(ts) && !math.IsInf(ts, 0) {
-			out = append(out, ts)
-		}
-	}
-	return out
-}
-
+// exactFrameRate parses nominal or average frame rate to a float64.
 func exactFrameRate(values ...string) float64 {
 	for _, value := range values {
 		value = strings.TrimSpace(value)
@@ -345,4 +229,104 @@ func exactFrameRate(values ...string) float64 {
 		}
 	}
 	return 30
+}
+
+// probeRotation reads rotation from display-matrix side data, else tags.
+func probeRotation(s videoStream) int {
+	for _, sd := range s.SideDataList {
+		if strings.EqualFold(sd.SideDataType, "Display Matrix") {
+			return NormalizeRotation(sd.Rotation)
+		}
+	}
+	// Legacy rotate tags are clockwise; display matrices are counterclockwise.
+	return NormalizeRotation(-s.Tags.Rotate)
+}
+
+// probeBitDepth reads sample depth from the pix_fmt name, 8 when unknown.
+// Matched on explicit suffixes since Contains "12" would match nv12.
+func probeBitDepth(pixFmt string) int {
+	switch pixFmt {
+	case "nv15", "p010", "p010le", "p010be":
+		return 10
+	}
+	for _, depth := range []int{9, 10, 12, 14, 16} {
+		d := strconv.Itoa(depth)
+		if strings.HasSuffix(pixFmt, d+"le") || strings.HasSuffix(pixFmt, d+"be") {
+			return depth
+		}
+	}
+	return 8
+}
+
+// probeHDR detects HDR from transfer and color metadata.
+func probeHDR(s videoStream) bool {
+	switch s.ColorTransfer {
+	case "smpte2084", "arib-std-b67":
+		return true
+	}
+	// Dolby Vision, notably profile 5 whose base layer has no SDR or HDR10
+	// transfer tags at all. An SDR-compatible base layer stays SDR.
+	for _, sd := range s.SideDataList {
+		if sd.SideDataType == "DOVI configuration record" {
+			return sd.DVCompatID == nil || *sd.DVCompatID != 2 // 2: SDR base layer
+		}
+	}
+	if s.ColorSpace == "bt2020nc" || s.ColorSpace == "bt2020c" || s.ColorPrimaries == "bt2020" {
+		return probeBitDepth(s.PixFmt) > 8
+	}
+	return false
+}
+
+// Keyframes runs ffprobe and parses keyframe timestamps in seconds.
+func Keyframes(ctx context.Context, bin, fileURL, headers string) ([]float64, error) {
+	out, err := probePacketTimeline(ctx, bin, fileURL, headers)
+	if err != nil {
+		return nil, err
+	}
+	return ParseKeyframes(out), nil
+}
+
+func ProbeTimeline(ctx context.Context, bin, fileURL, headers string) ([]Keyframe, error) {
+	out, err := probePacketTimeline(ctx, bin, fileURL, headers)
+	if err != nil {
+		return nil, err
+	}
+	return ParseTimeline(out), nil
+}
+
+func probePacketTimeline(ctx context.Context, bin, fileURL, headers string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, keyframeTimeout)
+	defer cancel()
+
+	args := []string{
+		"-v", "error",
+	}
+	args = append(args, remoteInputArgs(headers)...)
+	args = append(args,
+		"-select_streams", "v:0",
+		"-show_entries", "packet=pts_time,flags",
+		"-of", "csv=p=0",
+		fileURL,
+	)
+	out, serr, err := runFFprobe(ctx, bin, args...)
+	if err != nil {
+		return nil, fmt.Errorf("ffprobe keyframes %s: %w: %s", fileURL, err, serr)
+	}
+	return out, nil
+}
+
+// ParseKeyframes parses Keyframes output, keeping keyframe (K) packets,
+// so garbage yields an empty slice and callers fall back to re-encoding.
+func ParseKeyframes(data []byte) []float64 {
+	var out []float64
+	for line := range strings.SplitSeq(string(data), "\n") {
+		pts, flags, _ := strings.Cut(strings.TrimSpace(line), ",")
+		if !strings.Contains(flags, "K") {
+			continue
+		}
+		if ts, err := strconv.ParseFloat(pts, 64); err == nil {
+			out = append(out, ts)
+		}
+	}
+	return out
 }

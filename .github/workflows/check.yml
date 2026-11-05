@@ -1,7 +1,9 @@
 name: Source checks
 on:
   push:
+    paths: ['go-vod/**', 'memories_rkmpp_v11/**', 'scripts/**', 'compose.yml', '.env.example', '.github/workflows/check.yml']
   pull_request:
+    paths: ['go-vod/**', 'memories_rkmpp_v11/**', 'scripts/**', 'compose.yml', '.env.example', '.github/workflows/check.yml']
 permissions:
   contents: read
 concurrency:
@@ -13,14 +15,22 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-      - name: Go formatting, race tests, vet, and build
-        run: docker build --target build -f go-vod/Dockerfile.rkmpp go-vod
-      - name: Player regression tests
-        run: node --test memories_rkmpp_player/js/*.test.cjs
-      - name: Connection-test contract checks
-        run: docker run --rm -v "$PWD:/source:ro" php:8.3-cli php /source/memories_rkmpp_player/tests/connection_test.php
-      - name: Bundled deployment checks
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version-file: go-vod/go.mod
+          cache-dependency-path: go-vod/go.sum
+      - name: Protocol, formatting, race tests, vet and build
+        working-directory: go-vod
         run: |
-          sh -n scripts/build-release.sh scripts/update-nextcloud-player.sh scripts/deploy.sh
-          node --test scripts/packaging.test.cjs
-          docker run --rm -v "$PWD:/source:ro" php:8.3-cli php -l /source/scripts/nextcloud-player-control.php
+          grep -F 'const VERSION = "0.7.0"' main.go
+          test -z "$(gofmt -l .)"
+          go test -race ./...
+          go vet ./...
+          go build ./...
+      - name: Browser and deployment checks
+        run: |
+          node --test memories_rkmpp_v11/js/*.test.cjs
+          sh -n scripts/deploy-v11.sh
+          bash -n scripts/test-v11-rkmpp.sh scripts/test-v11-network.sh
+          find memories_rkmpp_v11 -name '*.php' -print0 | xargs -0 -n1 php -l
+          docker compose -f compose.yml config --quiet

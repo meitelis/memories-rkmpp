@@ -22,6 +22,9 @@ type VodRequest struct {
 	ServiceToken string `json:"serviceToken"`
 	// Profile is the transcoding profile for this request.
 	Profile string `json:"profile"`
+	// GoVodAddress is this go-vod's address as Nextcloud reaches it, passed back
+	// on bridge callbacks so PHP dials this same instance.
+	GoVodAddress string `json:"goVodAddress"`
 	// Query are passthrough parameters, e.g. auth tokens.
 	Query VodQuery `json:"query"`
 	// TConfig is the config for this request.
@@ -35,8 +38,8 @@ type VodQuery struct {
 	Liveid string `json:"liveid,omitempty"`
 }
 
-// Encode preserves authentication and codec negotiation on every child request.
-// Losing codecs would change manager identity and the output codec mid-stream.
+// Encode renders "?..." for playlist and VTT URLs. Codecs stay in them so a
+// Manager recreated by a later request keeps the same renditions.
 func (q VodQuery) Encode() string {
 	v := url.Values{}
 	if q.Albums != "" {
