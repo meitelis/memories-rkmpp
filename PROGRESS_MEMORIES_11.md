@@ -78,3 +78,10 @@ No credentials or private-media contents belong in this repository. Keep diagnos
 - Network shaping was removed and the original noqueue configuration verified. Main is still unmerged.
 
 - The second 800 kbps test still stalled with the cap already at minimum: a large old-quality fragment remained in flight. Added emergency loader cancellation/resume using the existing media buffers (adapter 1.0.6). This change is awaiting live verification; do not mark smooth bandwidth adaptation complete or merge yet. Both temporary network limits were automatically removed and noqueue verified.
+
+## Latest live result: adapter 1.0.6 / cd524b4
+
+- Third 800 kbps test reached hardware 480p and automatically recovered to Original 3200x1800 HEVC after bandwidth returned. Buffer starvation was still observed during the drop, so constrained-link smoothness is NOT accepted.
+- Temporary shaping was automatically removed; verify noqueue before further tests. Backend remains healthy. Native adapter installed version: 1.0.6.
+- Next investigation: body-only transfer estimates stay unrealistically high when a proxy delays the response. Include effective request delivery time/progress in adaptation, with deliberate handling of cold-transcode latency. Confirm real audio bitrate changes on a sustained weak link; the observed audio remained the high/source track.
+- Stable Original-to-hardware-1080p switching worked with shared audio retained. Audible clicks, long repeated switching, cold seeks in the live browser, mobile/Safari/public-share coverage, and HDR picture quality still need acceptance. Do not merge or delete working branches before this is resolved.
