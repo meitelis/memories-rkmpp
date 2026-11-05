@@ -68,8 +68,8 @@ still open; the generated hardware HDR checks passed.
 | Midpoint and backward cold seeks, A-E | Resume at requested clock without a false network downshift | Earlier B/C/D passed; repeat final build and weak-link seek |
 | Pause beyond producer idle timeout, then resume | No dead stream or audio reset | Pending |
 | Original / 1440p / 1080p / all three 480p rates | Retain buffered pictures and shared audio; actual rendition display | Partial desktop result above; repeat new build |
-| Mobile-like delivery: fast -> 800 kbps -> 4 Mbps -> fast | Prompt useful downshift, sustained recovery, no flapping or buffer starvation | Repeat new build through the Nextcloud/probe path |
-| Sustained weak link and recovery | Appropriate independent audio rate, no audio flush on video changes | Earlier 1.1.1 run passed waiting counters; repeat new build |
+| Mobile-like delivery: fast -> 800 kbps -> 4 Mbps -> fast | Prompt useful downshift, sustained recovery, no flapping or buffer starvation | r4 / 1.1.12: Original to 480p and back to Original; zero recorded playback waits, including weak-link backward seek (2.623 s seek). Startup probe preceded shaping, so this run does not establish shaped-startup selection. |
+| Sustained weak link and recovery | Appropriate independent audio rate, no audio flush on video changes | r4 / 1.1.12 selected reduced audio during restriction, then restored high/source audio; zero recorded playback waits. Audible Android acceptance remains open. |
 | Rapid scrubbing / repeat navigation / EOF | No stale requests, stuck two-second playback or endless retries | Pending |
 | Badge controls, touch and fullscreen | Compact corner placement; hidden with native controls | DOM placement verified; final visual/fullscreen check pending |
 
