@@ -176,7 +176,7 @@ test('real update loop does not repeatedly abort low-quality worker on fluctuati
   const badge={dataset:{},parentElement:null,textContent:''};
   const state={hls,policy,cap:1,bps:30000000,selected:'auto',originalReady:true,decoderCap:Infinity,
     badge,audioInitialized:false,inflight:{level:1,stats:{loading:{start:1},loaded:0}}};
-  const video={currentTime:1,videoWidth:1280,videoHeight:720,paused:false,ended:false,
+  const video={_qualityHls:hls,currentTime:1,videoWidth:1280,videoHeight:720,paused:false,ended:false,
     seeking:false,buffered:{length:1,start:()=>0,end:()=>4},closest:()=>({querySelector:()=>null})};
   let tick=0;
   try {
