@@ -1,7 +1,109 @@
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
-const {chooseLevel, audioProfile, selectQuality, selectAudio, beginSeek, requestAge, renditionText, configure} = require('./player.js');
+const {chooseLevel, audioProfile, selectQuality, selectAudio, beginSeek, requestAge, renditionText, prepareRendition, commitPreparedSwitch, configure} = require('./player.js');
 const {PlaybackPolicy} = require('./policy.js');
+
+const settle=()=>new Promise(resolve=>setImmediate(resolve));
+const manifest='#EXTM3U\n#EXT-X-MAP:URI="init.m4s?token=fixture"\n#EXTINF:0.96,\n0.m4s?token=fixture\n#EXTINF:1.04,\n1.m4s?token=fixture\n#EXTINF:5.2,\n2.m4s?token=fixture\n';
+function switchFixture() {
+  const video={currentTime:0.4,readyState:4,paused:false,seeking:false,
+    buffered:{length:1,start:()=>0,end:()=>20},
+    qualityList:[{id:'1440',index:1}],dispatchEvent(){}};
+  const events=new Map(),flushes=[];
+  const hls={currentLevel:0,bandwidthEstimate:50000000,
+    constructor:{Events:{BUFFER_FLUSHED:'flushed',BUFFER_FLUSHING:'flushing'}},
+    on(e,fn){events.set(e,fn)},off(e){events.delete(e)},
+    trigger(e,data){flushes.push(data);events.get('flushed')?.('flushed',{type:data.type});},
+    stopLoad(){this.stopped=true},startLoad(position,skipSeek){this.resumed={position,skipSeek}},
+    levels:[{bitrate:8000000},{bitrate:4000000,url:['https://example.test/vod/1440p.m3u8?token=fixture']}],
+    set nextLevel(_) {throw Error('unaligned old-grid switch');},
+    set audioTrack(_) {throw Error('audio flushed');},
+    set nextAudioTrack(_) {throw Error('audio changed during video switch');}};
+  const state={abort:new AbortController(),bps:50000000,badge:{dataset:{}},selected:'1440',hls};
+  return {video,hls,state,flushes,events};
+}
+
+test('preparation uses the actual Original keyframe grid without duplicating fragment traffic',async()=>{
+  const previous=global.fetch,calls=[];
+  global.fetch=async(url,options)=>{
+    calls.push({url,method:options.method||'GET'});
+    return {ok:true,text:async()=>manifest,arrayBuffer:async()=>new ArrayBuffer(1)};
+  };
+  try {
+    assert.equal(await prepareRendition({url:['https://example.test/vod/direct.m3u8?token=fixture']},0.4,new AbortController().signal),2);
+    assert.deepEqual(calls.map(c=>c.url),[
+      'https://example.test/vod/direct.m3u8?token=fixture',
+      'https://example.test/vod/2.m4s?token=fixture']);
+    assert.deepEqual(calls.map(c=>c.method),['GET','HEAD']);
+  } finally {global.fetch=previous;}
+});
+
+test('manual handoff waits for a completed server fragment and flushes only video at its IDR boundary',async()=>{
+  const previous=global.fetch;
+  let complete;const body=new Promise(resolve=>{complete=resolve;});
+  global.fetch=async(_url,options)=>options.method==='HEAD'?body:{ok:true,text:async()=>manifest};
+  const {video,hls,state,flushes}=switchFixture();
+  try {
+    selectQuality(video,hls,'1440',state);await settle();
+    assert.equal(hls.loadLevel,0,'retain the old producer while preparing');
+    assert.equal(flushes.length,0,'never flush before the producer is ready');
+    complete({ok:true});await settle();
+    assert.deepEqual(flushes,[{startOffset:2,endOffset:Infinity,type:'video'}]);
+    assert.deepEqual(hls.resumed,{position:2,skipSeek:true});
+    assert.equal(video.currentTime,0.4,'the playing clock never jumps to the switch point');
+    assert.equal(state.preparing,null);
+  } finally {state.abort.abort();global.fetch=previous;}
+});
+
+test('failed preparation falls back without an early buffer flush',async()=>{
+  const previous=global.fetch;global.fetch=async()=>({ok:false});
+  const {video,hls,state}=switchFixture();
+  try {
+    selectQuality(video,hls,'1440',state);await settle();
+    assert.equal(hls.loadLevel,1);
+    assert.equal(hls.stopped,undefined);
+  } finally {state.abort.abort();global.fetch=previous;}
+});
+
+test('canceling during video removal releases loading without applying a stale switch point',async()=>{
+  const {video,hls,events}=switchFixture();
+  hls.media=video;hls.trigger=()=>{};
+  const abort=new AbortController();
+  const finished=commitPreparedSwitch(video,hls,1,2,abort.signal);
+  events.get('flushed')('flushed',{type:'audio'});
+  assert.equal(hls.resumed,undefined,'audio completion must not commit the video switch');
+  abort.abort();await assert.rejects(finished,/canceled/);
+  assert.deepEqual(hls.resumed,{position:-1,skipSeek:true});
+  assert.equal(events.size,0);
+});
+
+test('a newer Auto choice or seek cancels a prepared handoff that has not committed',async()=>{
+  const previous=global.fetch;let complete;
+  global.fetch=async()=>({ok:true,text:()=>new Promise(resolve=>{complete=resolve;})});
+  const {video,hls,state}=switchFixture();
+  try {
+    selectQuality(video,hls,'1440',state);await settle();
+    selectQuality(video,hls,'auto',state);
+    complete(manifest);await settle();
+    assert.equal(hls.loadLevel,-1);assert.equal(hls.stopped,undefined);
+    selectQuality(video,hls,'1440',state);await settle();
+    beginSeek(state);
+    complete(manifest);await settle();
+    assert.equal(hls.loadLevel,1);assert.equal(hls.stopped,undefined);
+  } finally {state.abort.abort();global.fetch=previous;}
+});
+
+test('paused, thin-buffer and unaffordable manual choices retain the conservative handoff',()=>{
+  for(const kind of ['paused','buffer','bandwidth']) {
+    const {video,hls,state}=switchFixture();
+    if(kind==='paused')video.paused=true;
+    if(kind==='buffer')video.buffered.end=()=>4;
+    if(kind==='bandwidth')state.bps=hls.bandwidthEstimate=1000000;
+    selectQuality(video,hls,'1440',state);
+    assert.equal(hls.loadLevel,1);assert.equal(state.preparing,undefined);
+    state.abort.abort();
+  }
+});
 
 test('a resumed seek cannot turn its old seek timer into a new network stall',()=>{
   const levels=[400000,5000000].map((bitrate,i)=>({bitrate,url:[`/${i}.m3u8`]}));

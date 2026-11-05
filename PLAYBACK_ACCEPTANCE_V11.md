@@ -18,8 +18,9 @@ identified timestamp defect, not every possible cause of a two-second freeze.
 
 ## Deployment and checks
 
-- Native adapter 1.1.13; runtime image memories-11.0.2-govod-0.7.0-r4.
-- All 20 JavaScript regressions pass. Linux Go tests, vet, formatting and ARM64
+- Native adapter 1.1.17; runtime image memories-11.0.2-govod-0.7.0-r4. Faster
+  manual handoff is opt-in with rkmpp_fast_switch; default behavior remains 1.1.13's conservative handoff.
+- All 26 JavaScript regressions pass in working source. Linux Go tests, vet, formatting and ARM64
   image build passed. The complete isolated hardware matrix passed, including
   both encoders, HDR, rotations, cold starts, shared audio and new 50 fps cadence checks.
 - r4 uses measured container bitrate when Matroska omits stream bitrate. Probe
@@ -95,6 +96,12 @@ kept 1080p, resumed in 1.696 seconds, then returned to normal Auto with zero wai
 Record measured waiting time, resolution, decoder cap, buffer, errors and hardware
 execution. A zero waiting counter alone does not establish visual/audio acceptance.
 Only merge after those failures are resolved; then recheck mainline and clean up branches.
+
+The faster manual-switch preview is not accepted: aligned HEVC switches measured
+2.06-3.88 seconds without recorded waits, but a high-bitrate AVC downward switch
+showed a 1.3-second presentation hold despite a zero wait counter. The same source
+using the conservative control showed no such hold. Keep the faster path opt-in
+until this regression is resolved; see PROGRESS_MEMORIES_11.md for the measurements.
 
 Run `bash scripts/test-v11-network.sh nextcloud 443` on the board for the bounded
 mobile profile. This affects that container's IPv4 HTTPS responses to the proxy,

@@ -7,16 +7,125 @@
   const {PlaybackPolicy, chooseLevel, audioProfile} = typeof module !== 'undefined' && module.exports
     ? require('./policy.js') : window.MemoriesRkmppPolicy;
 
-  function selectQuality(video, hls, id) {
+  function cancelPreparation(state) {
+    const pending = state?.preparing;
+    if (pending) {
+      state.preparing = null;
+      pending.abort.abort();
+    }
+    return pending;
+  }
+
+  async function prepareRendition(level, time, signal) {
+    const playlist = Array.isArray(level.url) ? level.url[0] : level.url;
+    const response = await fetch(playlist, {cache:'no-store', signal});
+    if (!response.ok) throw Error('Rendition unavailable');
+    const text = await response.text();
+    const init = text.match(/^#EXT-X-MAP:URI="([^"]+)"/m)?.[1];
+    const clock = typeof time === 'function' ? time : () => time;
+    let start = 0, duration = 0;
+    const fragments = [];
+    // go-vod serves unencrypted VOD playlists with an explicit fMP4 init.
+    // Original has an irregular keyframe grid, so do not guess segment IDs.
+    for (const line of text.split(/\r?\n/).map(s => s.trim())) {
+      if (line.startsWith('#EXTINF:')) duration = Number.parseFloat(line.slice(8));
+      else if (line && !line.startsWith('#') && duration > 0) {
+        fragments.push({start, url:line});
+        start += duration;
+        duration = 0;
+      }
+    }
+    if (!init) throw Error('No switch init');
+    const ready = async path => {
+      // Nextcloud does not cache m4s responses. HEAD waits for completed
+      // server output without downloading the same fragment twice.
+      const part = await fetch(new URL(path, playlist).href, {method:'HEAD', cache:'no-store', signal});
+      if (!part.ok) throw Error('Rendition not ready');
+    };
+    const upcoming = fragments.filter(f => f.start >= clock() + 1.5).slice(0, 2);
+    for (const fragment of upcoming) {
+      // Publishing a complete fragment also guarantees its init is ready.
+      // Warming init first can start an unnecessary encode at zero, racing
+      // the request that starts the producer at the actual switch position.
+      await ready(fragment.url);
+      if (fragment.start >= clock() + 1) return fragment.start;
+    }
+    throw Error('Switch boundary passed');
+  }
+
+  function commitPreparedSwitch(video, hls, level, start, signal, ownerSignal) {
+    const {Events} = hls.constructor;
+    // Both the old forward buffer and the new load must meet at the new
+    // rendition's IDR boundary. nextLevel's old-grid padding can retain a
+    // partial GOP and stall a switch between irregular Original and 3s HLS.
+    hls.loadLevel = level;
+    if (start >= video.currentTime + bufferAhead(video) - 0.5) return;
+    return new Promise((resolve, reject) => {
+      const clear = () => {
+        hls.off(Events.BUFFER_FLUSHED, resume);
+        signal.removeEventListener('abort', cancel);
+      };
+      const resume = (_event, data) => {
+        if (data.type !== 'video') return;
+        clear();
+        hls.startLoad(start, true);
+        resolve();
+      };
+      const cancel = () => {
+        clear();
+        if (hls.media === video && !ownerSignal?.aborted) hls.startLoad(-1, true);
+        reject(Error('Switch canceled'));
+      };
+      hls.stopLoad();
+      hls.on(Events.BUFFER_FLUSHED, resume);
+      signal.addEventListener('abort', cancel, {once:true});
+      hls.trigger(Events.BUFFER_FLUSHING, {startOffset:start, endOffset:Infinity, type:'video'});
+    });
+  }
+
+  function selectQuality(video, hls, id, state) {
+    cancelPreparation(state);
+    if (state) { state.switchAt = 0; state.switchLevel = -1; }
     if (id === 'auto') {
       hls.loadLevel = -1;
     } else {
       const option = video.qualityList?.find(o => o.id === id);
       if (!option || !Number.isInteger(option.index)) return;
-      // Keep all buffered video while the requested rendition starts.
-      // nextLevel flushes future video; a cold hardware encode can then
-      // miss the shortened handoff deadline even with shared audio.
-      hls.loadLevel = option.index;
+      const level = hls.levels[option.index];
+      const canPrepare = state?.fastSwitch !== false && state?.abort && !state.abort.signal.aborted &&
+        !video.paused && !video.seeking && video.readyState >= 3 &&
+        hls.currentLevel >= 0 && hls.currentLevel !== option.index && bufferAhead(video) > 4 &&
+        bandwidth(level) * 1.3 < Math.max(state.bps || 0, hls.bandwidthEstimate || 0);
+      if (!canPrepare) hls.loadLevel = option.index;
+      else {
+        const pending = {abort:new AbortController(), level:option.index};
+        state.preparing = pending;
+        // Keep the current rendition and all queued media until the new
+        // producer and its first required segment are ready.
+        hls.loadLevel = hls.currentLevel;
+        const ownerSignal = state.abort.signal;
+        const cancel = () => pending.abort.abort();
+        ownerSignal.addEventListener('abort', cancel, {once:true});
+        const timeout = setTimeout(cancel, 4000);
+        void prepareRendition(level, () => video.currentTime, pending.abort.signal).then(start => {
+          if (state.preparing === pending && !pending.abort.signal.aborted) {
+            state.badge.dataset.switchBoundary = String(start);
+            return commitPreparedSwitch(video, hls, option.index, start, pending.abort.signal, ownerSignal);
+          }
+        }).catch(() => {
+          // A timeout or failed preparation must never discard the safety buffer.
+          if (state.preparing === pending && !ownerSignal.aborted) hls.loadLevel = option.index;
+        }).finally(() => {
+          clearTimeout(timeout);
+          ownerSignal.removeEventListener('abort', cancel);
+          if (state.preparing === pending) state.preparing = null;
+        });
+      }
+      if (state) {
+        state.switchAt = hls.currentLevel === option.index ? 0 : Date.now();
+        state.switchLevel = option.index;
+        delete state.badge.dataset.switchMs;
+      }
     }
     video._qualitySelected = id;
     video.dispatchEvent(new CustomEvent('quality-selected'));
@@ -28,6 +137,8 @@
   }
 
   function beginSeek(state) {
+    const pending = cancelPreparation(state);
+    if (pending) state.hls.loadLevel = pending.level;
     if (state.selected !== 'auto' || !(state.hls?.currentLevel >= 0)) return;
     state.policy?.beginSeek();
     state.inflight = null;
@@ -56,7 +167,7 @@
   }
 
   if (typeof module !== 'undefined' && module.exports) {
-    module.exports = {chooseLevel, audioProfile, selectQuality, selectAudio, beginSeek, requestAge, renditionText, configure};
+    module.exports = {chooseLevel, audioProfile, selectQuality, selectAudio, beginSeek, requestAge, renditionText, prepareRendition, commitPreparedSwitch, configure};
   }
   if (typeof document === 'undefined') return;
   const debug = new URLSearchParams(location.search).has('rkmpp_debug');
@@ -152,6 +263,7 @@
 
   function configure(video, state, hls) {
     state.abort?.abort();
+    cancelPreparation(state);
     clearTimeout(state.retryTimer);
     for (const [event, fn] of state.events || []) state.hls.off(event, fn);
     state.hls = hls;
@@ -178,7 +290,7 @@
     if (Object.getOwnPropertyDescriptor(video, 'currentQuality')?.configurable) {
       Object.defineProperty(video, 'currentQuality', {
         configurable:true, get:() => state.selected,
-        set:id => { state.seekLevel = null; state.selected = id; selectQuality(video, hls, id); },
+        set:id => { state.seekLevel = null; state.selected = id; selectQuality(video, hls, id, state); },
       });
     }
     Object.assign(hls.config, {
@@ -239,7 +351,21 @@
     listen(Events.FRAG_LOADING, (_event, data) => {
       if (data.frag?.type === 'main') state.inflight = data.frag;
     });
-    listen(Events.FRAG_BUFFERED, () => {
+    listen(Events.LEVEL_SWITCHED, (_event, data) => {
+      if (data.level === state.switchLevel && state.switchAt) {
+        state.badge.dataset.switchMs = String(Date.now() - state.switchAt);
+        state.switchAt = 0;
+      }
+    });
+    listen(Events.FRAG_BUFFERED, (_event, data) => {
+      if (debug && data.frag?.type === 'main') {
+        state.fragmentTrace ||= [];
+        const f = data.frag;
+        state.fragmentTrace.push({time:video.currentTime,level:f.level,sn:f.sn,
+          start:f.start,end:f.end,pts:f.startPTS,endPTS:f.endPTS});
+        state.fragmentTrace = state.fragmentTrace.slice(-10);
+        state.badge.dataset.fragmentTrace = JSON.stringify(state.fragmentTrace);
+      }
       state.failure = '';
       state.retries = 0;
       clearTimeout(state.retryTimer);
@@ -271,7 +397,8 @@
     badge.className = 'mr-v11-status';
     badge.setAttribute('role', 'status');
     parent.appendChild(badge);
-    const state = {badge, hls:null, decoderCap:Infinity, bps:0, audioChanged:0};
+    const state = {badge, hls:null, decoderCap:Infinity, bps:0, audioChanged:0,
+      fastSwitch:new URLSearchParams(location.search).has('rkmpp_fast_switch')};
     const diagnostics = new AbortController();
     const metric = (name, fn) => video.addEventListener(name, fn, {signal:diagnostics.signal});
     metric('playing', () => {
