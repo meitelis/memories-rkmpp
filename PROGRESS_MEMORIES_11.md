@@ -13,11 +13,13 @@ The mainline release contains the go-vod 0.7.0 server and browser integration on
 
 ## Evidence
 
-The r8 board matrix passes all ten input codecs to both hardware encoders, PQ/HLG, RGA, cadence, full/cold clocks, core serving and API checks. r9 packages the same server/media pipeline with complete runtime notices. Browser adapter 1.1.25 passes 24 regressions.
+The fresh mainline r9 board matrix passes all ten input codecs to both hardware encoders, PQ/HLG, RGA, cadence, full/cold clocks, core serving and API checks. Browser adapter 1.1.25 passes 24 regressions. Mainline race tests, vet, formatting, build and ARM64 image checks pass.
 
 A real 0.66 Mbps startup selected 480p/64 kbps. After restoring fast delivery, presented Original returned in 33.9 seconds and high audio followed, with zero recorded waits through the measured run. A fresh fast-network AVC case selected Original; backward/forward cold seeks reported 517/609 ms without waits, dropped frames or a quality downshift. Earlier Original-to-1440p repeats took 3.047/5.976 seconds without added waits/drops.
 
-See [playback acceptance](PLAYBACK_ACCEPTANCE_V11.md) for limits and [hardware tests](HARDWARE_TEST_V11.md) for reproduction. Mainline deployment is rechecked after the merge.
+Mainline commit `674a4ee195f9bc7e3303e362ac7e234de3d3253b` was deployed from a fresh checkout on 5 November 2026. Runtime r9 is healthy, the real Nextcloud go-vod 0.7.0 handshake passes, and a post-deployment HEVC Original check advanced past twelve seconds with zero recorded waits. No network shaping remains active.
+
+PR #9 is merged. The merged integration and old optimization branches were deleted. The obsolete 10.2 draft PR #5 was closed; its unique historical commits remain on its branch. Native Android work is preserved separately. See [playback acceptance](PLAYBACK_ACCEPTANCE_V11.md) for limits and [hardware tests](HARDWARE_TEST_V11.md) for reproduction.
 
 ## Separate work
 

@@ -29,6 +29,8 @@ flowchart LR
 
 Only requested renditions start workers. The player prefers compatible Original when its measured budget permits it; otherwise it requests an encoded rendition. Audio has its own shared timeline, so a video-quality change does not restart its worker. SDR skips HDR tone mapping. The native Android client is a separate integration.
 
+High audio is 192 kbps AAC when encoding, or the existing source bitrate when compatible AAC can be copied (up to 320 kbps). Lower profiles are 96, 64 and 32 kbps.
+
 ## Deploy on the ROCK 5B+
 
 Docker/Compose and the device nodes in `compose.yml` are required. Copy `.env.example` to `.env` if the internal Nextcloud URL, Docker network or numeric device groups differ. The default Nextcloud layout is LinuxServer's `/app/www/public`, container `nextcloud`.

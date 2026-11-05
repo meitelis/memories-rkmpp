@@ -4,7 +4,7 @@ Use real library videos as well as generated hardware tests. Keep private media,
 
 ## Current state
 
-Server/browser release: runtime r9 / adapter 1.1.25. Runtime r8 passed deployment health and handshake checks before repackaging. The real Nextcloud go-vod 0.7.0 handshake passes. r8 changes only MPP packaging: the original pinned SDK receives a small optional VP8-control fix. All ten input codecs pass to both hardware encoders; the complete board matrix and Linux checks pass. The final runtime contains the byte-identical tested MPP library and independently passes VP8-to-H.264/HEVC checks without errors.
+Server/browser release: runtime r9 / adapter 1.1.25 is deployed and healthy from mainline commit `674a4ee195f9bc7e3303e362ac7e234de3d3253b`. The fresh mainline board run passes all three suites: FFmpeg, core and API, including all ten input codecs to both hardware encoders, HDR, cadence and cold clocks. The real Nextcloud go-vod 0.7.0 handshake passes. Mainline GitHub race/vet/build/formatting and ARM64 image checks pass. A post-deployment HEVC Original check advanced past twelve seconds with zero recorded waits; this is a functional playback check, not perceptual/audio acceptance.
 
 The browser uses hls.js's native nextLevel scheduler. There is no custom preparation/SourceBuffer-flush path or fast-switch preview flag. Twenty-four retained player/policy regressions pass. One server presentation/decode plan handles source alignment and open-GOP cold starts. The copy mux preserves B-frame composition timestamps; generated tests inspect raw MP4 boxes rather than trusting ffprobe's standalone fragment reorder offsets.
 
