@@ -85,3 +85,9 @@ No credentials or private-media contents belong in this repository. Keep diagnos
 - Temporary shaping was automatically removed; verify noqueue before further tests. Backend remains healthy. Native adapter installed version: 1.0.6.
 - Next investigation: body-only transfer estimates stay unrealistically high when a proxy delays the response. Include effective request delivery time/progress in adaptation, with deliberate handling of cold-transcode latency. Confirm real audio bitrate changes on a sustained weak link; the observed audio remained the high/source track.
 - Stable Original-to-hardware-1080p switching worked with shared audio retained. Audible clicks, long repeated switching, cold seeks in the live browser, mobile/Safari/public-share coverage, and HDR picture quality still need acceptance. Do not merge or delete working branches before this is resolved.
+
+## Delivery-aware adaptation (1.0.7)
+
+- Replaced body-only completed-fragment samples with full request delivery time. Slow responses buffered by a proxy no longer create inflated bandwidth estimates.
+- Added protection when a request makes no body progress for two seconds while buffered playback falls below twelve seconds. Recovery estimates rise gradually instead of jumping from one fast burst.
+- Seven JavaScript regressions pass, including delayed-response bandwidth/audio selection. Deployed 1.0.7; a fresh 800 kbps live test is in progress.

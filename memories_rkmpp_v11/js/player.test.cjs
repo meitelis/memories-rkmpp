@@ -1,6 +1,14 @@
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
-const {chooseLevel, audioProfile, adaptLevel, selectQuality, renditionText, configure} = require('./player.js');
+const {chooseLevel, audioProfile, adaptLevel, selectQuality, renditionText, configure, deliveryRate} = require('./player.js');
+
+test('delayed proxy delivery does not masquerade as a fast connection', () => {
+  const rate = deliveryRate({loaded:800000,loading:{start:1000,first:8900,end:9000}});
+  assert.equal(rate,800000);
+  assert.equal(audioProfile(rate),'audio64');
+  assert.equal(chooseLevel(levels,rate),0);
+  assert.equal(deliveryRate({loaded:0,loading:{start:1,end:1000}}),0);
+});
 
 const levels = [350000,700000,1800000,4000000,9000000].map((bitrate,i)=>({bitrate,url:[i===4?'/direct.m3u8?x=y':`/${i}.m3u8`]}));
 test('startup budgets headroom and selects the original only when ready and affordable', () => {

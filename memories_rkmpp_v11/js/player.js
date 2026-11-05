@@ -4,6 +4,11 @@
   const isOriginal = level => (Array.isArray(level?.url) ? level.url : [level?.url]).some(u => /\/direct\.m3u8(?:\?|$)/.test(u || ''));
   const bandwidth = level => level?.bitrate || Number(level?.attrs?.BANDWIDTH) || Infinity;
 
+  function deliveryRate(stats) {
+    const elapsed = stats?.loading?.end - stats?.loading?.start;
+    return elapsed > 0 && stats.loaded > 0 ? stats.loaded * 8000 / Math.max(25, elapsed) : 0;
+  }
+
   function chooseLevel(levels, bps, originalReady = true, cap = Infinity) {
     let best = 0;
     let bestRate = 0;
@@ -56,7 +61,7 @@
   }
 
   if (typeof module !== 'undefined' && module.exports) {
-    module.exports = {chooseLevel, audioProfile, adaptLevel, selectQuality, renditionText, configure};
+    module.exports = {chooseLevel, audioProfile, adaptLevel, selectQuality, renditionText, configure, deliveryRate};
   }
   if (typeof document === 'undefined') return;
 
@@ -205,13 +210,13 @@
     listen(Events.AUDIO_TRACKS_UPDATED, () => setAudio(state, state.checking));
     listen(Events.FRAG_LOADED, (_event, data) => {
       if (data.frag?.type !== 'main') return;
-      state.inflight = null;
+      if (state.inflight === data.frag) state.inflight = null;
       const stats = data.stats || data.frag.stats;
-      const elapsed = stats?.loading?.end - stats?.loading?.first;
-      if (!(elapsed > 0) || !stats.loaded) return;
-      const sample = stats.loaded * 8000 / Math.max(25, elapsed);
-      // Fast downward response, slower recovery. Exclude the encoder's TTFB.
-      state.bps = state.bps * (sample < state.bps ? 0.35 : 0.8) + sample * (sample < state.bps ? 0.65 : 0.2);
+      const sample = deliveryRate(stats);
+      if (!sample) return;
+      // Delivery includes time waiting behind a proxy or encoder. A fast
+      // body after a long wait cannot sustain a high-bitrate rendition.
+      state.bps = sample < state.bps ? sample : Math.min(sample, state.bps * 1.35);
     });
     listen(Events.FRAG_LOADING, (_event, data) => {
       if (data.frag?.type === 'main') state.inflight = data.frag;
@@ -268,9 +273,14 @@
     const buffer = bufferAhead(video);
     const now = Date.now();
     const stats = state.inflight?.stats;
-    if (stats?.loaded > 0 && stats.loading?.first > 0) {
-      const elapsed = performance.now() - stats.loading.first;
-      if (elapsed >= 1000) state.bps = Math.min(state.bps, stats.loaded * 10000 / elapsed);
+    if (stats?.loading?.start > 0 && !video.paused && !video.seeking) {
+      const elapsed = performance.now() - stats.loading.start;
+      if (elapsed >= 1500 && stats.loaded > 0) state.bps = Math.min(state.bps, stats.loaded * 8000 / elapsed);
+      if (elapsed > 2000 && buffer < 12 && !stats.loaded) {
+        // No body progress may be invisible proxy buffering. Protect the
+        // remaining playback time before the original fragment completes.
+        state.bps = Math.min(state.bps, bandwidth(hls.levels[0]) / 0.72);
+      }
     }
     if (hls?.levels?.length && !state.checking && state.selected === 'auto' && !video.seeking && !video.paused) {
       const target = chooseLevel(hls.levels, state.bps, state.originalReady, state.decoderCap);
