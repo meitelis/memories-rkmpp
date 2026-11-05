@@ -141,6 +141,8 @@
   }
 
   function configure(video, state, hls) {
+    state.abort?.abort();
+    for (const [event, fn] of state.events || []) state.hls.off(event, fn);
     state.hls = hls;
     state.abort = new AbortController();
     state.selected = 'auto';
@@ -148,6 +150,8 @@
     state.originalReady = false;
     state.lastWarm = 0;
     state.events = [];
+    state.failure = '';
+    state.badge.dataset.hlsVersion = hls.constructor.version || '';
     const Events = hls.constructor.Events;
     const listen = (event, fn) => {
       if (!event) return;
@@ -179,7 +183,9 @@
       state.cap = chooseLevel(hls.levels, state.bps, state.originalReady);
       state.candidate = state.cap;
       state.candidateSince = state.changed = Date.now();
-      hls.bandwidthEstimate = state.bps;
+      // Older hls.js builds exposed this estimate as a read-only getter.
+      try { hls.bandwidthEstimate = state.bps; }
+      catch { hls.config.abrEwmaDefaultEstimate = state.bps; }
       hls.autoLevelCapping = state.cap;
       hls.startLevel = state.cap;
       setAudio(state, true);

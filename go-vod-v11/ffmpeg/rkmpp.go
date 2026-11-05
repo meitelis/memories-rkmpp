@@ -73,6 +73,13 @@ func buildRKMPPAudioArgs(s Spec) []string {
 	filter += fmt.Sprintf(",asetpts=N/SR/TB+%.9f/TB", start)
 	args = append(args, "-i", s.Input, "-copyts", "-fflags", "+genpts", "-vn", "-map", "0:a:0",
 		"-c:a", "aac", "-ac", "2", "-ar", "48000", "-b:a", strconv.Itoa(rate), "-af", filter)
+	if s.HLS {
+		// Encode the preroll for a settled AAC window, but do not publish its
+		// packets as the requested segment. Keep the first packet on the same
+		// global 1024-sample clock as a run that started at zero.
+		cut := int64(math.Ceil(s.StartAt*48000/1024)) * 1024
+		args = append(args, "-bsf:a", fmt.Sprintf("noise=amount=0:drop='lt(pts,%d)'", cut))
+	}
 	if s.EndAt > s.StartAt {
 		// copyts preserves absolute source timestamps, including on cold seeks.
 		args = append(args, "-to", fmt.Sprintf("%.6f", s.EndAt))

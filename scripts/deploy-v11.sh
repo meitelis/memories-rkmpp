@@ -31,6 +31,7 @@ if occ config:app:get memories_rkmpp_player installed_version >/dev/null 2>&1; t
 fi
 docker cp "$root/memories_rkmpp_v11" "$nextcloud:/app/www/public/apps/"
 docker exec "$nextcloud" chown -R abc:abc /app/www/public/apps/memories_rkmpp_v11
+docker exec "$nextcloud" php -r 'define("OC_CONSOLE", true); require "/app/www/public/lib/base.php"; $id="memories_rkmpp_v11"; $a=\OC::$server->get(\OCP\App\IAppManager::class); $installed=\OC::$server->get(\OCP\IConfig::class)->getAppValue($id,"installed_version",""); if ($installed!=="" && $installed!==$a->getAppVersion($id) && !\OC_App::updateApp($id)) { exit(1); }'
 occ app:enable memories_rkmpp_v11
 docker exec "$nextcloud" php -r 'define("OC_CONSOLE", true); require "/app/www/public/lib/base.php"; $b=\OC::$server->get(\OCA\Memories\Service\BinExt::class); echo json_encode($b->testGoVod("memories-rkmpp:47788")), PHP_EOL;'
 printf 'Memories 11.0.2 is connected to go-vod 0.7.0. Reload the Memories page.\n'

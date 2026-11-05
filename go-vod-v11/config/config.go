@@ -40,7 +40,7 @@ type Config struct {
 	RKMPP            bool   `json:"-"`
 	RKMPPStrict      bool   `json:"rkmppStrict"`
 	RKMPPOpenCL      bool   `json:"rkmppOpenCL"`
-	RKMPPOutputCodec string `json:"rkmppOutputCodec" validate:"omitempty,oneof=h264 hevc"`
+	RKMPPOutputCodec string `json:"rkmppOutputCodec" validate:"omitempty,oneof=auto h264 hevc"`
 }
 
 // Bridge configures persistent PHP workers serving file reads.
@@ -69,7 +69,7 @@ func Defaults(version string) *Config {
 		RKMPP:            os.Getenv("MEMORIES_RKMPP") == "1",
 		RKMPPOpenCL:      true,
 		RKMPPStrict:      true,
-		RKMPPOutputCodec: "hevc",
+		RKMPPOutputCodec: "auto",
 		Bridge: Bridge{
 			Enabled:    true,
 			MaxWorkers: 4,

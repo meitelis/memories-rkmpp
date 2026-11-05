@@ -29,6 +29,16 @@ func TestRKMPPCodecNegotiation(t *testing.T) {
 	}
 }
 
+func TestRKMPPAutoKeepsCompatibleAVCOriginal(t *testing.T) {
+	m := &Manager{c: &config.Config{RKMPP: true, RKMPPOutputCodec: "auto"},
+		probe: &ProbeVideoData{CodecName: "h264", BitDepth: 8}, playableCodecs: []string{"h264", "hevc"}}
+	require.Equal(t, "h264", m.OutputCodec())
+	m.probe.HDR = true
+	require.Equal(t, "hevc", m.OutputCodec(), "HDR is mapped to an SDR ladder")
+	m.c.RKMPPOutputCodec = "h264"
+	require.Equal(t, "h264", m.OutputCodec())
+}
+
 func TestRKMPPPreservesCompatibleHEVCOriginalInMaster(t *testing.T) {
 	c := config.Defaults("0.7.0")
 	c.RKMPP, c.RKMPPOutputCodec = true, "hevc"
@@ -43,6 +53,7 @@ func TestRKMPPPreservesCompatibleHEVCOriginalInMaster(t *testing.T) {
 	require.True(t, m.HasStream(QUALITY_MAX), "retain an internal transcode fallback")
 	found := false
 	for _, r := range m.Renditions() {
+		require.GreaterOrEqual(t, min(r.Width, r.Height), 480, "480p is the minimum video ladder resolution")
 		require.NotEqual(t, QUALITY_MAX, r.Quality, "do not advertise a lossy duplicate of the original")
 		require.True(t, r.SeparateAudio, "all video qualities must use the same audio stream")
 		if r.Quality == QUALITY_DIRECT {
@@ -51,6 +62,9 @@ func TestRKMPPPreservesCompatibleHEVCOriginalInMaster(t *testing.T) {
 		}
 	}
 	require.True(t, found, "original must be visible in the master playlist")
+	require.True(t, m.HasStream("480p-low"), "weak links need a lower bitrate at the same minimum resolution")
+	require.Less(t, m.streams["480p-low"].bitrate, m.streams["480p"].bitrate)
+	require.Equal(t, m.streams["480p"].height, m.streams["480p-low"].height)
 }
 
 func TestRenditionsPreservePortraitDimensions(t *testing.T) {

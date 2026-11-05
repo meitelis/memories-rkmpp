@@ -1,6 +1,7 @@
 package core
 
 import (
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -44,7 +45,8 @@ func TestRKMPPHardwareServing(t *testing.T) {
 			require.NoError(t, err)
 			t.Cleanup(m.Destroy)
 			require.True(t, m.HasStream(QUALITY_AUDIO))
-			for _, quality := range []string{"240p", "480p", QUALITY_MAX, QUALITY_AUDIO, QUALITY_AUDIO96, QUALITY_AUDIO64, QUALITY_AUDIO32} {
+			var audioPTS float64
+			for _, quality := range []string{"480p", QUALITY_MAX, QUALITY_AUDIO, QUALITY_AUDIO96, QUALITY_AUDIO64, QUALITY_AUDIO32} {
 				require.True(t, m.HasStream(quality))
 				serve := func(id int) []byte {
 					w := httptest.NewRecorder()
@@ -79,6 +81,14 @@ func TestRKMPPHardwareServing(t *testing.T) {
 				pts, err := strconv.ParseFloat(strings.TrimRight(first, ","), 64)
 				require.NoError(t, err)
 				require.InDelta(t, 9, pts, 0.05, "%s absolute timestamp", quality)
+				if isAudioQuality(quality) {
+					want := math.Ceil(9*48000.0/1024) * 1024 / 48000
+					require.InDelta(t, want, pts, 1.0/48000, "AAC seek starts on global frame clock")
+					if audioPTS != 0 {
+						require.InDelta(t, audioPTS, pts, 1.0/48000, "audio profiles share the sample clock")
+					}
+					audioPTS = pts
+				}
 			}
 			// Switching video quality must never restart the shared AAC encoder.
 			audio := m.streams[QUALITY_AUDIO]

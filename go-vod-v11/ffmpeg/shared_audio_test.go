@@ -87,10 +87,8 @@ func TestSharedAudioVideoJobsMuteAudio(t *testing.T) {
 	}
 }
 
-// TestSharedAudioCopyableAACDoesNotNeedSeparateStream confirms that
-// NormalizeRKMPPAudio returns false for clean AAC-LC, so we skip the
-// separate stream and copy audio inline in each rendition.
-func TestSharedAudioCopyableAACDoesNotNeedSeparateStream(t *testing.T) {
+// Compatible AAC can keep its source packets in the shared high track.
+func TestSharedAudioCopyableAACDoesNotNeedNormalization(t *testing.T) {
 	lcAudio := AudioInfo{
 		CodecName:  "aac",
 		Profile:    "LC",
@@ -99,7 +97,18 @@ func TestSharedAudioCopyableAACDoesNotNeedSeparateStream(t *testing.T) {
 		BitRate:    128000,
 	}
 	if NormalizeRKMPPAudio(lcAudio) {
-		t.Error("NormalizeRKMPPAudio should be false for clean AAC-LC; no separate stream needed")
+		t.Error("compatible AAC-LC can retain source packets")
+	}
+}
+
+func TestSharedAudioProfilesUseTheSameSeekClock(t *testing.T) {
+	for _, rate := range []int{192000, 96000, 64000, 32000} {
+		s := Spec{AudioOnly: true, HLS: true, StartAt: 9, EndAt: 120, AudioBitrate: rate,
+			Audio: AudioInfo{CodecName: "pcm_s16le", Channels: 2, SampleRate: 48000}, Input: "/tmp/source.mkv"}
+		args := strings.Join(BuildArgs(s), " ")
+		if !strings.Contains(args, "noise=amount=0:drop='lt(pts,432128)'") {
+			t.Errorf("profile %d does not discard AAC preroll before the requested frame: %s", rate, args)
+		}
 	}
 }
 

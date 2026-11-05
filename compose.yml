@@ -11,7 +11,7 @@ services:
       NEXTCLOUD_HOST: ${NEXTCLOUD_HOST:-http://nextcloud}
       MEMORIES_RKMPP: "1"
       MEMORIES_RKMPP_STRICT: "true"
-      MEMORIES_RKMPP_CODEC: ${MEMORIES_RKMPP_CODEC:-hevc}
+      MEMORIES_RKMPP_CODEC: ${MEMORIES_RKMPP_CODEC:-auto}
       MEMORIES_RKMPP_OPENCL: "true"
       GO_VOD_BRIDGE_ENABLED: "true"
     read_only: true

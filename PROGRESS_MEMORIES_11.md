@@ -52,3 +52,11 @@ No credentials or private-media contents belong in this repository. Keep diagnos
 - Linux ARM64 Go tests, vet, formatting and server/test-image builds passed for the first adaptive backend iteration. Five focused JavaScript regression tests pass. The subsequent small fallback/profile-test changes still need the next Linux build.
 - Production runtime build succeeded. Hardware matrix and live adaptive-player validation are in progress; this checkpoint is not acceptance of smooth playback.
 - Replaced stale default documentation with the v11 deployment path; removed the duplicate v11 Compose file. No merge or branch cleanup yet.
+
+## 5 November checkpoint: AAC clock corrected, 480p minimum
+
+- Saved the adaptive WIP as GitHub commit 8f6e1f3. All three GitHub workflows passed for that checkpoint; its hardware AAC failure was recorded rather than hidden.
+- Corrected normalized AAC cold seeks: retain encoder preroll internally, discard its packets before publishing the requested global AAC frame boundary. The complete board hardware matrix passed after this correction, including all four audio profiles on the same sample clock.
+- User clarified that 480p is the minimum desired video resolution. Removed 240p/360p. Added lower-bitrate 480p variants for weak links, retaining the independent 96/64/32 kbps audio options.
+- Added an auto codec policy to preserve compatible SDR AVC originals and keep their encoded ladder on AVC. HEVC originals remain HEVC when the browser supports them; forced AVC/HEVC options remain available.
+- The 480p-minimum build passed Linux tests/vet/formatting and the video/HDR/shared-audio hardware checks; final API testing and deployment are running. Real browser acceptance is still pending. No mainline merge or branch deletion.

@@ -207,10 +207,6 @@ func NewManager(a NewManagerArgs) (*Manager, error) {
 	}
 
 	rkmpp := m.c.RKMPP
-	if rkmpp {
-		m.streams["240p"] = &Stream{c: m.c, m: m, quality: "240p", height: 240, width: 426, bitrate: 150}
-		m.streams["360p"] = &Stream{c: m.c, m: m, quality: "360p", height: 360, width: 640, bitrate: 300}
-	}
 	minRKMPPBitrate := 0
 	if rkmpp {
 		minRKMPPBitrate = ffmpeg.RKMPPMinBitrate(m.probe.Audio)
@@ -283,6 +279,18 @@ func NewManager(a NewManagerArgs) (*Manager, error) {
 	}
 
 	maxWidth, maxHeight := m.probe.Width, m.probe.Height
+	// Keep 480p as the minimum encoded resolution. Weak links get lower
+	// bitrate 480p variants instead of smaller pictures. Each job is lazy.
+	if rkmpp && smDim >= 480 {
+		width := int(math.Round(float64(lgDim)*480/float64(smDim)/2)) * 2
+		for quality, budget := range map[string]int{"480p-low": 400000, "480p-mobile": 700000} {
+			rate := max(minRKMPPBitrate, budget)
+			if base := m.streams["480p"]; base != nil && base.bitrate <= rate*11/10 {
+				continue
+			}
+			m.streams[quality] = &Stream{c: m.c, m: m, quality: quality, width: width, height: 480, bitrate: rate}
+		}
+	}
 	if rkmpp {
 		maxWidth, maxHeight = maxWidth/2*2, maxHeight/2*2
 	}
@@ -824,6 +832,12 @@ func (m *Manager) ffmpegInput() string {
 // OutputCodec keeps the entire adaptive ladder on one codec. Missing or
 // negative client capability reports always select the H.264 fallback.
 func (m *Manager) OutputCodec() string {
+	// Keep a compatible AVC original and its fallback ladder on AVC rather
+	// than re-encoding it only because the browser also supports HEVC.
+	if m.c.RKMPP && m.c.RKMPPOutputCodec == "auto" && m.probe != nil &&
+		m.probe.CodecName == "h264" && !m.probe.HDR && m.probe.BitDepth <= 8 {
+		return "h264"
+	}
 	if m.c.RKMPP && m.c.RKMPPOutputCodec != "h264" && slices.Contains(m.playableCodecs, "hevc") {
 		return "hevc"
 	}
