@@ -12,6 +12,28 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// Key-only fixtures describe closed GOPs, where decode and presentation
+// boundaries coincide. Production caches the complete packet timeline.
+func StoreCachedKeyframes(dir string, id int64, etag string, keys []float64) error {
+	frames := make([]ffmpeg.Keyframe, len(keys))
+	for i, k := range keys {
+		frames[i] = ffmpeg.Keyframe{PTS: k, Start: k}
+	}
+	return StoreCachedTimeline(dir, id, etag, frames)
+}
+
+func LoadCachedKeyframes(dir string, id int64, etag string) ([]float64, bool) {
+	frames, ok := LoadCachedTimeline(dir, id, etag)
+	if !ok {
+		return nil, false
+	}
+	keys := make([]float64, len(frames))
+	for i, f := range frames {
+		keys[i] = f.PTS
+	}
+	return keys, true
+}
+
 func newCopyManagerWithEtag(t *testing.T, probeJSON, keyframes string, keyFail bool, cacheDir, etag string) *Manager {
 	t.Helper()
 	t.Setenv("CACHE_DIR", cacheDir)

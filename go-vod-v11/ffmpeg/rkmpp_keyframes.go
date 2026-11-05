@@ -51,3 +51,19 @@ func (g *RKMPPKeyframeGrid) forceTimes(start float64) string {
 	}
 	return strings.Join(times, ",")
 }
+
+// Open-GOP leading pictures need the preceding random-access point. Seeking
+// to their presentation time can land on the following CRA by decode time and
+// silently discard those pictures. Trim still uses the requested StartAt.
+func (g *RKMPPKeyframeGrid) decodeStart(start float64) float64 {
+	for i, s := range g.Segments {
+		if math.Abs(s.Start-start) < rkmppKeyframeEpsilon && s.KeyframeAt != 0 && i > 0 {
+			previous := g.Segments[i-1]
+			if previous.KeyframeAt != 0 {
+				return previous.KeyframeAt
+			}
+			return previous.Start
+		}
+	}
+	return start
+}

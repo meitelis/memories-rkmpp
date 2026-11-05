@@ -40,6 +40,14 @@ Tests return a nonzero status on failure. Hardware tests skip during ordinary
 `go test ./...`; the matrix explicitly enables them with
 `MEMORIES_RKMPP_HW_TEST=1`. Feature listings alone cannot pass this gate.
 
+The input-format suite generates AVC, HEVC, VP8, VP9, AV1, H.263, MPEG-1,
+MPEG-2, MPEG-4 and MJPEG sources and tests both output codecs. In the pinned
+runtime VP8 currently fails MPP decoder initialization; the full matrix therefore
+remains red. Nine other codec paths passed the focused r7 run. Open-GOP AVC/HEVC
+tests compare raw presentation ranges with the server plan and verify full/cold
+hardware output against the same ranges. Do not confuse these synthetic codec
+checks with real-browser/mobile playback acceptance.
+
 `environment.txt` records UTC time, kernel, Git revision, a hash of source files
 (including untracked changes), image ID, architecture and protocol version.
 Each suite retains its own log. Keep these with any failure report.

@@ -15,7 +15,7 @@ import (
 
 // FFmpeg's packet demuxer adds a B-frame reorder offset to standalone fMP4.
 // Check the raw presentation clock consumed by MSE, not that inferred offset.
-func firstSamplePTS(t *testing.T, init, segment []byte) float64 {
+func samplePresentationTimes(t *testing.T, init, segment []byte) []float64 {
 	t.Helper()
 	box := func(data []byte, path ...string) []byte {
 		for _, kind := range path {
@@ -51,20 +51,54 @@ func firstSamplePTS(t *testing.T, init, segment []byte) float64 {
 	trun := box(segment, "moof", "traf", "trun")
 	flags := binary.BigEndian.Uint32(trun) & 0xffffff
 	offset := 8
-	for _, flag := range []uint32{1, 4, 0x100, 0x200, 0x400} {
+	for _, flag := range []uint32{1, 4} {
 		if flags&flag != 0 {
 			offset += 4
 		}
 	}
-	var cto int64
-	if flags&0x800 != 0 {
-		x := binary.BigEndian.Uint32(trun[offset:])
-		cto = int64(x)
-		if trun[0] == 1 {
-			cto = int64(int32(x))
-		}
+	tfhd := box(segment, "moof", "traf", "tfhd")
+	headerFlags := binary.BigEndian.Uint32(tfhd) & 0xffffff
+	headerOffset := 8
+	if headerFlags&1 != 0 {
+		headerOffset += 8
 	}
-	return (float64(dts) + float64(cto)) / float64(scale)
+	if headerFlags&2 != 0 {
+		headerOffset += 4
+	}
+	var defaultDuration uint32
+	if headerFlags&8 != 0 {
+		defaultDuration = binary.BigEndian.Uint32(tfhd[headerOffset:])
+	}
+	var times []float64
+	for range binary.BigEndian.Uint32(trun[4:]) {
+		duration := defaultDuration
+		if flags&0x100 != 0 {
+			duration = binary.BigEndian.Uint32(trun[offset:])
+			offset += 4
+		}
+		if flags&0x200 != 0 {
+			offset += 4
+		}
+		if flags&0x400 != 0 {
+			offset += 4
+		}
+		var cto int64
+		if flags&0x800 != 0 {
+			x := binary.BigEndian.Uint32(trun[offset:])
+			offset += 4
+			cto = int64(x)
+			if trun[0] == 1 {
+				cto = int64(int32(x))
+			}
+		}
+		times = append(times, (float64(dts)+float64(cto))/float64(scale))
+		dts += uint64(duration)
+	}
+	return times
+}
+
+func firstSamplePTS(t *testing.T, init, segment []byte) float64 {
+	return samplePresentationTimes(t, init, segment)[0]
 }
 
 func TestRKMPPHardwareCopyBFrameClock(t *testing.T) {

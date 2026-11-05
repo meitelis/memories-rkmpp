@@ -14,6 +14,15 @@ See [PLAYBACK_ACCEPTANCE_V11.md](PLAYBACK_ACCEPTANCE_V11.md) for measured playba
 
 ## Current deployment
 
+Latest: r7 / adapter 1.1.24 is healthy and connected to Nextcloud. The unaccepted
+custom handoff has been deleted; hls.js owns switching. The server uses one
+presentation/decode timeline plan, including open-GOP cold starts. Twenty retained
+JS regressions and Linux checks pass. Focused hardware checks pass nine input
+codecs to both output codecs and both AVC/HEVC open-GOP source combinations.
+VP8 remains an observed FFmpeg/MPP runtime failure and is retained as a failing
+full-matrix case. Real Original-to-1440p repeats took 3.047 s and 5.976 s without
+added waits/drops/gap errors. See acceptance for limits. No mainline merge.
+
 - Working branch: `import/laptop-2026-11-04`. Main still contains the older 10.2 baseline; do not deploy that baseline into Memories 11.
 - Memories 11.0.2 communicates with go-vod 0.7.0 through the existing internal transcoder address. Runtime r5 is healthy and its real Nextcloud handshake passes.
 - Adapter 1.1.23 is installed. Ordinary URLs retain the conservative buffer-preserving quality switch. Faster manual switching remains restricted to the explicit `rkmpp_fast_switch` preview flag.
@@ -30,6 +39,11 @@ See [PLAYBACK_ACCEPTANCE_V11.md](PLAYBACK_ACCEPTANCE_V11.md) for measured playba
 - Fresh-code real tests: HEVC Original-to-1440p reported 4.079 s with no waits; AVC 1440p-to-1080p changed presented dimensions in 3.775 s with no added waits/drops. Aligned AVC backward/forward cold seeks took 785/801 ms and retained the selected resolution.
 
 ## Active investigation
+
+The keyframe-versus-presentation defect is corrected in r7 and passed the two
+real switch repeats. The older investigation below records its origin. Remaining
+work is VP8 runtime support, fresh mobile adaptation/startup acceptance, audible
+continuity and native Android controls; those requirements are not waived.
 
 The 50 fps HEVC source exposes an Original-copy composition-timestamp offset. The preview guard refuses an unsafe early cut and falls back, preserving playback but leaving a slow switch. An isolated raw-MP4 check identifies MOV's DASH/sidx continuity handling as rewriting later fragment PTS. A minimal `skip_sidx` change for copied video and generated AVC/HEVC B-frame startup/cold regressions are being validated; this change is not deployed yet. Do not compensate for this in the player.
 

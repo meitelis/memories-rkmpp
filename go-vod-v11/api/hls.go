@@ -22,7 +22,14 @@ func MasterPlaylist(renditions []core.Rendition, frameRate int, query string) (s
 	})
 
 	m := m3u8.NewMasterPlaylist()
-	m.SetIndependentSegments(true)
+	independent := true
+	for _, r := range sorted {
+		if r.Quality == core.QUALITY_DIRECT {
+			independent = false
+			break
+		}
+	}
+	m.SetIndependentSegments(independent)
 	for _, r := range sorted {
 		params := m3u8.VariantParams{
 			Bandwidth:  uint32(r.Bitrate),
@@ -106,6 +113,9 @@ func CopyVariantPlaylist(quality string, segments []ffmpeg.Segment, query string
 	var p strings.Builder
 	fmt.Fprintf(&p, "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-TARGETDURATION:%.0f\n#EXT-X-MAP:URI=\"%s%s\"\n",
 		math.Ceil(longest), ffmpeg.InitName(quality), query)
+	if quality != core.QUALITY_DIRECT {
+		p.WriteString("#EXT-X-INDEPENDENT-SEGMENTS\n")
+	}
 	for i, s := range segments {
 		fmt.Fprintf(&p, "#EXTINF:%.6f,nodesc\n%s-%06d.m4s%s\n", s.Duration, quality, i, query)
 	}

@@ -486,6 +486,8 @@ func MP4Args(s Spec) []string {
 // Segment is one stream-copy HLS segment: absolute start and duration.
 type Segment struct {
 	Start, Duration float64
+	// Nonzero when a copied open GOP is decoded from a later keyframe.
+	KeyframeAt float64
 }
 
 // CopySegments makes one segment per keyframe, mirroring the muxer's

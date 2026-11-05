@@ -18,6 +18,38 @@ identified timestamp defect, not every possible cause of a two-second freeze.
 
 ## Deployment and checks
 
+Latest: runtime r7 / adapter 1.1.24. The custom prepared-switch/buffer-flush
+experiment has been removed. Manual selection uses the native hls.js switch
+scheduler; there is no fast-switch preview flag. Twenty retained player/policy
+regressions pass. Prior measurements below describe earlier revisions.
+
+The source plan now distinguishes a GOP's presentation start from its decoder
+keyframe. One existing packet scan collects both; a versioned index stores them.
+Copy seeks use the decoder entry, while hardware trims/IDRs use presentation
+boundaries. Cold open-GOP encoding decodes from the preceding random-access point.
+Old key-only indexes refresh without evicting unchanged sibling artifacts.
+
+Linux tests/vet/build/formatting pass. Generated AVC and HEVC open-GOP inputs pass
+to BOTH hardware output codecs, with exact copied/encoded presentation boundaries,
+independent encoded fragment decoding and stable cold init. Hardware core serving
+and API tests pass. Nine input codecs passed hardware decoding/RGA and both output
+encoders: AVC, HEVC, VP9, AV1, H.263, MPEG-1, MPEG-2, MPEG-4 and MJPEG, across
+MOV/MP4/WebM/Matroska/AVI fixtures. These are capability tests, not complete player
+acceptance for every format.
+
+Observed runtime limitation: VP8 fails in the pinned FFmpeg/MPP decoder with
+`Failed to set enable deinterlace: -3`, including when disabled explicitly.
+The full hardware matrix intentionally retains this failing case. The focused
+retest excluded VP8 and passed; do not describe it as an all-formats pass.
+
+Final real browser repeats, unshaped: the previously failing 50 fps open-GOP video
+switched Original-to-1440p in 3.047 s, and the longer-GOP 4K video in 5.976 s.
+Presented dimensions changed, with no additional waiting events, dropped frames
+or gap errors during either measured switch. Startup drops already existed in
+this hidden-browser run and are not counted as switch drops. Audible continuity,
+new mobile bandwidth traces and native Android acceptance remain open. Runtime
+health and the real go-vod 0.7.0 handshake pass. No merge or branch deletion.
+
 - Native adapter 1.1.23; runtime image memories-11.0.2-govod-0.7.0-r5. Faster
   manual handoff is opt-in with rkmpp_fast_switch; default behavior remains 1.1.13's conservative handoff.
 - All 29 JavaScript regressions pass in working source. The deployed r5 Linux Go tests, vet, formatting and ARM64

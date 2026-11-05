@@ -539,11 +539,11 @@ func (m *Manager) TryCacheCopySegments() ([]ffmpeg.Segment, bool) {
 	if segs, ok := m.CopySegments(); ok {
 		return segs, true
 	}
-	keys, ok := LoadCachedKeyframes(m.c.CacheDir(), m.fileid, m.etag)
+	frames, ok := LoadCachedTimeline(m.c.CacheDir(), m.fileid, m.etag)
 	if !ok {
 		return nil, false
 	}
-	segs := ffmpeg.CopySegments(keys, m.probe.Duration)
+	segs := ffmpeg.SourceSegments(frames, m.probe.Duration)
 	if len(segs) == 0 {
 		return nil, false
 	}
@@ -757,9 +757,9 @@ func (m *Manager) ffprobe() error {
 // Lock-free; EnsureCopySegments publishes the result under copyMu.
 func (m *Manager) probeCopy() ([]ffmpeg.Segment, error) {
 	cachePath := KeyframeCachePath(m.c.CacheDir(), m.fileid)
-	if keys, ok := LoadCachedKeyframes(m.c.CacheDir(), m.fileid, m.etag); ok {
+	if frames, ok := LoadCachedTimeline(m.c.CacheDir(), m.fileid, m.etag); ok {
 		log.Printf("%s: keyframe cache hit %s", m.id, cachePath)
-		segs := ffmpeg.CopySegments(keys, m.probe.Duration)
+		segs := ffmpeg.SourceSegments(frames, m.probe.Duration)
 		if len(segs) == 0 {
 			return nil, fmt.Errorf("no keyframe grid for file %d", m.fileid)
 		}
@@ -767,14 +767,14 @@ func (m *Manager) probeCopy() ([]ffmpeg.Segment, error) {
 	}
 	log.Printf("%s: keyframe cache miss %s", m.id, cachePath)
 
-	keys, err := ffmpeg.Keyframes(context.Background(), m.c.FFprobe, m.ffmpegInput(), m.inputHeaders())
+	frames, err := ffmpeg.ProbeTimeline(context.Background(), m.c.FFprobe, m.ffmpegInput(), m.inputHeaders())
 	if err != nil {
 		return nil, err
 	}
-	if err := StoreCachedKeyframes(m.c.CacheDir(), m.fileid, m.etag, keys); err != nil {
+	if err := StoreCachedTimeline(m.c.CacheDir(), m.fileid, m.etag, frames); err != nil {
 		log.Printf("%s: keyframe cache store failed: %v", m.id, err)
 	}
-	segs := ffmpeg.CopySegments(keys, m.probe.Duration)
+	segs := ffmpeg.SourceSegments(frames, m.probe.Duration)
 	if len(segs) == 0 {
 		return nil, fmt.Errorf("no keyframe grid for file %d", m.fileid)
 	}

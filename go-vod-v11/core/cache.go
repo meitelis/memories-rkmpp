@@ -7,6 +7,8 @@ import (
 	"hash/fnv"
 	"os"
 	"path/filepath"
+
+	"github.com/pulsejet/memories/go-vod/ffmpeg"
 )
 
 const KeyframeCacheFile = "keyframes.json"
@@ -45,11 +47,12 @@ func KeyframeCachePath(cacheDir string, fileid int64) string {
 
 // keyframesPlan is the stored keyframe payload, validated by Etag.
 type keyframesPlan struct {
-	Etag string    `json:"etag"`
-	Keys []float64 `json:"keys"`
+	V      int               `json:"v"`
+	Etag   string            `json:"etag"`
+	Frames []ffmpeg.Keyframe `json:"frames"`
 }
 
-func LoadCachedKeyframes(cacheDir string, fileid int64, etag string) ([]float64, bool) {
+func LoadCachedTimeline(cacheDir string, fileid int64, etag string) ([]ffmpeg.Keyframe, bool) {
 	path := KeyframeCachePath(cacheDir, fileid)
 	if path == "" {
 		return nil, false
@@ -67,10 +70,15 @@ func LoadCachedKeyframes(cacheDir string, fileid int64, etag string) ([]float64,
 		EvictFileCache(cacheDir, fileid)
 		return nil, false
 	}
-	return plan.Keys, true
+	// Old indexes have decoder timestamps only. Refresh this one payload;
+	// an unchanged source's other cached artifacts remain valid.
+	if plan.V != 1 || len(plan.Frames) == 0 {
+		return nil, false
+	}
+	return plan.Frames, true
 }
 
-func StoreCachedKeyframes(cacheDir string, fileid int64, etag string, keys []float64) error {
+func StoreCachedTimeline(cacheDir string, fileid int64, etag string, frames []ffmpeg.Keyframe) error {
 	path := KeyframeCachePath(cacheDir, fileid)
 	if path == "" {
 		return nil
@@ -78,7 +86,7 @@ func StoreCachedKeyframes(cacheDir string, fileid int64, etag string, keys []flo
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return err
 	}
-	data, err := json.Marshal(keyframesPlan{Etag: etag, Keys: keys})
+	data, err := json.Marshal(keyframesPlan{V: 1, Etag: etag, Frames: frames})
 	if err != nil {
 		return err
 	}

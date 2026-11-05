@@ -156,12 +156,16 @@ func RKMPPInputPaced(s Spec) bool {
 // The v11 server enables it only when MEMORIES_RKMPP=1.
 func buildRKMPPArgs(s Spec) []string {
 	args := []string{"-hide_banner", "-loglevel", "warning"}
-	if s.StartAt > 0 {
-		seek := fmt.Sprintf("%.6f", s.StartAt)
+	decodeStart := s.StartAt
+	if s.HLS && s.KeyframeGrid != nil {
+		decodeStart = s.KeyframeGrid.decodeStart(s.StartAt)
+	}
+	if decodeStart > 0 {
+		seek := fmt.Sprintf("%.6f", decodeStart)
 		if s.HLS && s.KeyframeGrid != nil {
 			// Seek just past rounded keyframe metadata, but retain that frame
 			// with noaccurate_seek and the trim threshold below.
-			seek = fmt.Sprintf("%.9f", s.StartAt+10*rkmppKeyframeEpsilon)
+			seek = fmt.Sprintf("%.9f", decodeStart+10*rkmppKeyframeEpsilon)
 		}
 		args = append(args, "-ss", seek)
 		if s.HLS {

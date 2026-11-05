@@ -476,7 +476,11 @@ func (s *Stream) transcode(startId int) {
 		startNumber = startId
 		startAt = 0
 		if startId > 0 {
-			startAt = segs[startId].Start + copySeekEpsilon
+			startAt = segs[startId].Start
+			if segs[startId].KeyframeAt != 0 {
+				startAt = segs[startId].KeyframeAt
+			}
+			startAt += copySeekEpsilon
 		}
 	} else if grid := s.m.AlignedGrid(s.quality); grid != nil {
 		startNumber = startId

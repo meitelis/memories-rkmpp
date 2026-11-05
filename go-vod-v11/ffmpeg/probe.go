@@ -279,6 +279,22 @@ func probeHDR(s videoStream) bool {
 
 // Keyframes runs ffprobe and parses keyframe timestamps in seconds.
 func Keyframes(ctx context.Context, bin, fileURL, headers string) ([]float64, error) {
+	out, err := probePacketTimeline(ctx, bin, fileURL, headers)
+	if err != nil {
+		return nil, err
+	}
+	return ParseKeyframes(out), nil
+}
+
+func ProbeTimeline(ctx context.Context, bin, fileURL, headers string) ([]Keyframe, error) {
+	out, err := probePacketTimeline(ctx, bin, fileURL, headers)
+	if err != nil {
+		return nil, err
+	}
+	return ParseTimeline(out), nil
+}
+
+func probePacketTimeline(ctx context.Context, bin, fileURL, headers string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, keyframeTimeout)
 	defer cancel()
 
@@ -296,7 +312,7 @@ func Keyframes(ctx context.Context, bin, fileURL, headers string) ([]float64, er
 	if err != nil {
 		return nil, fmt.Errorf("ffprobe keyframes %s: %w: %s", fileURL, err, serr)
 	}
-	return ParseKeyframes(out), nil
+	return out, nil
 }
 
 // ParseKeyframes parses Keyframes output, keeping keyframe (K) packets,
