@@ -17,6 +17,7 @@ class PlayerScriptListener implements IEventListener {
         if (is_string($path) && preg_match('~/apps/memories(?:/|$)~', $path)) {
             Util::addScript('memories_rkmpp_v11', 'policy');
             Util::addScript('memories_rkmpp_v11', 'player');
+            Util::addScript('memories_rkmpp_v11', 'cadence');
             Util::addStyle('memories_rkmpp_v11', 'player');
         }
     }

@@ -104,3 +104,11 @@ No credentials or private-media contents belong in this repository. Keep diagnos
 
 - Live 1.1.0 baseline held Original 1800p with zero waiting events. The 800 kbps run selected 480p/64 kbps audio but recorded one 1.27-second wait. Source review identified that the adapter selected runtime audio with hls.audioTrack (immediate switching), despite hls.js 1.7.4 providing nextAudioTrack for a non-interrupting scheduled switch.
 - Adapter 1.1.1 now uses nextAudioTrack during playback, preserving direct audioTrack selection only for startup. A regression rejects immediate runtime audio flushing. All 13 tests pass; live recheck is underway.
+
+## Live result and separate 480p jitter investigation
+
+- With 1.1.1, the settled Original baseline and abrupt 800 kbps run recorded zero playback-wait events. The player selected hardware 480p, scheduled reduced-bitrate audio and retained roughly 17 seconds of buffer. Temporary shaping was automatically removed and noqueue verified. Recovery resumed higher resolutions. This addresses buffer stalls in that test, not every visual defect.
+- User reports occasional tiny backward-looking jumps/stutters at 480p. It persisted with Auto disabled at both fixed 400 kbps and fixed 1.3 Mbps. Do not attribute it solely to same-resolution bitrate switching or declare smoothness complete.
+- Inspected three actual 480p stream segments: 450 decoded frames, all unique; 449 timestamp deltas exactly 20 ms; keyframes at the expected 3-second boundaries. No repeated frames or backward packet PTS in this captured interval.
+- Added opt-in cadence.js diagnostics, enabled by rkmpp_debug in the page query, to record presented-frame backsteps, late frames and seeks locally in DOM data. No pixels, private URLs or tokens are captured. Adapter 1.1.2 is installed for this investigation. The normal player remains free of frame-callback diagnostics unless explicitly enabled.
+- Visual 480p jitter remains unaccepted. Mainline merge, post-merge checks and branch cleanup remain pending.
