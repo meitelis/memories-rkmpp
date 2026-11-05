@@ -6,6 +6,7 @@ import (
 	"math"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/grafov/m3u8"
@@ -94,29 +95,22 @@ func TranscodeVariantPlaylist(quality string, total time.Duration, chunkSize int
 	return p.Encode().String(), nil
 }
 
-// CopyVariantPlaylist renders the variant playlist for a stream-copy
-// rendition from its keyframe-derived segments.
+// CopyVariantPlaylist renders the source keyframe grid shared by Original and
+// aligned hardware renditions. Keep microsecond precision: the m3u8 writer's
+// three decimal places accumulate drift across fractional GOPs.
 func CopyVariantPlaylist(quality string, segments []ffmpeg.Segment, query string) (string, error) {
-	n := len(segments)
-	p, err := m3u8.NewMediaPlaylist(uint(n), uint(n))
-	if err != nil {
-		return "", err
-	}
-	initVariant(p, quality, query)
-
 	longest := 0.0
 	for _, s := range segments {
 		longest = max(longest, s.Duration)
 	}
-	p.TargetDuration = math.Ceil(longest)
-
+	var p strings.Builder
+	fmt.Fprintf(&p, "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-TARGETDURATION:%.0f\n#EXT-X-MAP:URI=\"%s%s\"\n",
+		math.Ceil(longest), ffmpeg.InitName(quality), query)
 	for i, s := range segments {
-		if err := p.Append(fmt.Sprintf("%s-%06d.m4s%s", quality, i, query), s.Duration, "nodesc"); err != nil {
-			return "", err
-		}
+		fmt.Fprintf(&p, "#EXTINF:%.6f,nodesc\n%s-%06d.m4s%s\n", s.Duration, quality, i, query)
 	}
-	p.Close()
-	return p.Encode().String(), nil
+	p.WriteString("#EXT-X-ENDLIST\n")
+	return p.String(), nil
 }
 
 // initVariant sets up a VOD fMP4 playlist; EXT-X-MAP needs version 6.

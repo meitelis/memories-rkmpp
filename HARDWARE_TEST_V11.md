@@ -24,6 +24,8 @@ No original media or Nextcloud credentials are needed. It runs:
   decoding beyond the initial input-pacing burst, for both hardware encoders.
   The source-grid regression uses irregular fractional GOPs, VBR hardware output
   at two sizes, exact first/last packet timestamps and byte-identical cold init.
+  Copied AVC/HEVC B-frame fixtures check raw MP4 presentation timestamps (decode
+  time plus signed composition offset), cold init stability and fragment decoding.
 - `core.test`: real manager/stream publication, cached init use, cold video and
   shared AAC seeks, and video-quality requests that leave the audio encoder
   running. The upstream HTTP copy/transcode restart regression also runs.

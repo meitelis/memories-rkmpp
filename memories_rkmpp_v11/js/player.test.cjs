@@ -4,7 +4,7 @@ const {chooseLevel, audioProfile, selectQuality, selectAudio, beginSeek, request
 const {PlaybackPolicy} = require('./policy.js');
 
 const settle=()=>new Promise(resolve=>setImmediate(resolve));
-const manifest='#EXTM3U\n#EXT-X-MAP:URI="init.m4s?token=fixture"\n#EXTINF:0.96,\n0.m4s?token=fixture\n#EXTINF:1.04,\n1.m4s?token=fixture\n#EXTINF:5.2,\n2.m4s?token=fixture\n';
+const manifest='#EXTM3U\n#EXT-X-MAP:URI="init.m4s?token=fixture"\n#EXTINF:0.96,\n0.m4s?token=fixture\n#EXTINF:3.04,\n1.m4s?token=fixture\n#EXTINF:5.2,\n2.m4s?token=fixture\n';
 function switchFixture() {
   const video={currentTime:0.4,readyState:4,paused:false,seeking:false,
     buffered:{length:1,start:()=>0,end:()=>20},
@@ -32,7 +32,7 @@ test('preparation uses the actual Original keyframe grid without duplicating fra
     return {ok:true,text:async()=>manifest,arrayBuffer:async()=>new ArrayBuffer(1)};
   };
   try {
-    assert.equal(await prepareRendition({url:['https://example.test/vod/direct.m3u8?token=fixture']},0.4,new AbortController().signal,[2,3.1]),2);
+    assert.equal(await prepareRendition({url:['https://example.test/vod/direct.m3u8?token=fixture']},0.4,new AbortController().signal,[4,5.1]),4);
     assert.deepEqual(calls.map(c=>c.url),[
       'https://example.test/vod/direct.m3u8?token=fixture',
       'https://example.test/vod/2.m4s?token=fixture']);
@@ -54,6 +54,22 @@ test('incompatible keyframe grids refuse an early cut instead of truncating the 
   } finally {global.fetch=previous;}
 });
 
+test('cold preparation skips a boundary that will arrive before the producer is ready',async()=>{
+  const previous=global.fetch,calls=[];let clock=0.4;
+  const playlist='#EXTM3U\n#EXT-X-MAP:URI="init.m4s"\n#EXTINF:2,\n0.m4s\n#EXTINF:2,\n1.m4s\n#EXTINF:4,\n2.m4s\n';
+  global.fetch=async(url,options)=>{
+    calls.push(url);
+    if(options.method==='HEAD')clock+=2;
+    return {ok:true,text:async()=>playlist};
+  };
+  try {
+    assert.equal(await prepareRendition({url:['https://example.test/vod/1440p.m3u8']},
+      ()=>clock,new AbortController().signal,[2,4]),4);
+    assert.equal(calls.at(-1),'https://example.test/vod/2.m4s');
+    assert.equal(calls.length,2,'one producer request, no expired boundary retry');
+  } finally {global.fetch=previous;}
+});
+
 test('manual handoff waits for a completed server fragment and flushes only video at its IDR boundary',async()=>{
   const previous=global.fetch;
   let complete;const body=new Promise(resolve=>{complete=resolve;});
@@ -64,7 +80,7 @@ test('manual handoff waits for a completed server fragment and flushes only vide
     assert.equal(hls.loadLevel,0,'retain the old producer while preparing');
     assert.equal(flushes.length,0,'never flush before the producer is ready');
     complete({ok:true});await settle();
-    assert.deepEqual(flushes,[{startOffset:2.001,endOffset:Infinity,type:'video'}]);
+    assert.deepEqual(flushes,[{startOffset:4.001,endOffset:Infinity,type:'video'}]);
     assert.equal(hls.resumed,true);
     assert.equal(video.currentTime,0.4,'the playing clock never jumps to the switch point');
     assert.equal(state.preparing,null);

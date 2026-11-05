@@ -18,9 +18,9 @@ identified timestamp defect, not every possible cause of a two-second freeze.
 
 ## Deployment and checks
 
-- Native adapter 1.1.22; runtime image memories-11.0.2-govod-0.7.0-r4. Faster
+- Native adapter 1.1.23; runtime image memories-11.0.2-govod-0.7.0-r5. Faster
   manual handoff is opt-in with rkmpp_fast_switch; default behavior remains 1.1.13's conservative handoff.
-- All 28 JavaScript regressions pass in working source. The deployed r4 Linux Go tests, vet, formatting and ARM64
+- All 29 JavaScript regressions pass in working source. The deployed r5 Linux Go tests, vet, formatting and ARM64
   image build passed. The complete isolated hardware matrix passed, including
   both encoders, HDR, rotations, cold starts, shared audio and new 50 fps cadence checks.
 - r4 uses measured container bitrate when Matroska omits stream bitrate. Probe
@@ -33,7 +33,7 @@ identified timestamp defect, not every possible cause of a two-second freeze.
   pauses lost a frame. Completed production-cache captures showed the same
   missing-frame pattern. r2 replaces hardware-process suspension with input pacing.
 
-## Source-aligned hardware candidate (not deployed)
+## Source-aligned hardware: r5 and open copy-clock regression
 
 The opt-in early handoff exposed incompatible Original and encoded GOP boundaries.
 Preparing the target alone did not prevent a picture gap. Adapter 1.1.22 refuses
@@ -56,8 +56,33 @@ HDR, rotated, incompatible-codec and progressive outputs keep their existing pat
 
 New regressions cover VBR H.264/HEVC, two sizes, irregular fractional GOPs,
 independent fragment decoding, byte-identical cold-start init, serving segment IDs
-beyond the old fixed-grid limit and unchanged audio workers. Full Linux build and
-hardware execution are pending for this candidate. Production remains r4.
+beyond the old fixed-grid limit and unchanged audio workers. The full Linux build
+and board matrix passed. The playlist also preserves microsecond precision:
+millisecond duration rounding could accumulate drift across fractional GOPs.
+
+Fresh-code r5/1.1.23 playback results (unshaped, no competing hardware tests):
+
+| Case / action | Result |
+| --- | --- |
+| 4K HEVC Original to 1440p | 4.079 s quality event, no waits; one dropped frame over the observation. |
+| HEVC 1440p to Original | 6.968 s quality event, no waits; still too slow in this GOP phase. |
+| High bitrate 4K60 AVC Original to 1440p | No added waits/drops; quality event took 7.250 s. |
+| AVC 1440p to 1080p | Presented dimensions changed in 3.775 s; no added waits/drops. |
+| Aligned AVC 1080p cold backward / forward seek | 785 / 801 ms; no waits, selected resolution retained. |
+| 50 fps HEVC with reordered frames | Guard refused early cut because remuxed Original and encoded PTS differed; conservative fallback took 17.938 s with no waits. Not accepted as fast switching. |
+
+The last case exposes an omitted scenario in the generated source-grid test: its
+fixture had no B-frames. A raw-box investigation shows that MOV's DASH/sidx
+continuity handling rewrites later copy-fragment composition timestamps. A
+copy-only `skip_sidx` change preserves source PTS in the isolated raw-box check;
+generated AVC/HEVC B-frame startup/cold-init/decode regressions and the full matrix
+are running before any deployment. FFprobe can add its own reorder offset to
+standalone fMP4, so this check reads `tfdt` and signed `trun` offsets directly.
+
+Nextcloud 35's script URLs use the server version. The installed adapter version
+alone did not invalidate a browser's old JavaScript URL. Advancing the template
+asset cache produced a new URL and fresh-code tests above. Deployment now does
+this explicitly; do not attribute earlier cached-code repeats to a new adapter.
 
 ## Real-media baseline before 1.1.7
 

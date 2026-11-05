@@ -426,6 +426,14 @@ func SegmentArgs(s Spec, startID int, pattern, init string) []string {
 	if s.Copy || s.KeyframeGrid != nil {
 		hlsTime = copyHLSTime
 	}
+	segmentOptions := "movflags=+frag_discont+negative_cts_offsets"
+	if s.Copy && !s.AudioOnly {
+		// MOV's DASH/sidx continuity correction rewrites the first PTS of
+		// later B-frame fragments. HLS uses its playlist index; preserve
+		// the source composition timestamps instead of generating sidx.
+		segmentOptions += "+skip_sidx"
+	}
+	segmentOptions += ":use_editlist=0"
 
 	args := BuildArgs(s)
 	args = append(args,
@@ -435,7 +443,7 @@ func SegmentArgs(s Spec, startID int, pattern, init string) []string {
 		"-hls_time", hlsTime,
 		"-hls_segment_type", "fmp4",
 		"-hls_fmp4_init_filename", init,
-		"-hls_segment_options", "movflags=+frag_discont+negative_cts_offsets:use_editlist=0",
+		"-hls_segment_options", segmentOptions,
 		"-hls_segment_filename", pattern,
 	)
 

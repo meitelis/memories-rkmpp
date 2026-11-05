@@ -1,8 +1,10 @@
 package api
 
 import (
+	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -25,6 +27,32 @@ func TestMasterPlaylist(t *testing.T) {
 	require.Contains(t, got, "BANDWIDTH=400,RESOLUTION=854x480")
 	require.Contains(t, got, "480p.m3u8?t=123")
 	require.Contains(t, got, "#EXT-X-INDEPENDENT-SEGMENTS")
+}
+
+func TestCopyPlaylistPreservesFractionalBoundaries(t *testing.T) {
+	// 4.133333 s GOPs lose a third of a second after 1000 segments when
+	// rounded to milliseconds; exact grid starts must survive serialization.
+	keys := make([]float64, 1000)
+	for i := range keys {
+		keys[i] = math.Round(float64(i)*124/30*1e6) / 1e6
+	}
+	end := keys[len(keys)-1] + 124.0/30
+	segments := ffmpeg.CopySegments(keys, time.Duration(end*float64(time.Second)))
+	text, err := CopyVariantPlaylist("direct", segments, "")
+	require.NoError(t, err)
+	var start float64
+	var id int
+	for _, line := range strings.Split(text, "\n") {
+		if !strings.HasPrefix(line, "#EXTINF:") {
+			continue
+		}
+		require.InDelta(t, segments[id].Start, start, 0.000001, "boundary %d", id)
+		duration, err := strconv.ParseFloat(strings.SplitN(strings.TrimPrefix(line, "#EXTINF:"), ",", 2)[0], 64)
+		require.NoError(t, err)
+		start += duration
+		id++
+	}
+	require.Equal(t, len(segments), id)
 }
 
 func TestTranscodeVariantPlaylist(t *testing.T) {

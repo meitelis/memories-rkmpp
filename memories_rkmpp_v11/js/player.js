@@ -45,7 +45,9 @@
     // A fast handoff must be an old GOP end and a new IDR start. Never
     // truncate an irregular Original GOP to force a 3s encoded boundary.
     const cuts = new Set(oldCuts.map(t => t.toFixed(4)));
-    const upcoming = fragments.filter(f => f.start >= clock() + 1.5 && cuts.has(f.start.toFixed(4))).slice(0, 2);
+    // Allow the cold hardware producer to publish a complete fragment before
+    // playback reaches its IDR; a 1.5 s lead was too short for real 4K input.
+    const upcoming = fragments.filter(f => f.start >= clock() + 3 && cuts.has(f.start.toFixed(4))).slice(0, 2);
     for (const fragment of upcoming) {
       // Publishing a complete fragment also guarantees its init is ready.
       // Warming init first can start an unnecessary encode at zero, racing
