@@ -93,3 +93,11 @@ No credentials or private-media contents belong in this repository. Keep diagnos
 - Seven JavaScript regressions pass, including delayed-response bandwidth/audio selection. Deployed 1.0.7; a fresh 800 kbps live test is in progress.
 
 - Adapter 1.0.9 subtracts a bounded minimum observed request latency from delivery samples so short fragments can demonstrate recovery without ignoring proxy delays. It avoids the no-progress watchdog during the initial three seconds. Local DOM diagnostics now count actual post-start waiting events and duration separately from seeks. Seven JS regressions pass; the new measured Original-to-800 kbps acceptance run is starting.
+
+## Fresh policy replacement (1.1.0)
+
+- User explicitly requested a clean replacement instead of accumulating overrides. Removed the overlapping adaptation heuristics from player.js and added policy.js: a pure PlaybackPolicy with startup, normal and recovering states. hls.js owns ordinary ABR; the policy gates initial quality, rescues a threatened buffer once, and allows recovery one level at a time after sustained healthy buffering.
+- Added replay-style regressions for startup versus congestion, delayed proxy bursts, one-shot rescue, slow recovery, pause/seeking/manual selection, encoded-only ladders and decoder limits. All 12 player/policy tests pass; CI now runs both suites.
+- The replacement adapter 1.1.0 is installed; live acceptance is underway. Do not claim completion from the policy tests alone.
+- Hardware profiling during a transition confirmed both MPP decoder cores active (about 80-88% in sampled bursts), both encoder cores active, and RGA3 schedulers active (sampled about 53-70%). Transcoder CPU use was modest relative to total cores. These driver loads confirm hardware execution; cold-start latency and end-to-end delivery still require measurement. Private raw profiling logs include process headers and must stay outside Git.
+- Temporary network shaping and MPP sampling were restored to noqueue and load_interval=0 after the profiling run.

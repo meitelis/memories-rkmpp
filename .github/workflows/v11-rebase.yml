@@ -43,6 +43,6 @@ jobs:
       - name: Native player and deployment checks
         working-directory: .
         run: |
-          node --test memories_rkmpp_v11/js/player.test.cjs
+          node --test memories_rkmpp_v11/js/*.test.cjs
           sh -n scripts/deploy-v11.sh
           find memories_rkmpp_v11 -name '*.php' -print0 | xargs -0 -n1 php -l

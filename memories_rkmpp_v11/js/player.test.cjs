@@ -1,15 +1,7 @@
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
-const {chooseLevel, audioProfile, adaptLevel, selectQuality, renditionText, configure, deliveryRate} = require('./player.js');
+const {chooseLevel, audioProfile, selectQuality, renditionText, configure} = require('./player.js');
 
-test('delayed proxy delivery does not masquerade as a fast connection', () => {
-  const rate = deliveryRate({loaded:800000,loading:{start:1000,first:8900,end:9000}});
-  assert.equal(rate,800000);
-  assert.equal(audioProfile(rate),'audio64');
-  assert.equal(chooseLevel(levels,rate),0);
-  assert.equal(deliveryRate({loaded:0,loading:{start:1,end:1000}}),0);
-  assert.equal(deliveryRate({loaded:100000,loading:{start:1000,first:1100,end:1125}},100),32000000);
-});
 
 const levels = [350000,700000,1800000,4000000,9000000].map((bitrate,i)=>({bitrate,url:[i===4?'/direct.m3u8?x=y':`/${i}.m3u8`]}));
 test('startup budgets headroom and selects the original only when ready and affordable', () => {
@@ -18,16 +10,6 @@ test('startup budgets headroom and selects the original only when ready and affo
   assert.equal(chooseLevel(levels,20000000,false),3);
   assert.equal(chooseLevel(levels,20000000,true,2),2);
   assert.equal(chooseLevel(levels,150000),0);
-});
-test('draining buffers downshift quickly; recovery needs sustained headroom', () => {
-  assert.equal(adaptLevel(3,3,4,-0.8,500,3000),1);
-  assert.equal(adaptLevel(6,6,7,-1,500,3000),3);
-  assert.equal(adaptLevel(6,6,2,-1,500,3000),0);
-  assert.equal(adaptLevel(3,1,10,0,1000,3000),1);
-  assert.equal(adaptLevel(1,4,12,0,9000,20000),1);
-  assert.equal(adaptLevel(1,4,2,0,20000,20000),0);
-  assert.equal(adaptLevel(1,4,12,0,11000,20000),4);
-  assert.equal(adaptLevel(2,1,2,-1,20000,500),2);
 });
 test('audio budget is independent of video resolution', () => {
   assert.equal(audioProfile(8000000),'audio');

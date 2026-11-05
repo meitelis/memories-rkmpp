@@ -15,6 +15,7 @@ class PlayerScriptListener implements IEventListener {
         if (Server::get(IConfig::class)->getAppValue('memories', 'installed_version') !== '11.0.2') { return; }
         $path = parse_url(Server::get(IRequest::class)->getRequestUri(), PHP_URL_PATH);
         if (is_string($path) && preg_match('~/apps/memories(?:/|$)~', $path)) {
+            Util::addScript('memories_rkmpp_v11', 'policy');
             Util::addScript('memories_rkmpp_v11', 'player');
             Util::addStyle('memories_rkmpp_v11', 'player');
         }
