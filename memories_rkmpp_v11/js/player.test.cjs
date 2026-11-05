@@ -173,6 +173,7 @@ test('real update loop does not repeatedly abort low-quality worker on fluctuati
     startLoad(){this.starts=(this.starts||0)+1},audioTracks:[]};
   const policy=new PlaybackPolicy(hls.levels,30000000,true);
   policy.phase='normal';
+  policy.probeAt=Infinity; // This fixture tests download cancellation, not async network probes.
   const badge={dataset:{},parentElement:null,textContent:''};
   const state={hls,policy,cap:1,bps:30000000,selected:'auto',originalReady:true,decoderCap:Infinity,
     badge,audioInitialized:false,inflight:{level:1,stats:{loading:{start:1},loaded:0}}};
