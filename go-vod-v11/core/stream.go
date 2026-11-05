@@ -47,6 +47,8 @@ type Stream struct {
 	// keeps the Manager alive until the stream idles out; exited marks that.
 	coder  *exec.Cmd
 	exited bool
+	// Hardware input pacing replaces process suspension for this run.
+	paced bool
 	// closed is set by Stop; a stopped stream never starts another coder.
 	closed bool
 
@@ -493,6 +495,7 @@ func (s *Stream) transcode(startId int) {
 		return
 	}
 	args := ffmpeg.SegmentArgs(spec, startNumber, s.getSegmentPath(-1), initPath)
+	s.paced = ffmpeg.RKMPPInputPaced(spec)
 	coder := ffmpeg.Command(context.Background(), s.c.FFmpeg, args...)
 
 	// Log command, quoting the args as needed
@@ -542,7 +545,7 @@ func (s *Stream) checkGoal(id int) {
 		s.goal = id + s.c.GoalBufferMax
 
 		// resume encoding
-		if s.coder != nil && !s.exited {
+		if s.coder != nil && !s.exited && !s.paced {
 			log.Printf("%s-%s: resuming transcoding", s.m.id, s.quality)
 			s.coder.Process.Signal(syscall.SIGCONT)
 		}
@@ -613,7 +616,7 @@ func (s *Stream) monitorTranscodeOutput(coder *exec.Cmd, initPath string, cmdStd
 				s.createChunk(id).signal(true)
 
 				// Check goal satisfied
-				if id >= s.goal {
+				if id >= s.goal && !s.paced {
 					log.Printf("%s-%s: goal satisfied: %d", s.m.id, s.quality, s.goal)
 					s.coder.Process.Signal(syscall.SIGSTOP)
 				}

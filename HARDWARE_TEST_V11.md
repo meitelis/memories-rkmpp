@@ -20,6 +20,8 @@ No original media or Nextcloud credentials are needed. It runs:
   segment decoding and exact 3-second video packet boundaries. Generated 4K PQ
   and HLG HEVC Main10 sources exercise the full MPP/RGA/Mali/MPP path and check
   8-bit BT.709 output. The upstream software fMP4 restart regression also runs.
+  A 30-second 50 fps test checks every packet timestamp/duration and independent
+  decoding beyond the initial input-pacing burst, for both hardware encoders.
 - `core.test`: real manager/stream publication, cached init use, cold video and
   shared AAC seeks, and video-quality requests that leave the audio encoder
   running. The upstream HTTP copy/transcode restart regression also runs.

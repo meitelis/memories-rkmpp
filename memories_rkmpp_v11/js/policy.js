@@ -25,6 +25,8 @@
       this.lastChange = 0;
     }
     sample(stats) {
+      // A cold seek includes producer startup, not just network delivery.
+      if (this.phase === 'seeking') return;
       const load = stats?.loading;
       if (!load || !stats.loaded || !(load.end > load.start)) return;
       this.latency = Math.min(this.latency, Math.max(0, load.first - load.start));
@@ -33,21 +35,27 @@
       this.deliveryBps = rate < this.deliveryBps ? rate : Math.min(rate, this.deliveryBps * 2);
       this.bps = this.phase === 'recovering' ? this.deliveryBps : stats.loaded * 8000 / Math.max(25, load.end - load.first);
     }
-    step({now, buffer, playing, seeking, auto, requestAge = 0, loaded = 0, originalReady = false, decoderCap = Infinity}) {
+    beginSeek() {
+      this.phase = 'seeking';
+      this.healthySince = null;
+    }
+    step({now, buffer, playing, seeking, auto, requestAge = 0, loaded = 0, originalReady = false, decoderCap = Infinity, targetBuffer = 18}) {
       const originalIndex = this.levels.findIndex(original);
       const limit = Math.min(decoderCap, originalReady || originalIndex < 0 ? this.levels.length - 1 : Math.max(0, originalIndex - 1));
       let cancel = false;
       this.cap = Math.min(this.cap, limit);
+      const healthyBuffer = Math.min(10, targetBuffer * 0.6);
+      const criticalBuffer = Math.min(4, targetBuffer * 0.25);
       if (!playing || seeking || !auto) {
         this.healthySince = null;
         return this.result(cancel);
       }
       // A metadata-sized buffer is normal before playback has warmed up.
-      if (this.phase === 'startup') {
-        if (buffer >= 10) { this.phase = 'normal'; this.cap = limit; }
+      if (this.phase === 'startup' || this.phase === 'seeking') {
+        if (buffer >= healthyBuffer) { this.phase = 'normal'; this.cap = limit; }
         else if (requestAge < 6000) return this.result(cancel);
       }
-      const endangered = (buffer < 10 && requestAge > 2000 && !loaded) || (buffer < 4 && requestAge > 1000);
+      const endangered = (buffer < healthyBuffer && requestAge > 2000 && !loaded) || (buffer < criticalBuffer && requestAge > 1000);
       if (endangered && (this.phase !== 'recovering' || this.cap > 0)) {
         this.phase = 'recovering';
         this.cap = 0;
@@ -56,7 +64,7 @@
         this.lastChange = now;
         cancel = true;
       } else if (this.phase === 'recovering') {
-        if (buffer < 10) this.healthySince = null;
+        if (buffer < healthyBuffer) this.healthySince = null;
         else if (this.healthySince === null) this.healthySince = now;
         const affordable = chooseLevel(this.levels, this.deliveryBps, originalReady, limit);
         if (this.healthySince !== null && now - this.healthySince >= 10000 && now - this.lastChange >= 10000 && affordable > this.cap) {

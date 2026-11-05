@@ -50,3 +50,25 @@ test('unready original and decoder limits remain respected',()=>{
   const p=normal();assert.equal(tick(p,{originalReady:false}).cap,5);
   assert.equal(tick(p,{decoderCap:3}).cap,3);
 });
+
+test('a cold seek preserves quality after seeked until the producer has warmed',()=>{
+  const p=normal();p.beginSeek();
+  p.sample({loaded:2000000,loading:{start:0,first:4500,end:4600}});
+  assert.equal(p.bps,30000000,'cold generation must not poison the network estimate');
+  const pending=tick(p,{buffer:0,requestAge:4500});
+  assert.deepEqual([pending.phase,pending.cap,pending.cancel],['seeking',6,false]);
+  assert.equal(tick(p,{buffer:12}).phase,'normal');
+});
+
+test('byte-limited high-bitrate playback can warm up without ten buffered seconds',()=>{
+  const p=new PlaybackPolicy(levels,30000000,true);
+  assert.equal(tick(p,{buffer:4,targetBuffer:6}).phase,'normal');
+  const healthy=tick(p,{buffer:4,targetBuffer:6,requestAge:2500});
+  assert.equal(healthy.cap,6);assert.equal(healthy.cancel,false);
+});
+
+test('a seek does not suppress recovery indefinitely on an actually stalled link',()=>{
+  const p=normal();p.beginSeek();
+  const stalled=tick(p,{buffer:0,requestAge:6500});
+  assert.equal(stalled.cap,0);assert.equal(stalled.cancel,true);
+});

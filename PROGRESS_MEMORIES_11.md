@@ -1,5 +1,8 @@
 # Memories 11.0.2 RK3588 — active checkpoint
 
+Latest deployment/results are tracked in [PLAYBACK_ACCEPTANCE_V11.md](PLAYBACK_ACCEPTANCE_V11.md).
+Earlier sections below retain the investigation history.
+
 ## User's required behaviour
 
 1. Measure actual download speed through Nextcloud before starting video.
@@ -121,3 +124,13 @@ No credentials or private-media contents belong in this repository. Keep diagnos
 - A longer normal-rate 480p capture revealed a missing packet at 168.10 seconds, followed by decoder reference errors. A second capture excluding the newest cache file found another completed segment with 149 rather than 150 frames and a 40 ms sample duration near its beginning. The missing-frame defect requires investigation independently of browser buffering.
 - An isolated same-source hardware experiment comparing continuous encoding with repeated process STOP/CONT is running to test whether the server's producer throttling contributes. Do not assume that cause before the comparison completes. Private media and raw diagnostic captures remain outside Git.
 - User is comparing the same video on Android to distinguish client presentation from stream defects. No acceptance, mainline merge or branch cleanup yet. All 13 player/policy regressions pass.
+
+## Multi-video regressions and hardware suspension fix
+
+- Android played all three fixed 480p rates smoothly, including switches. Laptop jitter also appeared at 1440p. Do not treat this as proof that all source streams are clean.
+- Reproduced frame loss with repeated hardware-process STOP/CONT; the same uninterrupted encode retained all frames. Added FFmpeg input pacing and disabled process suspension for encoded RKMPP HLS video. Copy and audio retain their existing throttling. A new 30-second 50 fps hardware test checks every frame interval and independent segment decoding in both output codecs.
+- Linux tests/vet/formatting, ARM64 builds and the complete updated hardware matrix passed. Runtime r2 is deployed, healthy, and passes the real 0.7.0 Nextcloud handshake.
+- Replaced manual nextLevel selection with loadLevel: the former discarded future video, reducing about 18 seconds of buffer to under three. The corrected desktop Original-to-1440p handoff retained the buffer with zero waits.
+- User reported broader Android failures: unnecessary startup transcoding on fast home Wi-Fi, false 480p drops on seeks, and some clips stuck at two seconds. Exercised four additional real AVC/HEVC videos, including 4K/60 and 44.1 kHz audio. Desktop startup/cold seeks worked, but high-bitrate AVC exposed a buffer quota error and another HEVC clip recorded a short wait. Android acceptance remains open.
+- Adapter 1.1.7 adds bounded Original preflight, explicit cold-seek protection, byte-aware buffer settings and proportional policy thresholds. Runtime audio remains independent in manual video mode. The badge now lives above the native controls and inherits their fade. All 17 JS regressions pass; real-media and changing-network retests are underway.
+- No mainline merge or branch deletion. See the acceptance matrix for outstanding scenarios, rather than assuming the earlier single-video buffer result covers them.

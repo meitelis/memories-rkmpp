@@ -13,10 +13,10 @@
     } else {
       const option = video.qualityList?.find(o => o.id === id);
       if (!option || !Number.isInteger(option.index)) return;
-      // Never replace the fragment currently playing. A shared audio buffer
-      // survives the next-video-fragment switch; legacy muxed audio drains.
-      if (hls.levels[option.index]?.audioGroupIds?.length) hls.nextLevel = option.index;
-      else hls.loadLevel = option.index;
+      // Keep all buffered video while the requested rendition starts.
+      // nextLevel flushes future video; a cold hardware encode can then
+      // miss the shortened handoff deadline even with shared audio.
+      hls.loadLevel = option.index;
     }
     video._qualitySelected = id;
     video.dispatchEvent(new CustomEvent('quality-selected'));
@@ -87,10 +87,10 @@
     return estimate || 750000;
   }
 
-  async function warmOriginal(state) {
+  async function warmOriginal(state, force = false) {
     const hls = state.hls;
     const level = hls.levels.find(isOriginal);
-    if (!level || state.originalReady || state.warming || Date.now() - state.lastWarm < 5000) return;
+    if (!level || state.originalReady || state.warming || (!force && Date.now() - state.lastWarm < 5000)) return;
     state.warming = true;
     state.lastWarm = Date.now();
     try {
@@ -129,6 +129,10 @@
     state.hls = hls;
     state.abort = new AbortController();
     state.selected = 'auto';
+    state.seekLevel = null;
+    state.inflight = null;
+    state.decoderCap = Infinity;
+    state.policy = null;
     state.checking = true;
     state.originalReady = false;
     state.lastWarm = 0;
@@ -145,13 +149,14 @@
     if (Object.getOwnPropertyDescriptor(video, 'currentQuality')?.configurable) {
       Object.defineProperty(video, 'currentQuality', {
         configurable:true, get:() => state.selected,
-        set:id => { state.selected = id; selectQuality(video, hls, id); },
+        set:id => { state.seekLevel = null; state.selected = id; selectQuality(video, hls, id); },
       });
     }
     Object.assign(hls.config, {
       autoStartLoad:false, startFragPrefetch:false,
-      maxBufferLength:12, maxMaxBufferLength:18, backBufferLength:20,
-      capLevelOnFPSDrop:true, fpsDroppedMonitoringThreshold:0.05,
+      // Bound bytes as well as seconds: 4K/60 AVC can exceed 65 Mbps.
+      maxBufferLength:3, maxBufferSize:48*1024*1024, maxMaxBufferLength:18, backBufferLength:3,
+      capLevelOnFPSDrop:true, fpsDroppedMonitoringThreshold:0.2,
       abrBandWidthFactor:0.8, abrBandWidthUpFactor:0.65,
       abrEwmaFastVoD:3, abrEwmaSlowVoD:10,
     });
@@ -169,12 +174,24 @@
       void warmOriginal(state);
       state.bps = await measured;
       if (state.abort.signal.aborted) return;
+      state.badge.dataset.initialBandwidth = String(Math.round(state.bps));
+      // Give an affordable Original a bounded chance to finish its copy-grid
+      // preflight, rather than racing that request and starting an encoder.
+      if (isOriginal(hls.levels[chooseLevel(hls.levels, state.bps)])) {
+        const deadline = Date.now() + 1500;
+        while (!state.originalReady && Date.now() < deadline && !state.abort.signal.aborted) {
+          await warmOriginal(state, true);
+          if (!state.originalReady) await new Promise(resolve => setTimeout(resolve, 150));
+        }
+      }
+      if (state.abort.signal.aborted) return;
       state.policy = new PlaybackPolicy(hls.levels, state.bps, state.originalReady);
       state.cap = state.policy.cap;
       // Older hls.js builds exposed this estimate as a read-only getter.
       try { hls.bandwidthEstimate = state.bps; }
       catch { hls.config.abrEwmaDefaultEstimate = state.bps; }
       hls.autoLevelCapping = state.cap;
+      hls.loadLevel = -1;
       hls.startLevel = state.cap;
       setAudio(state, true);
       state.checking = false;
@@ -238,7 +255,16 @@
       state.waitingAt = Date.now();
       state.waitingCount = (state.waitingCount || 0) + 1;
     });
-    metric('seeking', () => { state.waitingAt = 0; state.seekAt = Date.now(); });
+    metric('seeking', () => {
+      state.waitingAt = 0;
+      state.seekAt = Date.now();
+      if (state.selected === 'auto' && state.hls?.currentLevel >= 0) {
+        state.policy?.beginSeek();
+        state.inflight = null;
+        state.seekLevel = state.hls.currentLevel;
+        state.hls.loadLevel = state.seekLevel;
+      }
+    });
     metric('seeked', () => { badge.dataset.seekMs = String(Date.now() - state.seekAt); });
     attached.set(video, state);
     const refresh = () => update(video, state);
@@ -255,6 +281,8 @@
   }
 
   function update(video, state) {
+    const controls = video.closest('.video-container')?.querySelector('.m-vc-controls');
+    if (controls && state.badge.parentElement !== controls) controls.prepend(state.badge);
     const hls = video._qualityHls;
     if (hls && state.hls !== hls) configure(video, state, hls);
     const buffer = bufferAhead(video);
@@ -266,11 +294,18 @@
         auto:state.selected === 'auto', originalReady:state.originalReady, decoderCap:state.decoderCap,
         requestAge:stats?.loading?.start > 0 ? performance.now() - stats.loading.start : 0,
         loaded:stats?.loaded || 0,
+        targetBuffer:Math.min(hls.config.maxMaxBufferLength,
+          Math.max(hls.config.maxBufferLength, 8*hls.config.maxBufferSize/bandwidth(hls.levels[hls.currentLevel]))),
       });
       state.bps = action.bps;
       state.cap = action.cap;
       state.badge.dataset.phase = action.phase;
       if (state.selected === 'auto') {
+        if (state.seekLevel != null && action.phase !== 'seeking') {
+          state.seekLevel = null;
+          hls.bandwidthEstimate = state.bps;
+          hls.loadLevel = -1;
+        }
         hls.autoLevelCapping = action.cap;
         if (action.cancel) {
           // Stop downloads only. Keep the media source and playing buffers.
@@ -279,15 +314,17 @@
           hls.nextAutoLevel = action.cap;
           hls.startLoad(video.currentTime, true);
         }
-        setAudio(state);
         void warmOriginal(state);
       }
+      setAudio(state);
     }
     const text = state.failure || (state.checking ? 'Checking connection…' : renditionText(video, hls));
     if (state.badge.textContent !== text) state.badge.textContent = text;
     Object.assign(state.badge.dataset, {
       bandwidth: String(Math.round(state.bps)), buffer:buffer.toFixed(2),
       cap:String(state.cap ?? ''), audio:state.audioProfile || '',
+      decoderCap:String(state.decoderCap), originalReady:String(Boolean(state.originalReady)),
+      requestedQuality:state.selected || '',
       waitingCount:String(state.waitingCount || 0),
       waitingMs:String((state.waitingMs || 0) + (state.waitingAt ? now - state.waitingAt : 0)),
     });

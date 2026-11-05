@@ -28,6 +28,27 @@ func countRuns(t *testing.T, runs string) int {
 	return strings.Count(string(data), "\n")
 }
 
+func TestPacedHardwareProducerIsNotSuspendedAtItsGoal(t *testing.T) {
+	m := newCopyManager(t, hevcProbeJSON, "", false, nil)
+	bin, _ := stubFFmpeg(t, `while [ $# -gt 0 ]; do [ "$1" = -hls_segment_filename ] && p="$2"; shift; done
+for n in 0 1 2 3; do
+ f=$(printf "$p" "$n"); echo data > "$f"; basename "$f"; sleep 0.05
+done`)
+	m.c.FFmpeg, m.c.RKMPP = bin, true
+	m.c.GoalBufferMax = 2
+	w := httptest.NewRecorder()
+	require.True(t, m.ServeChunk(w, QUALITY_MAX, 0))
+	require.Equal(t, http.StatusOK, w.Code)
+	s := m.streams[QUALITY_MAX]
+	// The producer must reach its natural end without another request
+	// resuming it. Stopping hardware workers here loses pending frames.
+	require.Eventually(t, func() bool {
+		s.mutex.Lock()
+		defer s.mutex.Unlock()
+		return s.exited && s.chunks[3] != nil && s.chunks[3].done
+	}, 2*time.Second, 10*time.Millisecond)
+}
+
 func TestStreamFailureRestartsOnRetry(t *testing.T) {
 	m := newCopyManager(t, hevcProbeJSON, "", false, nil)
 	bin, runs := stubFFmpeg(t, "exit 1")

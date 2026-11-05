@@ -26,6 +26,23 @@ func TestRKMPPv11EncoderDispatch(t *testing.T) {
 	require.Equal(t, EncoderVAAPI, Encoder(Spec{VAAPI: true}))
 }
 
+func TestRKMPPInputPacingOnlyAppliesToEncodedHLSVideo(t *testing.T) {
+	s := Spec{RKMPP: true, HLS: true, Input: "/tmp/video.mp4"}
+	args := BuildArgs(s)
+	assertHasPair(t, args, "-readrate", "1")
+	assertHasPair(t, args, "-readrate_initial_burst", "18")
+	assertHasPair(t, args, "-readrate_catchup", "2")
+	require.Less(t, slices.Index(args, "-readrate"), slices.Index(args, "-i"))
+	for _, other := range []Spec{
+		{RKMPP: true, HLS: true, Copy: true},
+		{RKMPP: true, HLS: true, AudioOnly: true},
+		{RKMPP: true}, {HLS: true},
+	} {
+		require.False(t, RKMPPInputPaced(other))
+		require.NotContains(t, BuildArgs(other), "-readrate")
+	}
+}
+
 func TestRKMPPv11FMP4ColdSeekKeepsV11Muxer(t *testing.T) {
 	s := Spec{
 		RKMPP: true, HLS: true, StartAt: 12, Input: "/tmp/video.mp4",

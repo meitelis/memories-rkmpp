@@ -138,6 +138,12 @@ func SupportsRKMPPDecode(s Spec) bool {
 	return usesRKMPPFrames(s)
 }
 
+// RKMPPInputPaced keeps asynchronous hardware workers running while FFmpeg
+// throttles input. Suspending the whole process can lose an in-flight frame.
+func RKMPPInputPaced(s Spec) bool {
+	return s.RKMPP && s.HLS && !s.Copy && !s.AudioOnly
+}
+
 // Build the v11 encoder prefix only; SegmentArgs remains the official
 // go-vod 0.7.0 fMP4 muxer, so init and timeline semantics are unchanged.
 // The v11 server enables it only when MEMORIES_RKMPP=1.
@@ -164,6 +170,11 @@ func buildRKMPPArgs(s Spec) []string {
 		args = append(args, "-noautorotate")
 	}
 	args = append(args, remoteInputArgs(s.Headers)...)
+	if RKMPPInputPaced(s) {
+		// Fill the player's buffer quickly on startup/seek, then follow its
+		// clock. Idle streams are still killed by the normal stream timeout.
+		args = append(args, "-readrate", "1", "-readrate_initial_burst", "18", "-readrate_catchup", "2")
+	}
 	args = append(args, "-i", s.Input, "-copyts", "-fflags", "+genpts")
 
 	filters := []string{fmt.Sprintf("fps=fps=%d:round=near", RKMPPFrameRate(s))}

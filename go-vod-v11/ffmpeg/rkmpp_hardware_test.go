@@ -98,6 +98,57 @@ func assertPacketGrid(t *testing.T, probe, file string, start, duration float64)
 	require.NoError(t, err)
 	require.InDelta(t, start, firstPTS, 0.0001)
 	require.InDelta(t, start+duration, lastPTS+lastDuration, 0.0001)
+	firstDuration, err := strconv.ParseFloat(first.Duration, 64)
+	require.NoError(t, err)
+	require.Greater(t, firstDuration, 0.0)
+	for i, packet := range data.Packets {
+		pts, err := strconv.ParseFloat(packet.PTS, 64)
+		require.NoError(t, err)
+		dur, err := strconv.ParseFloat(packet.Duration, 64)
+		require.NoError(t, err)
+		require.InDelta(t, firstDuration, dur, 0.0001, "packet %d duration: missing frame", i)
+		require.InDelta(t, start+float64(i)*firstDuration, pts, 0.0001, "packet %d timestamp", i)
+	}
+}
+
+// Run beyond the fast initial burst: every 50 fps frame must survive normal
+// input pacing, and every segment must decode without earlier references.
+func TestRKMPPHardwarePacedCadence(t *testing.T) {
+	if os.Getenv("MEMORIES_RKMPP_HW_TEST") != "1" {
+		t.Skip("set MEMORIES_RKMPP_HW_TEST=1 on RK3588 with MPP/RGA devices")
+	}
+	bin, err := exec.LookPath("ffmpeg")
+	require.NoError(t, err)
+	probe, err := exec.LookPath("ffprobe")
+	require.NoError(t, err)
+	dir := t.TempDir()
+	src := filepath.Join(dir, "source50.mp4")
+	out, err := exec.Command(bin, "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=1280x720:r=50",
+		"-t", "30", "-c:v", "libx264", "-preset", "ultrafast", "-threads", "2", src).CombinedOutput()
+	require.NoError(t, err, string(out))
+	for _, codec := range []string{"h264", "hevc"} {
+		t.Run(codec, func(t *testing.T) {
+			run := t.TempDir()
+			s := Spec{RKMPP: true, RKMPPOutputCodec: codec, Input: src,
+				CodecName: "h264", PixelFormat: "yuv420p", BitDepth: 8,
+				FrameRate: 50, FrameRateExact: 50, Width: 854, Height: 480,
+				QF: 24, Bitrate: 1300000, HLS: true, ChunkSize: 3}
+			init := filepath.Join(run, "init.mp4")
+			out, err := exec.Command(bin, SegmentArgs(s, 0, filepath.Join(run, "video-%06d.m4s"), init)...).CombinedOutput()
+			require.NoError(t, err, string(out))
+			header, err := os.ReadFile(init)
+			require.NoError(t, err)
+			for id := 0; id < 10; id++ {
+				segment, err := os.ReadFile(filepath.Join(run, fmt.Sprintf("video-%06d.m4s", id)))
+				require.NoError(t, err)
+				joined := filepath.Join(run, "joined.mp4")
+				require.NoError(t, os.WriteFile(joined, append(append([]byte{}, header...), segment...), 0644))
+				out, err := exec.Command(bin, "-v", "error", "-xerror", "-i", joined, "-f", "null", "-").CombinedOutput()
+				require.NoError(t, err, string(out))
+				assertPacketGrid(t, probe, joined, float64(id*3), 3)
+			}
+		})
+	}
 }
 
 func TestRKMPPHardwareHDR(t *testing.T) {

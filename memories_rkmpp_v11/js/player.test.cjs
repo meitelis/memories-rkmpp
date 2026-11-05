@@ -23,14 +23,16 @@ test('audio budget is independent of video resolution', () => {
   assert.equal(audioProfile(700000),'audio64');
   assert.equal(audioProfile(300000),'audio32');
 });
-test('manual and Auto selection never flush the playing fragment', () => {
+test('manual and Auto selection retain buffered video while a cold rendition starts', () => {
   const video={qualityList:[{id:'1080:6000000',index:1}],dispatchEvent(){}};
-  const hls={levels:[{},{}],set currentLevel(_) {throw Error('playing buffer flushed');}};
+  const hls={levels:[{},{}],
+    set currentLevel(_) {throw Error('playing buffer flushed');},
+    set nextLevel(_) {throw Error('future video buffer flushed');}};
   selectQuality(video,hls,'1080:6000000');
   assert.equal(hls.loadLevel,1);
   hls.levels[1].audioGroupIds=['audio'];
   selectQuality(video,hls,'1080:6000000');
-  assert.equal(hls.nextLevel,1);
+  assert.equal(hls.loadLevel,1);
   selectQuality(video,hls,'auto');
   assert.equal(hls.loadLevel,-1);
 });
@@ -58,7 +60,37 @@ test('startup holds fragments without aborting the manifest and resumes when par
   hls.levels=[{bitrate:400000,url:['/480plow.m3u8']}];
   await events.get('parsed')();
   assert.equal(hls.started,true);
+  assert.equal(hls.loadLevel,-1,'Auto must clear a native default manual level');
   assert.equal(state.checking,false);
   assert.equal(hls.audioTrack,2,'conservative startup selects the matching 64 kbps audio URI');
   state.abort.abort();
+});
+
+test('fast startup awaits an affordable Original preflight instead of racing into an encoder', async () => {
+  const previousWindow=global.window,previousFetch=global.fetch;
+  const events=new Map();
+  global.window={OC:{generateUrl:()=>'/probe'}};
+  global.fetch=async url=>{
+    if(url.includes('/direct.m3u8')) {
+      await new Promise(resolve=>setTimeout(resolve,30));
+      return {ok:true,body:{cancel:async()=>{}}};
+    }
+    return {ok:true,headers:{get:()=> 'application/octet-stream'},body:{getReader:()=>{
+      let sent=false;
+      return {read:async()=>sent?{done:true}:(sent=true,{done:false,value:new Uint8Array(1572864)}),releaseLock(){}};
+    }}};
+  };
+  const hls={constructor:{Events:{MANIFEST_PARSED:'parsed'},version:'1.7.4'},
+    config:{},levels:[],audioTracks:[],on(e,fn){events.set(e,fn)},startLoad(){this.started=true;}};
+  const state={badge:{dataset:{}},audioChanged:0};
+  try {
+    configure({},state,hls);
+    hls.levels=[{bitrate:4000000,url:['/1440p.m3u8']},{bitrate:8000000,url:['/direct.m3u8']}];
+    await events.get('parsed')();
+    assert.equal(hls.startLevel,1);
+    assert.equal(state.originalReady,true);
+    assert.equal(hls.loadLevel,-1);
+  } finally {
+    state.abort?.abort();global.window=previousWindow;global.fetch=previousFetch;
+  }
 });
