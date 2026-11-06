@@ -4,7 +4,7 @@ Hardware transcoding for **Nextcloud Memories 11.0.2 / go-vod 0.7.0**, tested on
 
 The server requires hardware video processing: MPP decoding/encoding, RGA scaling/rotation and Mali HDR-to-SDR mapping. Unsupported video fails explicitly instead of silently using CPU video processing. Compatible SDR AVC/HEVC originals use stream copy. Audio is shared across video qualities and can adapt independently.
 
-The browser helper measures delivery through Nextcloud, prefers affordable Original, maintains a measured bandwidth ceiling, protects cold seeks and rechecks capacity when a lower rendition has a healthy buffer. Encoder pacing and proxy bursts cannot independently raise that ceiling or the audio budget. hls.js owns switching and buffering; the badge shows presented dimensions.
+The browser helper measures connection speed once before startup and selects an affordable initial rendition, preferring compatible Original. After startup, a small buffer-health controller raises quality gradually when playback is consistently healthy and lowers it only on sustained depletion. hls.js retains fragment scheduling, media buffering and network error handling; paced encoder delivery does not masquerade as Internet speed. The browser badge shows the presented dimensions.
 
 ## Playback flow
 
@@ -24,10 +24,10 @@ flowchart LR
     V --> N
     A --> N
     N -->|"HLS video + independent audio"| P
-    B["Measured bandwidth + buffer health"] -->|"choose affordable quality"| P
+    B["One startup speed check + buffer health"] -->|"select quality"| P
 ```
 
-Only requested renditions start workers. The player prefers compatible Original when its measured budget permits it; otherwise it requests an encoded rendition. Audio has its own shared timeline, so a video-quality change does not restart its worker. SDR skips HDR tone mapping. The native Android client is a separate integration.
+Only requested renditions start workers. The player prefers compatible Original when the one-time startup estimate permits it, then learns from its playable buffer rather than repeated synthetic probes. Audio has its own shared timeline, so a video-quality change does not restart its worker. SDR skips HDR tone mapping. The native Android client is a separate integration.
 
 High audio is 192 kbps AAC when encoding, or the existing source bitrate when compatible AAC can be copied (up to 320 kbps). Lower profiles are 96, 64 and 32 kbps.
 
