@@ -4,7 +4,7 @@ Hardware transcoding for **Nextcloud Memories 11.0.2 / go-vod 0.7.0**, tested on
 
 The server requires hardware video processing: MPP decoding/encoding, RGA scaling/rotation and Mali HDR-to-SDR mapping. Unsupported video fails explicitly instead of silently using CPU video processing. Compatible SDR AVC/HEVC originals use stream copy. Audio is shared across video qualities and can adapt independently.
 
-The browser helper measures connection speed once before startup and selects an affordable initial rendition, preferring compatible Original. After startup, a small buffer-health controller raises quality gradually when playback is consistently healthy and lowers it only on sustained depletion. hls.js retains fragment scheduling, media buffering and network error handling; paced encoder delivery does not masquerade as Internet speed. The browser badge shows the presented dimensions.
+The browser helper measures connection speed once before startup and selects an affordable initial rendition, preferring compatible Original. After startup, a small buffer-health controller raises quality one step at a time when at least three seconds remain buffered and lowers it only on genuine depletion. hls.js retains fragment scheduling, a six-second buffer target and network error handling; switching uses conservative non-flushing quality selection. Paced encoder delivery does not masquerade as Internet speed. The browser badge shows the presented dimensions.
 
 ## Playback flow
 
