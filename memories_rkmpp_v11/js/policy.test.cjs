@@ -1,108 +1,111 @@
-const {test}=require('node:test');
-const assert=require('node:assert/strict');
-const {PlaybackPolicy}=require('./policy.js');
-const levels=[400000,700000,1300000,2900000,6400000,7400000,8700000].map((bitrate,i)=>({bitrate,url:[i===6?'/direct.m3u8':`/${i}.m3u8`]}));
-const tick=(policy,values={})=>policy.step({now:0,buffer:18,playing:true,seeking:false,auto:true,originalReady:true,...values});
-function normal(){const p=new PlaybackPolicy(levels,30000000,true);tick(p);return p;}
+const {test} = require('node:test');
+const assert = require('node:assert/strict');
+const {PlaybackPolicy, chooseLevel} = require('./policy.js');
 
-test('metadata preloading and startup are not a bandwidth-collapse signal',()=>{
-  const p=new PlaybackPolicy(levels,30000000,true);
-  assert.equal(tick(p,{buffer:3,playing:false,requestAge:30000}).cap,6);
-  assert.equal(tick(p,{buffer:3,requestAge:2500}).cap,6);
-  assert.equal(p.phase,'startup');
-  assert.equal(tick(p).phase,'normal');
+const levels = [400000,700000,1300000,2900000,6400000,7400000,8700000]
+  .map((bitrate,i) => ({bitrate, url:[i === 6 ? '/direct.m3u8' : '/' + i + '.m3u8']}));
+const tick = (p, now, buffer, extra = {}) => p.step({
+  now, buffer, playing:true, seeking:false, auto:true, originalReady:true,
+  targetBuffer:12, ...extra,
 });
-test('a stalled original download causes one rescue before the buffer empties',()=>{
-  const p=normal();
-  const a=tick(p,{now:1000,buffer:9,requestAge:2500});
-  assert.deepEqual([a.phase,a.cap,a.audio,a.cancel],['recovering',0,'audio64',true]);
-  assert.equal(tick(p,{now:1500,buffer:8,requestAge:3000}).cancel,false);
+
+test('fast connection starts Original; weak link starts affordable 480p', () => {
+  assert.equal(chooseLevel(levels,400000000),6);
+  assert.equal(chooseLevel(levels,800000),0);
+  assert.equal(chooseLevel(levels,400000000,false),5);
 });
-test('a delayed proxy burst stays constrained for the full weak-link trace',()=>{
-  const p=normal();tick(p,{now:1000,buffer:9,requestAge:2500});
-  for(let now=2000;now<=62000;now+=3000){
-    p.sample({loaded:800000,loading:{start:now,first:now+7900,end:now+8000}});
-    const a=tick(p,{now,buffer:12});
-    assert.equal(a.cap,0);
-    assert.equal(a.audio,'audio64');
-    assert.equal(a.cancel,false);
+
+test('startup aims for six buffered seconds before treating playback as healthy', () => {
+  const p = new PlaybackPolicy(levels,400000000,true);
+  assert.equal(tick(p,1000,3,{requestAge:4000}).phase,'startup');
+  assert.equal(tick(p,2000,6).phase,'normal');
+});
+
+test('a slow first segment is not immediately mistaken for a bandwidth collapse', () => {
+  const p = new PlaybackPolicy(levels,400000000,true);
+  assert.equal(tick(p,1000,0,{requestAge:6500}).cap,6);
+  assert.equal(tick(p,2000,0,{requestAge:9000}).cap,6);
+  assert.equal(tick(p,3500,0,{requestAge:11000}).cap,4);
+});
+
+test('an ordinary fragmented buffer sawtooth does not trigger a downshift', () => {
+  const p = new PlaybackPolicy(levels,400000000,true);
+  for(const [now,buffer] of [[1000,12],[1500,11.5],[2000,11],[2500,10.5],
+      [3000,13],[3500,12.5],[4000,12]]) {
+    assert.equal(tick(p,now,buffer).cap,6);
   }
 });
-test('recovery remeasures capacity after healthy buffering instead of trusting paced segment waits',()=>{
-  const p=normal();tick(p,{now:1000,buffer:9,requestAge:2500});
-  for(let i=0;i<6;i++)p.sample({loaded:200000,loading:{start:1000,first:1050,end:1075}});
-  tick(p,{now:2000,buffer:12});
-  assert.equal(tick(p,{now:10000,buffer:12}).probe,false);
-  const recheck=tick(p,{now:12000,buffer:12});
-  assert.equal(recheck.probe,true);
-  assert.equal(recheck.cap,0);
-  p.measured(30000000,12000,true);
-  assert.equal(tick(p,{now:12500,buffer:12}).cap,6);
-  assert.equal(p.phase,'normal');
+
+test('sustained depletion downshifts even without another speed probe', () => {
+  const p = new PlaybackPolicy(levels,400000000,true);
+  tick(p,1000,12);
+  tick(p,4000,3,{requestAge:2500});
+  assert.equal(tick(p,5500,2,{requestAge:4000}).cap,5);
+  assert.equal(p.phase,'recovering');
 });
 
-test('recovery measurements respect affordability, Original readiness and decoder limits',()=>{
-  const p=normal();tick(p,{now:1000,buffer:9,requestAge:2500});
-  p.measured(800000,12000,true);
-  assert.equal(tick(p,{now:12500}).cap,0);
-  assert.equal(tick(p,{now:26000}).probe,false);
-  assert.equal(tick(p,{now:27000}).probe,true);
-  p.measured(30000000,28000,false,3);
-  assert.equal(tick(p,{now:28500,originalReady:false,decoderCap:3}).cap,3);
+test('near-empty buffer permits a larger emergency reduction', () => {
+  const p = new PlaybackPolicy(levels,400000000,true);
+  tick(p,1000,12);
+  assert.equal(tick(p,4000,0.3,{requestAge:2500}).cap,4);
 });
 
-test('weak-startup playback rechecks capacity even without a buffer rescue',()=>{
-  const p=new PlaybackPolicy(levels,750000,true);
-  tick(p,{now:1000,currentLevel:0});
-  assert.equal(p.phase,'normal');
-  assert.equal(p.cap,0,'buffer warmup does not invalidate the measured network budget');
-  p.sample({loaded:800000,loading:{start:2000,first:9900,end:10000}});
-  assert.equal(p.bps,750000,'a proxy burst does not change the measured audio budget');
-  assert.equal(tick(p,{now:11000,currentLevel:0}).probe,true);
-  assert.equal(tick(p,{now:12000,currentLevel:0}).probe,false);
-  assert.equal(tick(p,{now:30000,currentLevel:6}).probe,false);
-  assert.equal(tick(p,{now:30000,currentLevel:0,playing:false}).probe,false);
+test('transient low buffer that recovers does not downshift', () => {
+  const p = new PlaybackPolicy(levels,400000000,true);
+  tick(p,1000,12);
+  tick(p,4000,3,{requestAge:2500});
+  tick(p,4500,7);
+  assert.equal(tick(p,5200,3,{requestAge:2500}).cap,6);
 });
 
-test('recovery does not wait for a paced producer to fill ten seconds of buffer',()=>{
-  const p=normal();tick(p,{now:1000,buffer:9,requestAge:2500});
-  tick(p,{now:2000,buffer:7,currentLevel:0});
-  assert.equal(tick(p,{now:12000,buffer:7,currentLevel:0}).probe,true);
-});
-test('pause, seeking and manual selection never trigger a rescue',()=>{
-  for(const override of [{playing:false},{seeking:true},{auto:false}]){
-    const p=normal();const a=tick(p,{buffer:0,requestAge:20000,...override});
-    assert.equal(a.cap,6);assert.equal(a.cancel,false);
-  }
-});
-test('an encoded-only ladder is not accidentally capped to its lowest level',()=>{
-  const p=new PlaybackPolicy(levels.slice(0,6),30000000);
-  assert.equal(tick(p,{originalReady:false}).cap,5);
-});
-test('unready original and decoder limits remain respected',()=>{
-  const p=normal();assert.equal(tick(p,{originalReady:false}).cap,5);
-  assert.equal(tick(p,{decoderCap:3}).cap,3);
-  assert.equal(tick(p).cap,6,'availability and decoder gates do not erase the measured network budget');
+test('healthy low rendition upgrades one rung without a network recheck', () => {
+  const p = new PlaybackPolicy(levels,800000,true);
+  assert.equal(p.cap,0);
+  tick(p,1000,12);
+  assert.equal(tick(p,8500,12).cap,0);
+  assert.equal(tick(p,11000,12).cap,1);
+  assert.equal(tick(p,12000,12).cap,1);
 });
 
-test('a cold seek preserves quality after seeked until the producer has warmed',()=>{
-  const p=normal();p.beginSeek();
-  p.sample({loaded:2000000,loading:{start:0,first:4500,end:4600}});
-  assert.equal(p.bps,30000000,'cold generation must not poison the network estimate');
-  const pending=tick(p,{buffer:0,seeking:true,requestAge:4500});
-  assert.deepEqual([pending.phase,pending.cap,pending.cancel],['seeking',6,false]);
-  assert.equal(tick(p,{buffer:12}).phase,'normal');
+test('failed upgrade uses a cooldown, preventing quality oscillation', () => {
+  const p = new PlaybackPolicy(levels,800000,true);
+  tick(p,1000,12); tick(p,11000,12);
+  assert.equal(p.cap,1);
+  tick(p,14000,3,{requestAge:3000});
+  assert.equal(tick(p,15500,2,{requestAge:4000}).cap,0);
+  tick(p,17000,12);
+  assert.equal(tick(p,45000,12).cap,0);
+  assert.equal(tick(p,62000,12).cap,1);
 });
 
-test('byte-limited high-bitrate playback can warm up without ten buffered seconds',()=>{
-  const p=new PlaybackPolicy(levels,30000000,true);
-  assert.equal(tick(p,{buffer:4,targetBuffer:6}).phase,'normal');
-  const healthy=tick(p,{buffer:4,targetBuffer:6,requestAge:2500});
-  assert.equal(healthy.cap,6);assert.equal(healthy.cancel,false);
+test('Original readiness and decoder ceilings remain independent', () => {
+  const p = new PlaybackPolicy(levels,400000000,true);
+  assert.equal(tick(p,1000,12,{originalReady:false}).cap,5);
+  assert.equal(tick(p,2000,12,{decoderCap:2}).cap,2);
 });
 
-test('a seek does not suppress recovery indefinitely on an actually stalled link',()=>{
-  const p=normal();p.beginSeek();
-  const stalled=tick(p,{buffer:0,seeking:true,requestAge:6500});
-  assert.equal(stalled.cap,0);assert.equal(stalled.cancel,true);
+test('pauses and manual mode do not change resolution', () => {
+  const p = new PlaybackPolicy(levels,800000,true);
+  tick(p,1000,12);
+  tick(p,11000,12,{playing:false});
+  assert.equal(tick(p,21000,12,{auto:false}).cap,0);
+});
+
+test('cold seeks do not force an unnecessary downgrade', () => {
+  const p = new PlaybackPolicy(levels,400000000,true);
+  tick(p,1000,12);
+  p.beginSeek();
+  assert.equal(tick(p,2000,0,{seeking:true,requestAge:4000}).cap,6);
+  assert.equal(tick(p,3000,0,{requestAge:4500}).cap,6);
+  assert.equal(tick(p,4000,6).phase,'normal');
+});
+
+test('audio profile follows the actual chosen rendition', () => {
+  const p = new PlaybackPolicy(levels,400000000,true);
+  tick(p,1000,12); tick(p,4000,0.3,{requestAge:2500});
+  assert.equal(p.cap,4);
+  assert.equal(p.result(false).audio,'audio');
+  // Remaining low-quality renditions receive the cheaper audio track.
+  p.cap = 0;
+  assert.equal(p.result(false).audio,'audio32');
 });
