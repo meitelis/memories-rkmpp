@@ -2,7 +2,6 @@
   'use strict';
 
   const isOriginal = level => (Array.isArray(level?.url) ? level.url : [level?.url]).some(u => /\/direct\.m3u8(?:\?|$)/.test(u || ''));
-  const bandwidth = level => level?.bitrate || Number(level?.attrs?.BANDWIDTH) || Infinity;
 
   const {PlaybackPolicy, chooseLevel, audioProfile} = typeof module !== 'undefined' && module.exports
     ? require('./policy.js') : window.MemoriesRkmppPolicy;
@@ -11,11 +10,8 @@
     const option = id === 'auto' ? null : video.qualityList?.find(o => o.id === id);
     if (id !== 'auto' && !Number.isInteger(option?.index)) return;
     const level = id === 'auto' ? -1 : option.index;
-    // hls.js owns segment scheduling. Keep the playing clock and shared
-    // audio intact while the selected hardware producer starts.
-    if (level < 0 && state?.policy) hls.nextLevel = state.policy.cap;
-    else if (level < 0 || hls.currentLevel === level) hls.loadLevel = level;
-    else hls.nextLevel = level;
+    // Conservative quality selection: do not flush already-buffered video.
+    hls.loadLevel = level < 0 && state?.policy ? state.policy.cap : level;
     if (state) {
       state.switchAt = level < 0 || hls.currentLevel === level ? 0 : Date.now();
       state.switchLevel = level;
@@ -186,9 +182,8 @@
     }
     Object.assign(hls.config, {
       autoStartLoad:false, startFragPrefetch:false,
-      // Bound bytes as well as seconds: 4K/60 AVC can exceed 65 Mbps.
-      // Six seconds is the startup buffer goal; runtime may accumulate more.
-      maxBufferLength:12, maxBufferSize:48*1024*1024, maxMaxBufferLength:18, backBufferLength:3,
+      // Six seconds at startup and during playback; also bound high-bitrate bytes.
+      maxBufferLength:6, maxBufferSize:48*1024*1024, maxMaxBufferLength:6, backBufferLength:3,
       capLevelOnFPSDrop:true, fpsDroppedMonitoringThreshold:0.2,
     });
     // stopLoad also aborts an in-flight manifest in hls.js 1.7. Wait for
@@ -324,15 +319,11 @@
     const buffer = bufferAhead(video);
     const now = Date.now();
     if (hls && state.policy && !state.checking) {
-      const stats = state.inflight?.stats;
-      const current = hls.levels[state.policy.cap];
-      const targetBuffer = Math.min(hls.config.maxMaxBufferLength,
-        Math.max(3, 8 * hls.config.maxBufferSize / bandwidth(current)));
       const action = state.policy.step({
         now, buffer, playing:!video.paused && !video.ended, seeking:video.seeking,
         auto:state.selected === 'auto', originalReady:state.originalReady,
         decoderCap:state.decoderCap, requestAge:requestAge(video, state, now),
-        targetBuffer,
+        currentLevel:hls.currentLevel,
       });
       const oldCap = state.cap;
       state.cap = action.cap;
@@ -340,10 +331,10 @@
       if (state.selected === 'auto') {
         if (state.seekLevel != null && action.phase !== 'seeking') {
           state.seekLevel = null;
-          hls.nextLevel = action.cap;
+          hls.loadLevel = action.cap;
         } else if (action.change || action.cap !== oldCap) {
-          // Switch at the next fragment. Never abort or flush playing buffers.
-          hls.nextLevel = action.cap;
+          // Switch conservatively without flushing the existing buffer.
+          hls.loadLevel = action.cap;
         }
         void warmOriginal(state);
       }
