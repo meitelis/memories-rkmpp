@@ -61,8 +61,8 @@
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = {chooseLevel, audioProfile, selectQuality, selectAudio, beginSeek, requestAge, renditionText, configure, update};
   }
+  const debug = typeof location !== 'undefined' && new URLSearchParams(location.search).has('rkmpp_debug');
   if (typeof document === 'undefined') return;
-  const debug = new URLSearchParams(location.search).has('rkmpp_debug');
 
   const attached = new Map();
   function bufferAhead(video) {
