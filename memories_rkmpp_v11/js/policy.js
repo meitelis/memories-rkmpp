@@ -24,6 +24,7 @@
       this.bps = initialBps;
       this.cap = chooseLevel(levels, initialBps, ready);
       this.phase = 'startup';
+      this.phaseStartedAt = null;
       this.samples = [];
       this.healthySince = null;
       this.dangerSince = null;
@@ -33,6 +34,7 @@
     }
     beginSeek() {
       this.phase = 'seeking';
+      this.phaseStartedAt = null;
       this.samples = [];
       this.healthySince = null;
       this.dangerSince = null;
@@ -59,12 +61,16 @@
       const seconds = (now - first.now) / 1000;
       const trend = seconds >= 1 ? (buffer - first.buffer) / seconds : 0;
 
-      // New streams and cold seeks need time for the first segment.
-      // Do not misclassify slow RKMPP production as a slow connection.
+      // Six seconds is the HLS target, not a requirement before adapting.
+      // Begin evaluating after 3s are playable. Bound cold producer warm-up
+      // by elapsed time, not the age of each resetting fragment request.
       if (this.phase === 'startup' || this.phase === 'seeking') {
-        if (buffer >= 6) this.phase = 'normal';
-        else if (requestAge < (this.phase === 'seeking' ? 6000 : 9000)) return this.result(false);
-        else this.phase = 'normal';
+        if (this.phaseStartedAt === null) this.phaseStartedAt = now;
+        const warmupMs = this.phase === 'seeking' ? 6000 : 9000;
+        if (buffer >= 3 || now - this.phaseStartedAt >= warmupMs) {
+          this.phase = 'normal';
+          this.phaseStartedAt = null;
+        } else return this.result(false);
       }
 
       // Sustained loss of playable buffer is the only reason to downshift.
