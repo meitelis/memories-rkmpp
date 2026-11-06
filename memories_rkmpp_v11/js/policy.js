@@ -28,7 +28,8 @@
       this.healthySince = null;
       this.dangerSince = null;
       this.lastChangeAt = 0;
-      this.upgradeAfter = 0;
+      this.retryAfter = 0;
+      this.lastUpgradeAt = -Infinity;
     }
     beginSeek() {
       this.phase = 'seeking';
@@ -37,11 +38,14 @@
       this.dangerSince = null;
     }
     step({now, buffer, playing, seeking, auto, originalReady = false,
-          decoderCap = Infinity, requestAge = 0, targetBuffer = 12}) {
+          decoderCap = Infinity, requestAge = 0, currentLevel = this.cap}) {
       const originalIndex = this.levels.findIndex(original);
       const limit = Math.min(decoderCap, originalReady || originalIndex < 0
         ? this.levels.length - 1 : Math.max(0, originalIndex - 1));
-      if (this.cap > limit) this.cap = limit;
+      if (this.cap > limit) {
+        this.cap = limit;
+        this.healthySince = null;
+      }
       if (!auto || !playing || seeking) {
         this.samples = [];
         this.healthySince = null;
@@ -58,46 +62,48 @@
       // New streams and cold seeks need time for the first segment.
       // Do not misclassify slow RKMPP production as a slow connection.
       if (this.phase === 'startup' || this.phase === 'seeking') {
-        if (buffer >= Math.min(6, targetBuffer)) this.phase = 'normal';
+        if (buffer >= 6) this.phase = 'normal';
         else if (requestAge < (this.phase === 'seeking' ? 6000 : 9000)) return this.result(false);
         else this.phase = 'normal';
       }
 
       // Sustained loss of playable buffer is the only reason to downshift.
       // Avoid overreacting to the normal three-second fragment sawtooth.
-      const danger = buffer < 1.5 ||
-        (buffer < 4 && (trend < -0.35 || requestAge > 1800));
+      const danger = buffer < 0.5 ||
+        (buffer < 2.5 && (trend < -0.4 || requestAge > 1800));
       if (!danger) this.dangerSince = null;
       else if (this.dangerSince === null) this.dangerSince = now;
 
       if (this.cap > 0 && this.dangerSince !== null &&
-          (buffer < 0.5 || now - this.dangerSince >= 1200) &&
-          now - this.lastChangeAt >= 2500) {
-        this.cap = Math.max(0, this.cap - (buffer < 1.5 ? 2 : 1));
+          (buffer < 0.5 || now - this.dangerSince >= 1000) &&
+          now - this.lastChangeAt >= 2000) {
+        this.cap = Math.max(0, this.cap - (buffer < 0.5 ? 2 : 1));
         this.phase = 'recovering';
         this.lastChangeAt = now;
-        this.upgradeAfter = now + 45000;
+        // Only a recent failed upgrade gets a short retry delay.
+        if (now - this.lastUpgradeAt < 15000) this.retryAfter = now + 10000;
         this.healthySince = null;
         this.dangerSince = null;
         this.samples = [];
         return this.result(true);
       }
 
-      // Successful playback is the only reason to try more quality.
-      // The trial is a single ladder step; failed trials have a cooldown.
-      const healthyTarget = Math.min(10, Math.max(5, targetBuffer * 0.7));
-      const healthy = buffer >= healthyTarget && !danger;
+      // Three playable seconds during six-second buffering is sufficient
+      // for a cautious one-rung quality trial.
+      const healthy = buffer >= 3 && !danger;
       if (!healthy) this.healthySince = null;
       else if (this.healthySince === null) this.healthySince = now;
-      if (this.healthySince !== null && now - this.healthySince >= 8000 &&
-          now >= this.upgradeAfter && now - this.lastChangeAt >= 10000 && this.cap < limit) {
+      if (this.healthySince !== null && now - this.healthySince >= 4000 &&
+          now >= this.retryAfter && now - this.lastChangeAt >= 4000 &&
+          currentLevel >= this.cap && this.cap < limit) {
         this.cap++;
         this.phase = 'normal';
         this.lastChangeAt = now;
+        this.lastUpgradeAt = now;
         this.healthySince = null;
         return this.result(true);
       }
-      if (this.phase === 'recovering' && healthy && now - this.lastChangeAt >= 8000) this.phase = 'normal';
+      if (this.phase === 'recovering' && healthy) this.phase = 'normal';
       return this.result(false);
     }
     result(change) {
