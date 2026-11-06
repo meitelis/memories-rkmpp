@@ -15,17 +15,17 @@ test('startup speed chooses affordable initial quality, preferring Original',()=
   assert.equal(chooseLevel(levels,400000000,false),5);
 });
 
-test('six playable seconds ends startup warm-up',()=>{
+test('three playable seconds enables adaptive control; HLS still targets six',()=>{
   const p=new PlaybackPolicy(levels,30000000,true);
-  assert.equal(tick(p,1000,5,{requestAge:1000}).phase,'startup');
-  assert.equal(tick(p,1500,6).phase,'normal');
+  assert.equal(tick(p,1000,2,{requestAge:1000}).phase,'startup');
+  assert.equal(tick(p,1500,3.1).phase,'normal');
 });
 
-test('a cold first segment does not trigger an early resolution collapse',()=>{
+test('cold first segment has bounded warm-up even when request age is high',()=>{
   const p=new PlaybackPolicy(levels,30000000,true);
-  assert.equal(tick(p,1000,0,{requestAge:6000}).cap,6);
-  assert.equal(tick(p,1500,0,{requestAge:8000}).cap,6);
-  assert.equal(tick(p,3000,0,{requestAge:11000}).cap,4);
+  for(let now=1000;now<=9500;now+=500)
+    assert.equal(tick(p,now,0,{requestAge:11000}).cap,6);
+  assert.equal(tick(p,10000,0,{requestAge:500}).cap,4);
 });
 
 test('fragment sawtooth between 3 and 6 seconds remains healthy',()=>{
@@ -147,4 +147,30 @@ test('audio follows selected rendition without separate bandwidth controller',()
   assert.equal(p.result(false).audio,'audio');
   p.cap=0;
   assert.equal(p.result(false).audio,'audio32');
+});
+
+test('short successful fragments cannot strand Auto forever in startup',()=>{
+  const p=new PlaybackPolicy(levels,30000000,true);
+  for(let now=1000;now<10000;now+=500) {
+    assert.equal(tick(p,now,0.4,{requestAge:300}).phase,'startup');
+  }
+  const result=tick(p,10000,0.4,{requestAge:300});
+  assert.equal(result.phase,'recovering');
+  assert.equal(result.cap,4);
+});
+
+test('a seek that never fills six seconds is bounded by elapsed time',()=>{
+  const p=new PlaybackPolicy(levels,30000000,true);
+  tick(p,1000,6);
+  p.beginSeek();
+  for(let now=2000;now<8000;now+=500) {
+    assert.equal(tick(p,now,0,{requestAge:250}).cap,6);
+  }
+  assert.equal(tick(p,8000,0,{requestAge:250}).cap,4);
+});
+
+test('quality control exits startup with three seconds but retains six-second buffer target externally',()=>{
+  const p=new PlaybackPolicy(levels,30000000,true);
+  assert.equal(tick(p,1000,3.5).phase,'normal');
+  assert.equal(tick(p,1500,2.8).cap,6);
 });
