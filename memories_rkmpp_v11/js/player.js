@@ -13,7 +13,8 @@
     const level = id === 'auto' ? -1 : option.index;
     // hls.js owns segment scheduling. Keep the playing clock and shared
     // audio intact while the selected hardware producer starts.
-    if (level < 0 || hls.currentLevel === level) hls.loadLevel = level;
+    if (level < 0 && state?.policy) hls.nextLevel = state.policy.cap;
+    else if (level < 0 || hls.currentLevel === level) hls.loadLevel = level;
     else hls.nextLevel = level;
     if (state) {
       state.switchAt = level < 0 || hls.currentLevel === level ? 0 : Date.now();
@@ -48,17 +49,17 @@
     return Math.max(loading, stalledSeek ? now - state.seekAt : 0);
   }
 
-  function renditionText(video, hls) {
+  function renditionText(video, hls, selected = 'auto') {
     if (!video.videoWidth || !video.videoHeight) return 'Loading video…';
     const level = hls?.levels?.[hls.currentLevel];
     const codec = level?.videoCodec || level?.attrs?.CODECS || '';
     const name = /hvc1|hev1/i.test(codec) ? 'HEVC' : /avc1/i.test(codec) ? 'H.264' : '';
-    const mode = isOriginal(level) ? 'Original' : hls?.autoLevelEnabled ? 'Auto' : 'Playing';
+    const mode = isOriginal(level) ? 'Original' : selected === 'auto' ? 'Auto' : 'Playing';
     return `${mode} · ${Math.min(video.videoWidth, video.videoHeight)}p (${video.videoWidth}×${video.videoHeight})${name ? ' · ' + name : ''}`;
   }
 
   if (typeof module !== 'undefined' && module.exports) {
-    module.exports = {chooseLevel, audioProfile, selectQuality, selectAudio, beginSeek, requestAge, renditionText, configure, recheckConnection};
+    module.exports = {chooseLevel, audioProfile, selectQuality, selectAudio, beginSeek, requestAge, renditionText, configure, update};
   }
   if (typeof document === 'undefined') return;
   const debug = new URLSearchParams(location.search).has('rkmpp_debug');
@@ -112,18 +113,6 @@
     return estimate || 750000;
   }
 
-  async function recheckConnection(video, state) {
-    const policy = state.policy;
-    const abort = state.abort;
-    const bps = await speedProbe(abort.signal);
-    if (abort.signal.aborted || state.policy !== policy || state.selected !== 'auto' || video.seeking || !['normal', 'recovering'].includes(policy.phase)) return;
-    policy.measured(bps, Date.now(), state.originalReady, state.decoderCap);
-    state.hls.bandwidthEstimate = bps;
-    state.hls.autoLevelCapping = policy.cap;
-    state.hls.nextAutoLevel = policy.cap;
-    state.badge.dataset.recoveryBandwidth = String(Math.round(bps));
-  }
-
   async function warmOriginal(state, force = false) {
     const hls = state.hls;
     const level = hls.levels.find(isOriginal);
@@ -143,7 +132,7 @@
   function setAudio(state, startup = false) {
     if (!(state.bps > 0)) return;
     startup = startup || !state.audioInitialized;
-    const desired = audioProfile(state.bps);
+    const desired = state.policy?.result(false).audio || audioProfile(state.bps);
     const now = Date.now();
     if (desired !== state.audioCandidate) {
       state.audioCandidate = desired;
@@ -198,10 +187,9 @@
     Object.assign(hls.config, {
       autoStartLoad:false, startFragPrefetch:false,
       // Bound bytes as well as seconds: 4K/60 AVC can exceed 65 Mbps.
-      maxBufferLength:3, maxBufferSize:48*1024*1024, maxMaxBufferLength:18, backBufferLength:3,
+      // Six seconds is the startup buffer goal; runtime may accumulate more.
+      maxBufferLength:12, maxBufferSize:48*1024*1024, maxMaxBufferLength:18, backBufferLength:3,
       capLevelOnFPSDrop:true, fpsDroppedMonitoringThreshold:0.2,
-      abrBandWidthFactor:0.8, abrBandWidthUpFactor:0.65,
-      abrEwmaFastVoD:3, abrEwmaSlowVoD:10,
     });
     // stopLoad also aborts an in-flight manifest in hls.js 1.7. Wait for
     // its normal parse event; autoStartLoad=false already holds fragments.
@@ -230,12 +218,10 @@
       if (state.abort.signal.aborted) return;
       state.policy = new PlaybackPolicy(hls.levels, state.bps, state.originalReady);
       state.cap = state.policy.cap;
-      // Older hls.js builds exposed this estimate as a read-only getter.
-      try { hls.bandwidthEstimate = state.bps; }
-      catch { hls.config.abrEwmaDefaultEstimate = state.bps; }
-      hls.autoLevelCapping = state.cap;
-      hls.loadLevel = -1;
+      // One quality controller. hls.js schedules fragments and buffers, while
+      // buffer health chooses renditions without encoder-rate contamination.
       hls.startLevel = state.cap;
+      hls.loadLevel = state.cap;
       setAudio(state, true);
       state.checking = false;
       state.badge.dataset.phase = 'loading';
@@ -246,9 +232,7 @@
     listen(Events.FRAG_LOADED, (_event, data) => {
       if (data.frag?.type !== 'main') return;
       if (state.inflight === data.frag) state.inflight = null;
-      const stats = data.stats || data.frag.stats;
-      state.policy?.sample(stats);
-      if (state.policy) state.bps = state.policy.bps;
+      state.badge.dataset.lastVideoFragmentAt = String(Date.now());
     });
     listen(Events.FRAG_LOADING, (_event, data) => {
       if (data.frag?.type === 'main') state.inflight = data.frag;
@@ -341,40 +325,31 @@
     const now = Date.now();
     if (hls && state.policy && !state.checking) {
       const stats = state.inflight?.stats;
+      const current = hls.levels[state.policy.cap];
+      const targetBuffer = Math.min(hls.config.maxMaxBufferLength,
+        Math.max(3, 8 * hls.config.maxBufferSize / bandwidth(current)));
       const action = state.policy.step({
         now, buffer, playing:!video.paused && !video.ended, seeking:video.seeking,
-        auto:state.selected === 'auto', originalReady:state.originalReady, decoderCap:state.decoderCap,
-        currentLevel:hls.currentLevel,
-        requestAge:requestAge(video, state, now),
-        loaded:stats?.loaded || 0,
-        targetBuffer:Math.min(hls.config.maxMaxBufferLength,
-          Math.max(hls.config.maxBufferLength, 8*hls.config.maxBufferSize/bandwidth(hls.levels[hls.currentLevel]))),
+        auto:state.selected === 'auto', originalReady:state.originalReady,
+        decoderCap:state.decoderCap, requestAge:requestAge(video, state, now),
+        targetBuffer,
       });
-      const raisedCap = action.cap > state.cap;
-      state.bps = action.bps;
+      const oldCap = state.cap;
       state.cap = action.cap;
       state.badge.dataset.phase = action.phase;
       if (state.selected === 'auto') {
         if (state.seekLevel != null && action.phase !== 'seeking') {
           state.seekLevel = null;
-          hls.bandwidthEstimate = state.bps;
-          hls.loadLevel = -1;
-        }
-        hls.autoLevelCapping = action.cap;
-        if (raisedCap) hls.nextAutoLevel = action.cap;
-        if (action.cancel) {
-          // Stop downloads only. Keep the media source and playing buffers.
-          hls.stopLoad();
-          hls.loadLevel = -1;
-          hls.nextAutoLevel = action.cap;
-          hls.startLoad(video.currentTime, true);
+          hls.nextLevel = action.cap;
+        } else if (action.change || action.cap !== oldCap) {
+          // Switch at the next fragment. Never abort or flush playing buffers.
+          hls.nextLevel = action.cap;
         }
         void warmOriginal(state);
-        if (action.probe) void recheckConnection(video, state);
       }
       setAudio(state);
     }
-    const text = state.failure || (state.checking ? 'Checking connection…' : renditionText(video, hls));
+    const text = state.failure || (state.checking ? 'Checking connection…' : renditionText(video, hls, state.selected));
     if (state.badge.textContent !== text) state.badge.textContent = text;
     Object.assign(state.badge.dataset, {
       bandwidth: String(Math.round(state.bps)), buffer:buffer.toFixed(2),
