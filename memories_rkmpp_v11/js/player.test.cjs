@@ -145,7 +145,7 @@ test('healthy buffer upgrades one step without replacing audio, source or probin
   const policy = new PlaybackPolicy(levels,600000,true);
   const changes = [];
   const hls = {
-    levels, currentLevel:0, config:{maxMaxBufferLength:18,maxBufferSize:48*1024*1024},
+    levels, get currentLevel(){return 0;}, config:{maxMaxBufferLength:18,maxBufferSize:48*1024*1024},
     audioTracks:[], on(){}, off(){},
     set nextLevel(v){changes.push(v);},
     set audioTrack(_){throw Error('shared audio should not reset');},
