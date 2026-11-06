@@ -49,16 +49,17 @@ test('audio budget is independent of video resolution', () => {
   assert.equal(audioProfile(700000),'audio64');
   assert.equal(audioProfile(300000),'audio32');
 });
-test('manual selection uses the HLS switch scheduler and never resets shared audio or the media source', () => {
+test('manual and Auto selections use non-flushing loadLevel and retain audio', () => {
   const video={qualityList:[{id:'1080:6000000',index:1}],dispatchEvent(){}};
   const hls={levels:[{},{}],
+    set nextLevel(_) {throw Error('nextLevel may flush buffered data');},
     set currentLevel(_) {throw Error('playing buffer flushed');},
     set audioTrack(_) {throw Error('shared audio reset');}};
   selectQuality(video,hls,'1080:6000000');
-  assert.equal(hls.nextLevel,1);
+  assert.equal(hls.loadLevel,1);
   hls.levels[1].audioGroupIds=['audio'];
   selectQuality(video,hls,'1080:6000000');
-  assert.equal(hls.nextLevel,1);
+  assert.equal(hls.loadLevel,1);
   selectQuality(video,hls,'auto');
   assert.equal(hls.loadLevel,-1);
 });
@@ -82,6 +83,8 @@ test('startup holds fragments without aborting the manifest and resumes when par
   const state={badge:{dataset:{}},audioChanged:0};
   configure({},state,hls);
   assert.equal(hls.config.autoStartLoad,false);
+  assert.equal(hls.config.maxBufferLength,6);
+  assert.equal(hls.config.maxMaxBufferLength,6);
   assert.equal(hls.started,undefined);
   hls.levels=[{bitrate:400000,url:['/480plow.m3u8']}];
   await events.get('parsed')();
@@ -147,7 +150,8 @@ test('healthy buffer upgrades one step without replacing audio, source or probin
   const hls = {
     levels, get currentLevel(){return 0;}, config:{maxMaxBufferLength:18,maxBufferSize:48*1024*1024},
     audioTracks:[], on(){}, off(){},
-    set nextLevel(v){changes.push(v);},
+    set loadLevel(v){changes.push(v);},
+    set nextLevel(_){throw Error('nextLevel can flush existing buffers');},
     set audioTrack(_){throw Error('shared audio should not reset');},
     set currentLevel(_){throw Error('playing source should not reset');},
   };
@@ -179,6 +183,18 @@ test('an internal auto choice is scheduled even though hls.js manualLevel is use
   const video={qualityList:[],dispatchEvent(){}};
   const hls={currentLevel:0};
   selectQuality(video,hls,'auto',{policy:{cap:2},badge:{dataset:{}}});
-  assert.equal(hls.nextLevel,2);
+  assert.equal(hls.loadLevel,2);
+  assert.equal(video._qualitySelected,'auto');
+});
+
+test('switching to Auto from a manual level restores the buffer policy cap without a flush',()=>{
+  const video={qualityList:[{id:'360:400000',index:0}],dispatchEvent(){}};
+  const hls={currentLevel:0,set nextLevel(_){throw Error('would flush buffer')},
+    set currentLevel(_){throw Error('would flush source')}};
+  const state={policy:{cap:3},badge:{dataset:{}},selected:'auto'};
+  selectQuality(video,hls,'360:400000',state);
+  assert.equal(hls.loadLevel,0);
+  selectQuality(video,hls,'auto',state);
+  assert.equal(hls.loadLevel,3);
   assert.equal(video._qualitySelected,'auto');
 });
