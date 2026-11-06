@@ -1,10 +1,10 @@
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
-const {chooseLevel, audioProfile, selectQuality, selectAudio, beginSeek, requestAge, renditionText, configure, recheckConnection} = require('./player.js');
+const {chooseLevel, audioProfile, selectQuality, selectAudio, beginSeek, requestAge, renditionText, configure, update} = require('./player.js');
 const {PlaybackPolicy} = require('./policy.js');
 
 const settle=()=>new Promise(resolve=>setImmediate(resolve));
-test('a resumed seek cannot turn its old seek timer into a new network stall',()=>{
+test('a seek does not interpret its old request timer as a new network stall',()=>{
   const levels=[400000,5000000].map((bitrate,i)=>({bitrate,url:[`/${i}.m3u8`]}));
   const policy=new PlaybackPolicy(levels,20000000,true);
   policy.beginSeek();
@@ -14,7 +14,7 @@ test('a resumed seek cannot turn its old seek timer into a new network stall',()
     requestAge:requestAge(video,state,7000,7000)});
   assert.equal(step().cap,1,'resumed playback keeps its affordable rendition');
   video.seeking=true;video.readyState=1;state.inflight=null;
-  assert.equal(step().cap,0,'an actually stuck seek still has a bounded rescue');
+  assert.equal(step().cap,1,'a pending seek does not immediately force lower quality');
 });
 
 test('a seek respects an earlier downshift while Original pictures are still buffered',()=>{
@@ -38,7 +38,7 @@ test('runtime audio changes schedule the next track without flushing current aud
 const levels = [350000,700000,1800000,4000000,9000000].map((bitrate,i)=>({bitrate,url:[i===4?'/direct.m3u8?x=y':`/${i}.m3u8`]}));
 test('startup budgets headroom and selects the original only when ready and affordable', () => {
   assert.equal(chooseLevel(levels,20000000),4);
-  assert.equal(chooseLevel(levels,5000000),2);
+  assert.equal(chooseLevel(levels,5000000),3);
   assert.equal(chooseLevel(levels,20000000,false),3);
   assert.equal(chooseLevel(levels,20000000,true,2),2);
   assert.equal(chooseLevel(levels,150000),0);
@@ -86,9 +86,9 @@ test('startup holds fragments without aborting the manifest and resumes when par
   hls.levels=[{bitrate:400000,url:['/480plow.m3u8']}];
   await events.get('parsed')();
   assert.equal(hls.started,true);
-  assert.equal(hls.loadLevel,-1,'Auto must clear a native default manual level');
+  assert.equal(hls.loadLevel,0,'buffer-based Auto owns the initial rendition');
   assert.equal(state.checking,false);
-  assert.equal(hls.audioTrack,2,'conservative startup selects the matching 64 kbps audio URI');
+  assert.equal(hls.audioTrack,3,'lowest video rendition starts with low-bandwidth audio');
   state.abort.abort();
 });
 
@@ -115,7 +115,7 @@ test('fast startup awaits an affordable Original preflight instead of racing int
     await events.get('parsed')();
     assert.equal(hls.startLevel,1);
     assert.equal(state.originalReady,true);
-    assert.equal(hls.loadLevel,-1);
+    assert.equal(hls.loadLevel,1);
   } finally {
     state.abort?.abort();global.window=previousWindow;global.fetch=previousFetch;
   }
@@ -132,33 +132,53 @@ test('late audio-track discovery applies the measured startup rate immediately',
   await events.get('parsed')();
   hls.audioTracks=['audio','audio96','audio64','audio32'].map(id=>({url:`https://example.test/${id}.m3u8`}));
   events.get('audio')();
-  assert.equal(hls.audioTrack,2);
-  assert.equal(state.audioProfile,'audio64');
+  assert.equal(hls.audioTrack,3);
+  assert.equal(state.audioProfile,'audio32');
   state.abort.abort();
 });
 
-test('a fresh network measurement schedules one affordable automatic rendition without touching media or audio', async () => {
-  const previousWindow=global.window, previousFetch=global.fetch;
-  global.window={OC:{generateUrl:()=>'/probe'}};
-  global.fetch=async()=>({ok:true,headers:{get:()=> 'application/octet-stream'},body:{getReader:()=>{
-    let sent=false;
-    return {read:async()=>sent?{done:true}:(sent=true,{done:false,value:new Uint8Array(1572864)}),releaseLock(){}};
-  }}});
-  const state={selected:'auto',originalReady:true,decoderCap:Infinity,abort:new AbortController(),
-    policy:new PlaybackPolicy(levels,750000,true),badge:{dataset:{}},hls:{
-      set currentLevel(_) {throw Error('playing buffers flushed');},
-      set audioTrack(_) {throw Error('shared audio reset');},
-    }};
-  state.policy.phase='recovering';
+test('healthy buffer upgrades one step without replacing audio, source or probing again', () => {
+  const previousNow = Date.now;
+  const levels = [350000,700000,1800000].map((bitrate,i) => ({
+    bitrate, width:640+i*400, height:360+i*180, url:['/'+i+'.m3u8']
+  }));
+  const policy = new PlaybackPolicy(levels,600000,true);
+  const changes = [];
+  const hls = {
+    levels, currentLevel:0, config:{maxMaxBufferLength:18,maxBufferSize:48*1024*1024},
+    audioTracks:[], on(){}, off(){},
+    set nextLevel(v){changes.push(v);},
+    set audioTrack(_){throw Error('shared audio should not reset');},
+    set currentLevel(_){throw Error('playing source should not reset');},
+  };
+  const video = {
+    _qualityHls:hls, currentTime:0, videoWidth:640, videoHeight:360,
+    paused:false, ended:false, seeking:false,
+    buffered:{length:1,start:()=>0,end:()=>12},
+    closest:()=>null,
+  };
+  const state = {
+    hls, policy, badge:{dataset:{},textContent:''}, cap:policy.cap,
+    originalReady:true, selected:'auto', decoderCap:Infinity,
+    checking:false, abort:new AbortController(), bps:600000,
+    audioInitialized:true, audioProfile:'audio32', audioChanged:0,
+  };
   try {
-    await recheckConnection({seeking:false},state);
-    assert.equal(state.hls.nextAutoLevel,4);
-    assert.equal(state.hls.autoLevelCapping,4);
-    assert.ok(state.hls.bandwidthEstimate>20000000);
-    state.hls.nextAutoLevel=undefined;
-    const pending=recheckConnection({seeking:false},state);
-    state.selected='manual';
-    await pending;
-    assert.equal(state.hls.nextAutoLevel,undefined,'a probe cannot override a later user choice');
-  } finally {global.window=previousWindow;global.fetch=previousFetch;state.abort.abort();}
+    Date.now=()=>1000;
+    update(video,state);
+    assert.equal(changes.length,0,'no quality change before buffer is proven healthy');
+    Date.now=()=>11000;
+    update(video,state);
+    assert.deepEqual(changes,[1],'one scheduled upgrade');
+    assert.equal(state.cap,1);
+    assert.equal(hls.currentLevel,0,'rendered video is not reset or forced');
+  } finally {Date.now=previousNow;state.abort.abort();}
+});
+
+test('an internal auto choice is scheduled even though hls.js manualLevel is used',()=>{
+  const video={qualityList:[],dispatchEvent(){}};
+  const hls={currentLevel:0};
+  selectQuality(video,hls,'auto',{policy:{cap:2},badge:{dataset:{}}});
+  assert.equal(hls.nextLevel,2);
+  assert.equal(video._qualitySelected,'auto');
 });
