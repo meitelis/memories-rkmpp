@@ -1,93 +1,142 @@
 (function (root) {
   'use strict';
-  const bitrate = level => level?.bitrate || Number(level?.attrs?.BANDWIDTH) || Infinity;
-  const original = level => (Array.isArray(level?.url) ? level.url : [level?.url]).some(url => /\/direct\.m3u8(?:\?|$)/.test(url || ''));
-  function chooseLevel(levels, bps, ready = true, limit = Infinity) {
-    let best = 0;
-    levels.forEach((level, index) => {
-      if (index <= limit && (ready || !original(level)) && bitrate(level) <= bps * 0.72) best = index;
-    });
-    return best;
-  }
-  const audioProfile = bps => bps < 450000 ? 'audio32' : bps < 1000000 ? 'audio64' : bps < 4000000 ? 'audio96' : 'audio';
 
-  // Pure policy: no timers, network requests, DOM, or hls.js mutations.
-  // hls.js owns ordinary ABR. This policy gates startup and buffer rescue.
-  class PlaybackPolicy {
-    constructor(levels, initialBps, ready = false) {
-      this.levels = levels;
-      this.phase = 'startup';
-      this.bps = initialBps;
-      this.deliveryBps = initialBps;
-      this.latency = 200;
-      this.cap = chooseLevel(levels, initialBps, ready);
-      this.networkCap = chooseLevel(levels, initialBps);
-      this.healthySince = null;
-      this.probeAt = 0;
+  // One state machine. No separate timers or competing bandwidth controllers.
+  const BAND = level => Number(level?.bitrate || level?.attrs?.BANDWIDTH) || Infinity;
+  const ORIGINAL = level => (Array.isArray(level?.url) ? level.url : [level?.url])
+    .some(url => /\/direct\.m3u8(?:\?|$)/.test(url || ''));
+
+  function chooseLevel(levels, bps, ready = true, ceiling = Infinity) {
+    let choice = 0;
+    for (let i = 0; i < levels.length && i <= ceiling; i++) {
+      if (BAND(levels[i]) <= bps * 0.72 && (ready || !ORIGINAL(levels[i]))) choice = i;
     }
-    sample(stats) {
-      // A cold seek includes producer startup, not just network delivery.
-      if (this.phase === 'seeking') return;
-      const load = stats?.loading;
-      if (!load || !stats.loaded || !(load.end > load.start)) return;
-      this.latency = Math.min(this.latency, Math.max(0, load.first - load.start));
-      const effectiveMs = Math.max(25, load.end - load.start - this.latency);
-      const rate = stats.loaded * 8000 / effectiveMs;
-      this.deliveryBps = rate < this.deliveryBps ? rate : Math.min(rate, this.deliveryBps * 2);
-    }
-    beginSeek() {
-      this.phase = 'seeking';
-      this.healthySince = null;
-    }
-    measured(bps, now, originalReady, decoderCap = Infinity) {
-      this.bps = this.deliveryBps = bps;
-      this.networkCap = chooseLevel(this.levels, bps);
-      this.cap = chooseLevel(this.levels, bps, originalReady, decoderCap);
-      this.healthySince = now;
-      this.probeAt = now + 15000;
-    }
-    step({now, buffer, playing, seeking, auto, requestAge = 0, loaded = 0, originalReady = false, decoderCap = Infinity, targetBuffer = 18, currentLevel = this.cap}) {
-      const originalIndex = this.levels.findIndex(original);
-      const limit = Math.min(decoderCap, originalReady || originalIndex < 0 ? this.levels.length - 1 : Math.max(0, originalIndex - 1));
-      let cancel = false;
-      let probe = false;
-      this.cap = Math.min(this.networkCap, limit);
-      const healthyBuffer = Math.min(10, targetBuffer * 0.6);
-      const criticalBuffer = Math.min(4, targetBuffer * 0.25);
-      if (!playing || !auto || (seeking && this.phase !== 'seeking')) {
-        this.healthySince = null;
-        return this.result(cancel);
-      }
-      // A metadata-sized buffer is normal before playback has warmed up.
-      if (this.phase === 'startup' || this.phase === 'seeking') {
-        if (buffer >= healthyBuffer) this.phase = 'normal';
-        else if (requestAge < 6000) return this.result(cancel);
-      }
-      const endangered = (buffer < healthyBuffer && requestAge > 2000 && !loaded) || (buffer < criticalBuffer && requestAge > 1000);
-      if (endangered && (this.phase !== 'recovering' || this.cap > 0)) {
-        this.phase = 'recovering';
-        this.cap = 0;
-        this.networkCap = 0;
-        this.bps = Math.min(this.deliveryBps, bitrate(this.levels[0]) / 0.72);
-        this.healthySince = null;
-        cancel = true;
-      } else if (this.phase === 'recovering') {
-        if (this.cap === limit) this.phase = 'normal';
-      }
-      if (buffer < Math.min(6, healthyBuffer)) this.healthySince = null;
-      else if (this.healthySince === null) this.healthySince = now;
-      // A paced encoder can hold a request until the next segment exists.
-      // That wait cannot establish network capacity. Remeasure when a lower
-      // rendition has healthy buffers, including after weak-network startup.
-      if (currentLevel < limit && this.healthySince !== null && now - this.healthySince >= 10000 && now >= this.probeAt) {
-        this.probeAt = now + 15000;
-        probe = true;
-      }
-      return this.result(cancel, probe);
-    }
-    result(cancel, probe = false) { return {phase:this.phase, cap:this.cap, bps:this.bps, audio:audioProfile(this.bps), cancel, probe}; }
+    return choice;
   }
-  const api = {PlaybackPolicy, chooseLevel, audioProfile};
+
+  class PlaybackPolicy {
+    constructor(levels, measuredBps, originalReady = false) {
+      this.levels = levels;
+      this.target = chooseLevel(levels, measuredBps, originalReady);
+      // A synthetic speed probe cannot prove that Original HLS is sustainable.
+      // Start with an encoded rendition; earn Original from actual segments.
+      this.originalIndex = levels.findIndex(ORIGINAL);
+      if (this.originalIndex > 0 && this.target >= this.originalIndex)
+        this.target = this.originalIndex - 1;
+      this.phase = 'startup';
+      this.samples = [];
+      this.seen = new Set();
+      this.playingLevel = -1;
+      this.lastChange = -Infinity;
+      this.blacklist = new Map();
+      this.buffering = false;
+      this.seek = false;
+      this.started = false;
+      this.lastReason = 'startup';
+      this.upgradePending = false;
+    }
+
+    onPlaying() { this.started = true; this.buffering = false; }
+    onWaiting() { this.buffering = true; this.samples = []; }
+    beginSeek() { this.seek = true; this.samples = []; this.playingLevel = -1; this.upgradePending = false; }
+    endSeek() { this.seek = false; this.buffering = false; this.samples = []; }
+
+    onLevelPlayed(level) {
+      this.playingLevel = level;
+      if (level === this.target) this.upgradePending = false;
+    }
+
+    // Only completed and distinct main video fragments count as evidence.
+    // Payload transfer is measured apart from FFmpeg startup and pacing.
+    onFragment({level, sn, duration, bytes, loading, buffer, now}) {
+      if (level !== this.target || !(duration > 0) || !loading) return;
+      const id = Number.isInteger(sn) ? level + ':' + sn : null;
+      if (id && this.seen.has(id)) return;
+      if (id) {
+        this.seen.add(id);
+        if (this.seen.size > 64) this.seen.delete(this.seen.values().next().value);
+      }
+      const total = loading.end - loading.start;
+      const transfer = loading.end - loading.first;
+      const transferBps = bytes >= 16384 && transfer >= 20 && Number.isFinite(transfer)
+        ? bytes * 8000 / transfer : 0;
+      const rate = total > 0 ? duration * 1000 / total : 0;
+      this.samples.push({level, sn, now, rate, transferBps, buffer});
+      if (this.samples.length > 6) this.samples.shift();
+    }
+
+    // Called every 500 ms, and also after a completed video fragment.
+    step({now, buffer, requestAge = 0, auto = true, playing = true,
+          seeking = false, decoderCap = Infinity, originalReady = false,
+          currentLevel = -1}) {
+      if (Number.isInteger(currentLevel) && currentLevel >= 0 && currentLevel !== this.playingLevel) {
+        this.onLevelPlayed(currentLevel);
+      }
+      const limit = Math.max(0, Math.min(
+        decoderCap,
+        originalReady || this.originalIndex < 0 ? this.levels.length - 1 : this.originalIndex - 1,
+      ));
+      if (!auto || !playing || seeking || this.seek) {
+        this.samples = [];
+        return this.result(false);
+      }
+      if (this.target > limit) return this.move(limit, now, 'decoder-or-original-unavailable');
+      if (!this.started) return this.result(false);
+      this.phase = this.buffering ? 'buffering' : 'steady';
+
+      // The 20s forward target protects full-segment delivery. Below 9s and
+      // with an outstanding slow fragment we are already losing that reserve.
+      // Normal 4s segment sawteeth stay above this line.
+      const urgent = buffer < 2.5 && (requestAge > 750 || this.buffering);
+      const endangered = buffer < 9 && requestAge > 1800;
+      const slow = this.samples.length >= 2 &&
+        this.samples.slice(-2).every(s => s.rate > 0 && s.rate < 0.78 && s.buffer < 12);
+      if (this.target > 0 && (urgent || endangered || slow)) {
+        const old = this.target;
+        const lower = Math.max(0, old - (urgent ? 2 : 1));
+        // A failed higher-rendition trial gets a backoff; other levels aren't penalized.
+        if (this.lastReason === 'upgrade' && now - this.lastChange < 25000)
+          this.blacklist.set(old, now + (ORIGINAL(this.levels[old]) ? 60000 : 25000));
+        return this.move(lower, now, urgent ? 'starvation' : 'slow-delivery');
+      }
+
+      // Do not chase buffer peaks. Upgrading requires a full reserve, three
+      // independent video fragments, and demonstrable network headroom.
+      // The previous rendition must actually be playing, not merely requested.
+      const next = this.target + 1;
+      if (next > limit || this.playingLevel !== this.target ||
+          this.upgradePending || this.buffering ||
+          buffer < (ORIGINAL(this.levels[next]) ? 16 : 14) ||
+          now - this.lastChange < 12000 ||
+          now < (this.blacklist.get(next) || 0) ||
+          this.samples.length < 3) return this.result(false);
+      const three = this.samples.slice(-3);
+      const safe = three.every(s =>
+        s.level === this.target && s.transferBps >= BAND(this.levels[next]) *
+          (ORIGINAL(this.levels[next]) ? 2 : 1.65) &&
+        s.rate >= 0.86 && s.buffer >= 11);
+      if (safe) return this.move(next, now, 'upgrade');
+      return this.result(false);
+    }
+
+    move(target, now, reason) {
+      if (target === this.target) return this.result(false);
+      this.target = target;
+      this.lastChange = now;
+      this.lastReason = reason;
+      this.samples = [];
+      this.seen.clear();
+      this.upgradePending = reason === 'upgrade';
+      this.phase = reason === 'upgrade' ? 'upgrading' : 'recovering';
+      return this.result(true);
+    }
+
+    result(change) {
+      return {cap:this.target, change, phase:this.phase, reason:this.lastReason};
+    }
+  }
+
+  const api = {PlaybackPolicy, chooseLevel};
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.MemoriesRkmppPolicy = api;
 })(typeof window === 'undefined' ? null : window);
