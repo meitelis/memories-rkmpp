@@ -1,22 +1,26 @@
-# Memories 11.0.2 native-player integration
+# Memories 11.0.2 browser integration — native hls.js Auto (draft PR #14)
 
-`memories_rkmpp_v11` is gated to Memories 11.0.2 and uses the native `PsVideoQuality.ts` hls.js hooks. It does not install the obsolete Memories 10.2 Vidstack player.
+`memories_rkmpp_v11` uses the upstream Memories 11.0.2 `PsVideoQuality.ts` hooks and hls.js 1.7.x; it does **not** replace the video tag or the shared audio playlist. This is a browser-only draft pending real-device testing.
 
-- Measure a bounded random-data download once, before segment loading, over the same Nextcloud origin. Exclude PHP/encoder time to first byte. The probe is limited to 2.2 seconds and unavailable measurements start conservatively.
-- Use 80% of measured bandwidth for the initial resolution only. Prefer compatible Original when available; its copy-grid preflight has a bounded 1.5-second opportunity. Do not run speed tests again during playback.
-- Eighteen seconds is the hls.js forward buffer target, not a mandatory delay before playback. The quality controller begins evaluating after three playable seconds; if playback cannot fill three seconds, cold startup/seek protection expires after 9/6 seconds of elapsed time instead of waiting forever for a fragment request to age. The buffer is also bounded by 96 MiB. Eight seconds of back-buffer remain.
-- **One fragment-evidence-driven Auto controller**: eighteen seconds remains hls.js's buffering goal (not a mandatory startup wait). Completed segments must demonstrate sufficient delivery rate and HTTP transfer headroom, while emergency downshifts still respond to real starvation. Normal 3–5 second fragment buffer fluctuations alone do not switch resolution.
-- Two independent, successfully delivered fragments support an upgrade. The new rendition must actually play before further upgrading. Failed attempts require stronger delivery evidence, not a blanket delay. HLS segment sequence numbers are deduplicated, and waiting, pauses, seeks and manual selections clear stale upgrade evidence.
-- hls.js `loadLevel` changes rendition without flushing already-playable video. The current audio track remains unchanged throughout video adaptation; there are **no automatic alternate AAC bitrate switches**. A user-driven quality selection overrides Auto until Auto is explicitly reselected.
-- Startup speed estimation and Original stream-copy preflight are each bound to a specific player session: a replaced/aborted hls.js instance cannot initialize another instance or mark its Original rendition ready. Old media producers may still run until server idle expiry; this browser fix does not prove timestamp continuity between Original and encoded streams.
-- Cold starts and seeks are protected against misclassification of initial fragment production, with a bounded six-second warm-up once the controller begins checking. FPS-drop capping remains active.
-- The badge reports presented video dimensions and codec above the native controls, fading with them. Local DOM diagnostics expose buffer, throughput, Original readiness, decoder cap and dropped frames; no telemetry is uploaded.
+## Auto and manual quality
 
-Encoded RKMPP HLS video uses FFmpeg input pacing with an 18-second initial burst and catch-up rate 3. The stream supervisor never suspends those asynchronous hardware workers with SIGSTOP. Copy and software audio retain the existing producer throttling. Idle producers still stop through the normal timeout.
+- hls.js is the **only** ABR quality decision engine. `hls.loadLevel = -1` enables real Auto, `hls.loadLevel = index` selects a manual rendition without flushing existing pictures. There is no second controller that writes a pinned Auto resolution every 500 ms.
+- Returning from manual 480p to Auto clears the manual pin immediately. A bounded connection measurement refreshes the native hls.js EWMA. When it verifies enough capacity for a higher rendition, `hls.nextLevel = -1` asks the built-in hls.js scheduler for an earlier Auto switch; future video may be rebuffered while the playhead and independent audio continue.
+- The initial same-origin probe uses up to 2.2 seconds across at most 64 KiB, 384 KiB and 1.5 MiB sample sizes. Probe failure starts with a conservative bandwidth estimate; no invalid/failed measurement overwrites the current estimate after startup.
+- Network changes (where `navigator.connection` is supported), `online`, foreground visibility and `pageshow` initiate recovery checks. Browsers without network-change events use a 20-second maximum recovery interval while playing below the top rendition. Each check downloads at most 128 KiB + 384 KiB. No continual 500 ms synthetic testing.
+- hls.js can count RKMPP server-side segment creation before the first HTTP byte as low bandwidth. When **two** observed fragment transfers demonstrate greater link capacity, the helper conservatively updates the public `hls.bandwidthEstimate` EWMA seed. It does not manually select the video resolution.
+- hls.js's existing emergency downshift, codec/level selection and FPS-drop capping remain active. An 18-second forward buffer (maximum 96 MiB) and 8-second back-buffer give on-demand producers margin; starvation/loading delay is capped at 6 seconds. These are tradeoffs, not guarantees against stalls.
+- Compatible Original remains in the manifest. `direct.m3u8` can initially return 409 while go-vod creates the keyframe copy grid; a bounded background preflight warms that path. Playlist availability is **not** decoder compatibility validation.
+- The shared AAC track remains independent of video quality. No automatic audio bitrate switching or audio source reload is introduced. The badge displays **presented** dimensions/codec rather than the requested level.
+- Session-scoped aborts and change detection prevent a stale speed probe or Original preflight from modifying a replacement hls.js session. Debug diagnostics expose `hlsAuto`, `hlsManualLevel`, `hlsBandwidth`, `recoveryBandwidth`, fragment transfer, buffer and frame drops.
 
-The buffer-first quality policy currently targets hls.js. Safari native HLS retains the browser's own ABR; guest/public-share probing and mobile browser compatibility still require validation. A successful server hardware test does not prove audible continuity, perceptual HDR quality or smooth browser switching.
+## Backend
 
-Deploy with `scripts/deploy-v11.sh`. Acceptance requires real media playback, repeated quality changes, cold seeks, abrupt network reduction/recovery, and checking audio drift/gaps. Merge and branch cleanup follow acceptance, then the mainline deployment is checked again.
+The go-vod 0.7.0 RKMPP engine retains MPP decode/encode, RGA, Mali OpenCL and Original stream copy. Encoded HLS input pacing uses FFmpeg `-readrate 1 -readrate_initial_burst 18 -readrate_catchup 3`. PR #14 also wakes HTTP segment waiters when a stream is cleared instead of allowing them to block until the ten-second chunk timeout.
+
+## Acceptance before merging
+
+Run browser unit tests, Go race/vet/build and ARM64 image checks. Then test on the actual browser player: (1) Wi-Fi Original startup, (2) manual 480p → Auto return, (3) cellular 480p → Wi-Fi recovery, (4) Wi-Fi → cellular downshift without stalling, (5) cold seeking, pause/resume, playback to EOF, AAC continuity and repeated switches. Capture real buffer, throughput and hlsAuto diagnostics. **Green CI does not prove real device playback.**
 
 ## Android native player: separate from this release
 
