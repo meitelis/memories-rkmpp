@@ -25,7 +25,7 @@
       this.presentedLevel = -1;
       this.goodFragments = 0;
       this.slowFragments = 0;
-      this.lastSampledFragment = null;
+      this.sampledFragments = new Set();
       this.trialLevel = -1;
       this.trialSuccesses = 0;
       this.failures = new Map();
@@ -39,12 +39,15 @@
       this.presentedLevel = -1;
       this.goodFragments = 0;
       this.slowFragments = 0;
-      this.lastSampledFragment = null;
+      this.sampledFragments = new Set();
       this.waiting = false;
       this.trialLevel = -1;
       this.trialSuccesses = 0;
     }
-    onWaiting() { this.waiting = true; }
+    onWaiting() {
+      this.waiting = true;
+      this.goodFragments = 0; // Never promote using evidence from before a stall.
+    }
     onPlaying() { this.waiting = false; }
 
     // Measure transport separately from RKMPP production. The hardware input
@@ -56,8 +59,13 @@
       // hls.js can rebuffer or retry a completed fragment; don't count the
       // same segment twice as independent evidence for a quality upgrade.
       const key = Number.isInteger(sn) ? level + ':' + sn : null;
-      if (key && this.lastSampledFragment === key) return;
-      if (key) this.lastSampledFragment = key;
+      if (key && this.sampledFragments.has(key)) return;
+      if (key) {
+        this.sampledFragments.add(key);
+        if (this.sampledFragments.size > 32) {
+          this.sampledFragments.delete(this.sampledFragments.values().next().value);
+        }
+      }
       const productionRate = duration * 1000 / elapsedMs;
       const next = this.cap + 1;
       const failure = this.failures.get(next) || 0;
@@ -94,7 +102,11 @@
         this.resetEvidence();
         return this.result(true);
       }
-      if (!auto || !playing || seeking) return this.result(false);
+      if (!auto || !playing || seeking) {
+        this.goodFragments = 0;
+        this.slowFragments = 0;
+        return this.result(false);
+      }
 
       if (this.phase === 'startup' || this.phase === 'seeking') {
         if (this.warmStartedAt === null) this.warmStartedAt = now;
@@ -153,7 +165,7 @@
       this.presentedLevel = -1;
       this.goodFragments = 0;
       this.slowFragments = 0;
-      this.lastSampledFragment = null;
+      this.sampledFragments = new Set();
       this.trialLevel = -1;
       this.trialSuccesses = 0;
     }
