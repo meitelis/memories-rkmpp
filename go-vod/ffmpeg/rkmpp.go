@@ -188,9 +188,9 @@ func buildRKMPPArgs(s Spec) []string {
 	}
 	args = append(args, remoteInputArgs(s.Headers)...)
 	if RKMPPInputPaced(s) {
-		// Fill the player's buffer quickly on startup/seek, then follow its
-		// clock. Idle streams are still killed by the normal stream timeout.
-		args = append(args, "-readrate", "1", "-readrate_initial_burst", "18", "-readrate_catchup", "2")
+		// Produce faster than playback to refill a depleted buffer after a
+		// producer/network delay without suspending async MPP workers.
+		args = append(args, "-readrate", "1.5", "-readrate_initial_burst", "24", "-readrate_catchup", "3")
 	}
 	args = append(args, "-i", s.Input, "-copyts", "-fflags", "+genpts")
 
