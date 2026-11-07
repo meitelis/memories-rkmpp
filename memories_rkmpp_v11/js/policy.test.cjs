@@ -9,7 +9,8 @@ const step = (p, now, buffer, opts={}) => p.step({
   currentLevel:p.cap,requestAge:0,...opts,
 });
 const fragment = (p, level, opts={}) => p.onFragment({
-  level, duration:4, elapsedMs:1000, buffer:5, ...opts,
+  level, duration:4, elapsedMs:4100, transferMs:100, bytes:200000,
+  buffer:5, ...opts,
 });
 
 test('one startup bandwidth selection prefers Original when ready and affordable',()=>{
@@ -33,7 +34,7 @@ test('normal buffer sawtooth cannot promote a low rendition by itself',()=>{
   assert.equal(p.cap,0);
 });
 
-test('two completed fast segments upgrade a level that is actually playing',()=>{
+test('two completed paced segments over fast Wi-Fi upgrade the playing level',()=>{
   const p=new PlaybackPolicy(levels,800000,true);
   step(p,0,5);
   fragment(p,0);
@@ -67,7 +68,7 @@ test('two slow delivered segments downshift when buffer is shrinking',()=>{
   assert.equal(step(p,2000,3.5).cap,5);
 });
 
-test('one slow segment followed by a fast one never causes a downgrade',()=>{
+test('one slow segment followed by normally paced delivery never causes a downgrade',()=>{
   const p=new PlaybackPolicy(levels,50000000,true);
   step(p,0,5);
   for(let i=0;i<8;i++){
@@ -95,7 +96,7 @@ test('brief low buffer with a fast arriving fragment does not downshift',()=>{
     assert.equal(step(p,now,1.8,{requestAge:400}).cap,6);
 });
 
-test('failed upgrade requires stronger evidence rather than a blanket timeout',()=>{
+test('failed upgrade requires stronger network evidence rather than a blanket timeout',()=>{
   const p=new PlaybackPolicy(levels,800000,true);
   step(p,0,5);
   fragment(p,0);fragment(p,0);step(p,2000,5);
@@ -103,7 +104,7 @@ test('failed upgrade requires stronger evidence rather than a blanket timeout',(
   assert.equal(p.failures.get(1),1);
   step(p,5000,5,{currentLevel:0});
   for(let i=0;i<8;i++){
-    fragment(p,0,{elapsedMs:2700}); // ~1.48x real time is not enough to retry
+    fragment(p,0,{elapsedMs:4100,transferMs:1800}); // slow link cannot justify retry
     assert.equal(step(p,6000+i*500,5).cap,0);
   }
   for(let i=0;i<4;i++){
@@ -162,12 +163,46 @@ test('decoder cap and unavailable Original prevent unsafe quality selection',()=
   assert.equal(step(p,2000,5,{originalReady:false}).cap,2);
 });
 
-test('rate including producer time prevents upgrading when RKMPP only just keeps up',()=>{
+test('RKMPP pacing at 1x does not block a Wi-Fi quality upgrade',()=>{
+  const p=new PlaybackPolicy(levels,800000,true);
+  step(p,1000,5);
+  fragment(p,0,{elapsedMs:4100});fragment(p,0,{elapsedMs:4100});
+  assert.equal(step(p,2000,5).cap,1);
+});
+
+test('a genuinely slow producer cannot justify upgrading, despite fast network',()=>{
   const p=new PlaybackPolicy(levels,800000,true);
   step(p,1000,5);
   for(let i=0;i<12;i++){
-    fragment(p,0,{elapsedMs:3500});
+    fragment(p,0,{elapsedMs:6500});
     step(p,2000+i*500,5);
   }
   assert.equal(p.cap,0);
+});
+test('missing or tiny HTTP timing samples never falsely prove high bandwidth',()=>{
+  for(const sample of [
+    {transferMs:0,bytes:0},{transferMs:0,bytes:200000},
+    {transferMs:200,bytes:5000},{transferMs:-1,bytes:200000}
+  ]){
+    const p=new PlaybackPolicy(levels,800000,true);
+    step(p,1000,5);
+    for(let i=0;i<8;i++){
+      fragment(p,0,sample);
+      step(p,2000+i*500,5);
+    }
+    assert.equal(p.cap,0);
+  }
+});
+test('network improves after mobile traffic and climbs to Original with paced encoder',()=>{
+  const p=new PlaybackPolicy(levels,800000,true);
+  step(p,0,5);
+  for(let i=0;i<12;i++)fragment(p,0,{transferMs:2700});
+  assert.equal(step(p,1000,5).cap,0);
+  for(let i=1;i<=6;i++){
+    fragment(p,i-1,{elapsedMs:4100});
+    fragment(p,i-1,{elapsedMs:4100});
+    assert.equal(step(p,2000+i*5000,5,{currentLevel:i-1}).cap,i);
+    step(p,2500+i*5000,5,{currentLevel:i});
+  }
+  assert.equal(p.cap,6);
 });
