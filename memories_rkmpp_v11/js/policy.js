@@ -56,7 +56,7 @@
       }
 
       this.samples.push({now, buffer});
-      this.samples = this.samples.filter(s => now - s.now <= 4000);
+      this.samples = this.samples.filter(s => now - s.now <= 4500);
       const first = this.samples[0];
       const seconds = (now - first.now) / 1000;
       const trend = seconds >= 1 ? (buffer - first.buffer) / seconds : 0;
@@ -75,13 +75,16 @@
 
       // Sustained loss of playable buffer is the only reason to downshift.
       // Avoid overreacting to the normal three-second fragment sawtooth.
-      const danger = buffer < 0.5 ||
-        (buffer < 2.5 && (trend < -0.4 || requestAge > 1800));
+      // A fragment can consume 3-4s of buffer before the next arrives.
+      // Look for net depletion across that interval before downshifting early.
+      const sustainedDrain = seconds >= 4 && buffer < 4 && trend < -0.45;
+      const danger = buffer < 0.5 || sustainedDrain ||
+        (buffer < 2.5 && (trend < -0.25 || requestAge > 1800));
       if (!danger) this.dangerSince = null;
       else if (this.dangerSince === null) this.dangerSince = now;
 
       if (this.cap > 0 && this.dangerSince !== null &&
-          (buffer < 0.5 || now - this.dangerSince >= 1000) &&
+          (buffer < 0.5 || sustainedDrain || now - this.dangerSince >= 1000) &&
           now - this.lastChangeAt >= 2000) {
         this.cap = Math.max(0, this.cap - (buffer < 0.5 ? 2 : 1));
         this.phase = 'recovering';
@@ -101,7 +104,8 @@
       else if (this.healthySince === null) this.healthySince = now;
       if (this.healthySince !== null && now - this.healthySince >= 4000 &&
           now >= this.retryAfter && now - this.lastChangeAt >= 4000 &&
-          currentLevel >= this.cap && this.cap < limit) {
+          currentLevel >= this.cap && this.cap < limit &&
+          (seconds < 2 || trend >= -0.25)) {
         this.cap++;
         this.phase = 'normal';
         this.lastChangeAt = now;
