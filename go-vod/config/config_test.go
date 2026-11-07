@@ -163,8 +163,8 @@ func TestRKMPPEnvironmentResolvedAtStartup(t *testing.T) {
 	t.Setenv("MEMORIES_RKMPP", "0")
 	require.True(t, c.RKMPP)
 	require.Equal(t, "auto", c.RKMPPOutputCodec)
-	require.Equal(t, 2, c.GoalBufferMax)
-	require.Equal(t, 15, c.StreamIdleTime)
+	require.Equal(t, 5, c.GoalBufferMax)
+	require.Equal(t, 45, c.StreamIdleTime)
 	require.False(t, Defaults("test").RKMPP)
 }
 
