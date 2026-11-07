@@ -43,17 +43,28 @@
     onWaiting() { this.waiting = true; }
     onPlaying() { this.waiting = false; }
 
-    // Measure wall-clock delivery of playable video, including RKMPP work.
-    // Pure network bandwidth is not enough when segments are made on demand.
-    onFragment({level, duration, elapsedMs, buffer}) {
+    // Measure transport separately from RKMPP production. The hardware input
+    // uses -readrate 1: a sustainable encoder often takes ~4s for a 4s segment.
+    // HLS loader first/end timestamps isolate HTTP transfer from that pacing.
+    onFragment({level, duration, elapsedMs, transferMs, bytes, buffer}) {
       if (level !== this.cap || this.presentedLevel !== this.cap ||
           !(duration > 0 && elapsedMs > 0)) return;
-      const rate = duration * 1000 / elapsedMs;
-      const retry = (this.failures.get(this.cap + 1) || 0) > 0;
-      const good = rate >= (retry ? 2 : 1.4) && buffer >= 3;
-      this.goodFragments = good ? this.goodFragments + 1 : 0;
-      this.slowFragments = rate < 1 && buffer < 4 ? this.slowFragments + 1 : 0;
-      // Two sustainable fragments establish that this upgrade succeeded.
+      const productionRate = duration * 1000 / elapsedMs;
+      const next = this.cap + 1;
+      const failure = this.failures.get(next) || 0;
+      const nextBitrate = bitrate(this.levels[next]);
+      const networkBps = transferMs > 0 && bytes >= 16384
+        ? bytes * 8000 / Math.max(20, transferMs) : 0;
+      // Without a reliable transfer measurement, we cannot infer that Wi-Fi
+      // is faster merely because an on-demand encoder is keeping up.
+      const healthy = buffer >= 3 && productionRate >= 0.8 &&
+        networkBps >= nextBitrate * (failure ? 1.7 : 1.4);
+      this.goodFragments = healthy ? this.goodFragments + 1 : 0;
+      this.slowFragments = buffer < 4 && (
+        productionRate < 0.85 ||
+        (networkBps > 0 && networkBps < bitrate(this.levels[this.cap]) * 0.85)
+      ) ? this.slowFragments + 1 : 0;
+      // A successful trial needs continued sustainable playback, not a timer.
       if (this.trialLevel === this.cap && this.goodFragments >= 2) {
         this.trialLevel = -1;
       }
@@ -92,7 +103,7 @@
         const previous = this.cap;
         this.cap = Math.max(0, previous - (buffer < 0.5 ? 2 : 1));
         if (this.trialLevel === previous) {
-          this.failures.set(previous, (this.failures.get(previous) || 0) + 1);
+          this.failures.set(previous, Math.min(2, (this.failures.get(previous) || 0) + 1));
         }
         this.resetEvidence();
         this.phase = 'recovering';
@@ -100,11 +111,10 @@
         return this.result(true);
       }
 
-      // Don't try another rung until the current one is actually playing
-      // and has supplied two fast segments. After a failed trial, require
-      // more (and faster) evidence rather than an arbitrary long timeout.
+      // Only upgrade on repeated, measured network headroom and a sustainable
+      // producer; RKMPP's 1x input pacing is not itself slow Wi-Fi.
       const next = this.cap + 1;
-      const needed = Math.min(6, 2 + 2 * (this.failures.get(next) || 0));
+      const needed = Math.min(4, 2 + (this.failures.get(next) || 0));
       if (this.cap < limit && this.presentedLevel === this.cap &&
           this.goodFragments >= needed && buffer >= 3 && !this.waiting) {
         this.cap = next;
