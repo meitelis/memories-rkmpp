@@ -1,3 +1,11 @@
+# Draft PR #14 — native hls.js Auto acceptance pending (7 November 2026)
+
+This experimental update replaces the pinned custom quality policy with hls.js native Auto and adds a bounded connection-change recovery probe. Source tests/ARM64 packaging are necessary but not sufficient. **Do not treat the historical r9 measurements below as validation of this new player.**
+
+Must be observed on the phone's **browser** (not the native Android app): (1) full-resolution startup on Wi-Fi; (2) select 480p, return to Auto and measure time to the desired quality; (3) start on mobile, switch to Wi-Fi and measure recovery; (4) switch back to mobile without prolonged stalls; (5) Original/encoded switches and seeks preserving AAC continuity and presenting accurate dimensions. The browser's diagnostics must show `hlsAuto=true` after Auto selection. Record video stalls, resolution switches and buffer evolution. Hold merge until these outcomes are measured.
+
+---
+
 # Playback acceptance checkpoint: 5 November 2026
 
 Use real library videos as well as generated hardware tests. Keep private media, identifiers, paths, credentials and captures outside Git. Earlier implementation history is retained in prior commits.
