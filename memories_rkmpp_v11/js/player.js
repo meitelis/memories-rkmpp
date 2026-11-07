@@ -3,7 +3,7 @@
 
   const isOriginal = level => (Array.isArray(level?.url) ? level.url : [level?.url]).some(u => /\/direct\.m3u8(?:\?|$)/.test(u || ''));
 
-  const {PlaybackPolicy, chooseLevel, audioProfile} = typeof module !== 'undefined' && module.exports
+  const {PlaybackPolicy, chooseLevel} = typeof module !== 'undefined' && module.exports
     ? require('./policy.js') : window.MemoriesRkmppPolicy;
 
   function selectQuality(video, hls, id, state) {
@@ -19,11 +19,6 @@
     }
     video._qualitySelected = id;
     video.dispatchEvent(new CustomEvent('quality-selected'));
-  }
-
-  function selectAudio(hls, index, startup) {
-    if (startup) hls.audioTrack = index;
-    else hls.nextAudioTrack = index;
   }
 
   function beginSeek(state) {
@@ -55,7 +50,7 @@
   }
 
   if (typeof module !== 'undefined' && module.exports) {
-    module.exports = {chooseLevel, audioProfile, selectQuality, selectAudio, beginSeek, requestAge, renditionText, configure, update};
+    module.exports = {chooseLevel, selectQuality, beginSeek, requestAge, renditionText, configure, update};
   }
   const debug = typeof location !== 'undefined' && new URLSearchParams(location.search).has('rkmpp_debug');
   if (typeof document === 'undefined') return;
@@ -125,30 +120,6 @@
     finally { state.warming = false; }
   }
 
-  function setAudio(state, startup = false) {
-    if (!(state.bps > 0)) return;
-    startup = startup || !state.audioInitialized;
-    const desired = state.policy?.result(false).audio || audioProfile(state.bps);
-    const now = Date.now();
-    if (desired !== state.audioCandidate) {
-      state.audioCandidate = desired;
-      state.audioCandidateSince = now;
-    }
-    const current = state.audioProfile || 'audio';
-    const down = ['audio32','audio64','audio96','audio'].indexOf(desired) < ['audio32','audio64','audio96','audio'].indexOf(current);
-    if (!startup && (now - state.audioCandidateSince < (down ? 6000 : 25000) || now - state.audioChanged < 15000)) return;
-    const tracks = state.hls.audioTracks || [];
-    const index = tracks.findIndex(t => (t.url || '').split('?')[0].endsWith('/' + desired + '.m3u8'));
-    if (index >= 0 && state.hls.audioTrack !== index) {
-      selectAudio(state.hls, index, startup);
-      state.audioChanged = now;
-    }
-    if (index >= 0) {
-      state.audioProfile = desired;
-      state.audioInitialized = true;
-    }
-  }
-
   function configure(video, state, hls) {
     state.abort?.abort();
     clearTimeout(state.retryTimer);
@@ -157,7 +128,7 @@
     state.abort = new AbortController();
     state.selected = 'auto';
     state.seekLevel = null;
-    state.audioInitialized = false;
+    state.audioProfile = 'audio'; // One default shared AAC track for the whole session.
     state.inflight = null;
     state.decoderCap = Infinity;
     state.policy = null;
@@ -217,13 +188,11 @@
       // buffer health chooses renditions without encoder-rate contamination.
       hls.startLevel = state.cap;
       hls.loadLevel = state.cap;
-      setAudio(state, true);
       state.checking = false;
       state.badge.dataset.phase = 'loading';
       hls.startLoad();
     };
     listen(Events.MANIFEST_PARSED, start);
-    listen(Events.AUDIO_TRACKS_UPDATED, () => setAudio(state, state.checking));
     listen(Events.FRAG_LOADED, (_event, data) => {
       if (data.frag?.type !== 'main') return;
       if (state.inflight === data.frag) state.inflight = null;
@@ -239,7 +208,19 @@
       }
     });
     listen(Events.FRAG_BUFFERED, (_event, data) => {
-      if (state.debug && data.frag?.type === 'main') {
+      if (data.frag?.type !== 'main') return;
+      if (state.policy && state.selected === 'auto') {
+        const start = data.stats?.loading?.start || data.frag.stats?.loading?.start;
+        const elapsedMs = start > 0 ? Math.max(1, performance.now() - start) : 0;
+        const duration = data.frag.duration || data.frag.end - data.frag.start;
+        state.policy.onFragment({
+          level:data.frag.level, duration, elapsedMs, buffer:bufferAhead(video),
+        });
+        if (elapsedMs > 0 && duration > 0) {
+          state.badge.dataset.deliveryRate = (duration * 1000 / elapsedMs).toFixed(2);
+        }
+      }
+      if (state.debug) {
         state.fragmentTrace ||= [];
         const f = data.frag;
         state.fragmentTrace.push({time:video.currentTime,level:f.level,sn:f.sn,
@@ -278,16 +259,18 @@
     badge.className = 'mr-v11-status';
     badge.setAttribute('role', 'status');
     parent.appendChild(badge);
-    const state = {badge, debug, hls:null, decoderCap:Infinity, bps:0, audioChanged:0};
+    const state = {badge, debug, hls:null, decoderCap:Infinity, bps:0};
     const diagnostics = new AbortController();
     const metric = (name, fn) => video.addEventListener(name, fn, {signal:diagnostics.signal});
     metric('playing', () => {
+      state.policy?.onPlaying();
       state.hasPlayed = true;
       if (state.waitingAt) state.waitingMs = (state.waitingMs || 0) + Date.now() - state.waitingAt;
       state.waitingAt = 0;
     });
     metric('waiting', () => {
       if (!state.hasPlayed || video.seeking || video.paused || state.waitingAt) return;
+      state.policy?.onWaiting();
       state.waitingAt = Date.now();
       state.waitingCount = (state.waitingCount || 0) + 1;
     });
@@ -328,6 +311,8 @@
       const oldCap = state.cap;
       state.cap = action.cap;
       state.badge.dataset.phase = action.phase;
+      state.badge.dataset.goodFragments = String(state.policy.goodFragments);
+      state.badge.dataset.slowFragments = String(state.policy.slowFragments);
       if (state.selected === 'auto') {
         if (state.seekLevel != null && action.phase !== 'seeking') {
           state.seekLevel = null;
@@ -338,7 +323,6 @@
         }
         void warmOriginal(state);
       }
-      setAudio(state);
     }
     const text = state.failure || (state.checking ? 'Checking connection…' : renditionText(video, hls, state.selected));
     if (state.badge.textContent !== text) state.badge.textContent = text;
