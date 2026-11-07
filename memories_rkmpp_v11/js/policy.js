@@ -1,93 +1,177 @@
 (function (root) {
   'use strict';
   const bitrate = level => level?.bitrate || Number(level?.attrs?.BANDWIDTH) || Infinity;
-  const original = level => (Array.isArray(level?.url) ? level.url : [level?.url]).some(url => /\/direct\.m3u8(?:\?|$)/.test(url || ''));
+  const original = level => (Array.isArray(level?.url) ? level.url : [level?.url])
+    .some(url => /\/direct\.m3u8(?:\?|$)/.test(url || ''));
+
+  // The one startup connection probe determines the initial rendition.
   function chooseLevel(levels, bps, ready = true, limit = Infinity) {
     let best = 0;
-    levels.forEach((level, index) => {
-      if (index <= limit && (ready || !original(level)) && bitrate(level) <= bps * 0.72) best = index;
+    levels.forEach((level, i) => {
+      if (i <= limit && (ready || !original(level)) && bitrate(level) <= bps * 0.8) best = i;
     });
     return best;
   }
-  const audioProfile = bps => bps < 450000 ? 'audio32' : bps < 1000000 ? 'audio64' : bps < 4000000 ? 'audio96' : 'audio';
 
-  // Pure policy: no timers, network requests, DOM, or hls.js mutations.
-  // hls.js owns ordinary ABR. This policy gates startup and buffer rescue.
+  // Buffer fluctuations alone are not congestion evidence: a completed
+  // fragment proves whether the chosen rendition is sustainable in real time.
   class PlaybackPolicy {
     constructor(levels, initialBps, ready = false) {
       this.levels = levels;
-      this.phase = 'startup';
       this.bps = initialBps;
-      this.deliveryBps = initialBps;
-      this.latency = 200;
       this.cap = chooseLevel(levels, initialBps, ready);
-      this.networkCap = chooseLevel(levels, initialBps);
-      this.healthySince = null;
-      this.probeAt = 0;
+      this.phase = 'startup';
+      this.warmStartedAt = null;
+      this.presentedLevel = -1;
+      this.goodFragments = 0;
+      this.slowFragments = 0;
+      this.sampledFragments = new Set();
+      this.trialLevel = -1;
+      this.trialSuccesses = 0;
+      this.failures = new Map();
+      this.lastDownshiftAt = -Infinity;
+      this.waiting = false;
     }
-    sample(stats) {
-      // A cold seek includes producer startup, not just network delivery.
-      if (this.phase === 'seeking') return;
-      const load = stats?.loading;
-      if (!load || !stats.loaded || !(load.end > load.start)) return;
-      this.latency = Math.min(this.latency, Math.max(0, load.first - load.start));
-      const effectiveMs = Math.max(25, load.end - load.start - this.latency);
-      const rate = stats.loaded * 8000 / effectiveMs;
-      this.deliveryBps = rate < this.deliveryBps ? rate : Math.min(rate, this.deliveryBps * 2);
-    }
+
     beginSeek() {
       this.phase = 'seeking';
-      this.healthySince = null;
+      this.warmStartedAt = null;
+      this.presentedLevel = -1;
+      this.goodFragments = 0;
+      this.slowFragments = 0;
+      this.sampledFragments = new Set();
+      this.waiting = false;
+      this.trialLevel = -1;
+      this.trialSuccesses = 0;
     }
-    measured(bps, now, originalReady, decoderCap = Infinity) {
-      this.bps = this.deliveryBps = bps;
-      this.networkCap = chooseLevel(this.levels, bps);
-      this.cap = chooseLevel(this.levels, bps, originalReady, decoderCap);
-      this.healthySince = now;
-      this.probeAt = now + 15000;
+    onWaiting() {
+      this.waiting = true;
+      this.goodFragments = 0; // Never promote using evidence from before a stall.
     }
-    step({now, buffer, playing, seeking, auto, requestAge = 0, loaded = 0, originalReady = false, decoderCap = Infinity, targetBuffer = 18, currentLevel = this.cap}) {
+    onPlaying() { this.waiting = false; }
+
+    // Measure transport separately from RKMPP production. The hardware input
+    // uses -readrate 1: a sustainable encoder often takes ~4s for a 4s segment.
+    // HLS loader first/end timestamps isolate HTTP transfer from that pacing.
+    onFragment({level, sn, duration, elapsedMs, transferMs, bytes, buffer}) {
+      if (level !== this.cap || this.presentedLevel !== this.cap ||
+          !(duration > 0 && elapsedMs > 0)) return;
+      // hls.js can rebuffer or retry a completed fragment; don't count the
+      // same segment twice as independent evidence for a quality upgrade.
+      const key = Number.isInteger(sn) ? level + ':' + sn : null;
+      if (key && this.sampledFragments.has(key)) return;
+      if (key) {
+        this.sampledFragments.add(key);
+        if (this.sampledFragments.size > 32) {
+          this.sampledFragments.delete(this.sampledFragments.values().next().value);
+        }
+      }
+      const productionRate = duration * 1000 / elapsedMs;
+      const next = this.cap + 1;
+      const failure = this.failures.get(next) || 0;
+      const nextBitrate = bitrate(this.levels[next]);
+      const networkBps = transferMs > 0 && bytes >= 16384
+        ? bytes * 8000 / Math.max(20, transferMs) : 0;
+      // Without a reliable transfer measurement, we cannot infer that Wi-Fi
+      // is faster merely because an on-demand encoder is keeping up.
+      const healthy = buffer >= 3 && productionRate >= 0.8 &&
+        networkBps >= nextBitrate * (failure ? 1.7 : 1.4);
+      this.goodFragments = healthy ? this.goodFragments + 1 : 0;
+      this.slowFragments = buffer < 4 && (
+        productionRate < 0.85 ||
+        (networkBps > 0 && networkBps < bitrate(this.levels[this.cap]) * 0.85)
+      ) ? this.slowFragments + 1 : 0;
+      // A successful upgrade must sustain THIS level, not the next level.
+      // Original has no higher bitrate at all, so upgrade proof is distinct
+      // from the evidence required to attempt yet another upgrade.
+      if (this.trialLevel === this.cap) {
+        const sustainable = buffer >= 2.5 && productionRate >= 0.85 &&
+          networkBps >= bitrate(this.levels[this.cap]) * 1.1;
+        this.trialSuccesses = sustainable ? this.trialSuccesses + 1 : 0;
+        if (this.trialSuccesses >= 2) this.trialLevel = -1;
+      }
+    }
+
+    step({now, buffer, playing, seeking, auto, originalReady = false,
+          decoderCap = Infinity, requestAge = 0, currentLevel = -1}) {
       const originalIndex = this.levels.findIndex(original);
-      const limit = Math.min(decoderCap, originalReady || originalIndex < 0 ? this.levels.length - 1 : Math.max(0, originalIndex - 1));
-      let cancel = false;
-      let probe = false;
-      this.cap = Math.min(this.networkCap, limit);
-      const healthyBuffer = Math.min(10, targetBuffer * 0.6);
-      const criticalBuffer = Math.min(4, targetBuffer * 0.25);
-      if (!playing || !auto || (seeking && this.phase !== 'seeking')) {
-        this.healthySince = null;
-        return this.result(cancel);
+      const limit = Math.max(0, Math.min(decoderCap, originalReady || originalIndex < 0
+        ? this.levels.length - 1 : originalIndex - 1));
+      if (this.cap > limit) {
+        this.cap = limit;
+        this.resetEvidence();
+        return this.result(true);
       }
-      // A metadata-sized buffer is normal before playback has warmed up.
+      if (!auto || !playing || seeking) {
+        this.goodFragments = 0;
+        this.slowFragments = 0;
+        return this.result(false);
+      }
+
       if (this.phase === 'startup' || this.phase === 'seeking') {
-        if (buffer >= healthyBuffer) this.phase = 'normal';
-        else if (requestAge < 6000) return this.result(cancel);
+        if (this.warmStartedAt === null) this.warmStartedAt = now;
+        if (buffer < 2.5 && now - this.warmStartedAt < 6000) return this.result(false);
+        this.phase = 'normal';
       }
-      const endangered = (buffer < healthyBuffer && requestAge > 2000 && !loaded) || (buffer < criticalBuffer && requestAge > 1000);
-      if (endangered && (this.phase !== 'recovering' || this.cap > 0)) {
+      if (currentLevel === this.cap && this.presentedLevel !== this.cap) {
+        this.presentedLevel = this.cap;
+        this.goodFragments = 0;
+        this.slowFragments = 0;
+      }
+
+      // A non-flushing switch may take an entire buffered segment to appear.
+      // Do not queue another producer while the previous choice is pending,
+      // except when playback is already at the point of starvation.
+      if (currentLevel >= 0 && currentLevel !== this.cap &&
+          this.trialLevel !== this.cap && buffer >= 0.5) {
+        return this.result(false);
+      }
+
+      // Only threatened playback or repeated slow fragments justify going
+      // lower. A normal HLS buffer sawtooth never triggers a switch.
+      const danger = buffer < 0.5 ||
+        (buffer < 2.3 && requestAge >= 1400) ||
+        (this.waiting && buffer < 1.5) ||
+        (this.slowFragments >= 2 && buffer < 4);
+      if (this.cap > 0 && danger && now - this.lastDownshiftAt >= 2000) {
+        const previous = this.cap;
+        this.cap = Math.max(0, previous - (buffer < 0.5 ? 2 : 1));
+        if (this.trialLevel === previous) {
+          this.failures.set(previous, Math.min(2, (this.failures.get(previous) || 0) + 1));
+        }
+        this.resetEvidence();
         this.phase = 'recovering';
-        this.cap = 0;
-        this.networkCap = 0;
-        this.bps = Math.min(this.deliveryBps, bitrate(this.levels[0]) / 0.72);
-        this.healthySince = null;
-        cancel = true;
-      } else if (this.phase === 'recovering') {
-        if (this.cap === limit) this.phase = 'normal';
+        this.lastDownshiftAt = now;
+        return this.result(true);
       }
-      if (buffer < Math.min(6, healthyBuffer)) this.healthySince = null;
-      else if (this.healthySince === null) this.healthySince = now;
-      // A paced encoder can hold a request until the next segment exists.
-      // That wait cannot establish network capacity. Remeasure when a lower
-      // rendition has healthy buffers, including after weak-network startup.
-      if (currentLevel < limit && this.healthySince !== null && now - this.healthySince >= 10000 && now >= this.probeAt) {
-        this.probeAt = now + 15000;
-        probe = true;
+
+      // Only upgrade on repeated, measured network headroom and a sustainable
+      // producer; RKMPP's 1x input pacing is not itself slow Wi-Fi.
+      const next = this.cap + 1;
+      const needed = Math.min(4, 2 + (this.failures.get(next) || 0));
+      if (this.cap < limit && this.presentedLevel === this.cap &&
+          this.goodFragments >= needed && buffer >= 3 && !this.waiting) {
+        this.cap = next;
+        this.resetEvidence();
+        this.trialLevel = next;
+        this.phase = 'normal';
+        return this.result(true);
       }
-      return this.result(cancel, probe);
+      if (this.phase === 'recovering' && buffer >= 3) this.phase = 'normal';
+      return this.result(false);
     }
-    result(cancel, probe = false) { return {phase:this.phase, cap:this.cap, bps:this.bps, audio:audioProfile(this.bps), cancel, probe}; }
+
+    resetEvidence() {
+      this.presentedLevel = -1;
+      this.goodFragments = 0;
+      this.slowFragments = 0;
+      this.sampledFragments = new Set();
+      this.trialLevel = -1;
+      this.trialSuccesses = 0;
+    }
+    result(change) { return {phase:this.phase, cap:this.cap, bps:this.bps, change}; }
   }
-  const api = {PlaybackPolicy, chooseLevel, audioProfile};
+  const api = {PlaybackPolicy, chooseLevel};
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.MemoriesRkmppPolicy = api;
 })(typeof window === 'undefined' ? null : window);
