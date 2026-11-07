@@ -119,6 +119,47 @@ func TestStreamClearWakesInFlightSegmentRequest(t *testing.T) {
 	}
 }
 
+// Run() can prune old segment IDs while a request is still waiting for
+// FFmpeg to finish one. That request must not remain blocked after removal.
+func TestPrunePendingChunkWakesInFlightRequest(t *testing.T) {
+	s, _ := testStream(t)
+	chunk := NewChunk(3)
+	s.chunks[3] = chunk
+
+	oldWait := chunkWait
+	chunkWait = 3 * time.Second
+	defer func() { chunkWait = oldWait }()
+
+	started := make(chan struct{})
+	result := make(chan int, 1)
+	go func() {
+		close(started)
+		w := httptest.NewRecorder()
+		s.waitForChunk(w, chunk)
+		result <- w.Code
+	}()
+	<-started
+
+	s.mutex.Lock()
+	s.pruneChunk(3)
+	s.mutex.Unlock()
+
+	select {
+	case <-chunk.doneCh:
+		// The pending request is explicitly invalidated by pruning.
+	default:
+		t.Fatal("pruning did not wake its pending chunk")
+	}
+	require.NotContains(t, s.chunks, 3)
+
+	select {
+	case status := <-result:
+		require.Equal(t, http.StatusRequestTimeout, status)
+	case <-time.After(time.Second):
+		t.Fatal("pruned segment request remained blocked until chunkWait")
+	}
+}
+
 func TestWaitForChunkTimeout(t *testing.T) {
 	s, _ := testStream(t)
 	oldWait := chunkWait
