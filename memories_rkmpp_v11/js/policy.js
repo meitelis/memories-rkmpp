@@ -25,6 +25,7 @@
       this.presentedLevel = -1;
       this.goodFragments = 0;
       this.slowFragments = 0;
+      this.lastSampledFragment = null;
       this.trialLevel = -1;
       this.failures = new Map();
       this.lastDownshiftAt = -Infinity;
@@ -37,6 +38,7 @@
       this.presentedLevel = -1;
       this.goodFragments = 0;
       this.slowFragments = 0;
+      this.lastSampledFragment = null;
       this.waiting = false;
       this.trialLevel = -1;
     }
@@ -46,9 +48,14 @@
     // Measure transport separately from RKMPP production. The hardware input
     // uses -readrate 1: a sustainable encoder often takes ~4s for a 4s segment.
     // HLS loader first/end timestamps isolate HTTP transfer from that pacing.
-    onFragment({level, duration, elapsedMs, transferMs, bytes, buffer}) {
+    onFragment({level, sn, duration, elapsedMs, transferMs, bytes, buffer}) {
       if (level !== this.cap || this.presentedLevel !== this.cap ||
           !(duration > 0 && elapsedMs > 0)) return;
+      // hls.js can rebuffer or retry a completed fragment; don't count the
+      // same segment twice as independent evidence for a quality upgrade.
+      const key = Number.isInteger(sn) ? level + ':' + sn : null;
+      if (key && this.lastSampledFragment === key) return;
+      if (key) this.lastSampledFragment = key;
       const productionRate = duration * 1000 / elapsedMs;
       const next = this.cap + 1;
       const failure = this.failures.get(next) || 0;
@@ -131,6 +138,7 @@
       this.presentedLevel = -1;
       this.goodFragments = 0;
       this.slowFragments = 0;
+      this.lastSampledFragment = null;
       this.trialLevel = -1;
     }
     result(change) { return {phase:this.phase, cap:this.cap, bps:this.bps, change}; }
