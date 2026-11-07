@@ -253,7 +253,7 @@
       }
       if (!active()) return;
       state.policy = new PlaybackPolicy(hls.levels, state.bps, state.originalReady);
-      state.cap = state.policy.cap;
+      state.cap = state.policy.target;
       // One quality controller. hls.js schedules fragments and buffers, while
       // buffer health chooses renditions without encoder-rate contamination.
       hls.startLevel = state.cap;
