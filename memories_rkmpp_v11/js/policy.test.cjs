@@ -206,3 +206,35 @@ test('network improves after mobile traffic and climbs to Original with paced en
   }
   assert.equal(p.cap,6);
 });
+
+
+test('replayed out-of-order fragment callbacks cannot fabricate repeated upgrade evidence',()=>{
+  const p=new PlaybackPolicy(levels,800000,true);
+  step(p,0,5);
+  fragment(p,0,{sn:10});
+  assert.equal(p.goodFragments,1);
+  fragment(p,0,{sn:11});
+  assert.equal(p.goodFragments,2);
+  fragment(p,0,{sn:10});
+  fragment(p,0,{sn:11});
+  assert.equal(p.goodFragments,2);
+  assert.equal(step(p,2000,5).cap,1);
+  step(p,2500,5,{currentLevel:1});
+  fragment(p,1,{sn:12});
+  assert.equal(p.goodFragments,1);
+  fragment(p,1,{sn:12});
+  assert.equal(p.goodFragments,1);
+});
+test('waiting, pausing, and manual selection discard stale promotion evidence',()=>{
+  for(const interruption of ['waiting','paused','manual']){
+    const p=new PlaybackPolicy(levels,800000,true);
+    step(p,0,5);
+    fragment(p,0,{sn:1});
+    assert.equal(p.goodFragments,1);
+    if(interruption==='waiting'){p.onWaiting();p.onPlaying()}
+    if(interruption==='paused')step(p,1000,5,{playing:false});
+    if(interruption==='manual')step(p,1000,5,{auto:false});
+    assert.equal(p.goodFragments,0);
+    assert.equal(step(p,1500,5).cap,0);
+  }
+});
