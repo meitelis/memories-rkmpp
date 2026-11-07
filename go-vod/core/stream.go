@@ -108,6 +108,11 @@ func (s *Stream) clear() {
 	log.Printf("%s-%s: stopping stream", s.m.id, s.quality)
 
 	for _, chunk := range s.chunks {
+		// Requests waiting for these segments must not sleep until chunkWait
+		// after a seek, rendition restart, or stream teardown.
+		if !chunk.done {
+			chunk.signal(false)
+		}
 		os.Remove(s.getSegmentPath(chunk.id))
 	}
 
@@ -343,7 +348,9 @@ func (s *Stream) waitForChunk(w http.ResponseWriter, chunk *Chunk) {
 	s.mutex.Lock()
 	current, ok := s.chunks[chunk.id]
 	finished := ok && current.done
-	restarted := coder != s.coder && s.coder != nil
+	// A stopped stream is also a replaced producer: return immediately
+	// instead of reporting a slow segment on the obsolete run.
+	restarted := coder != s.coder
 	s.mutex.Unlock()
 
 	if finished {
