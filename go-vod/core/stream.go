@@ -303,6 +303,12 @@ func (s *Stream) createChunk(id int) *Chunk {
 }
 
 func (s *Stream) pruneChunk(id int) {
+	// Called under s.mutex. Removing a pending segment must wake the HTTP
+	// request waiting on it; otherwise it sleeps until chunkWait even though
+	// this chunk can no longer be completed by the active stream.
+	if chunk, ok := s.chunks[id]; ok && !chunk.done {
+		chunk.signal(false)
+	}
 	delete(s.chunks, id)
 
 	// Remove file
