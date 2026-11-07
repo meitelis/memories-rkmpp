@@ -10,7 +10,15 @@
     const option = id === 'auto' ? null : video.qualityList?.find(o => o.id === id);
     if (id !== 'auto' && !Number.isInteger(option?.index)) return;
     const level = id === 'auto' ? -1 : option.index;
-    // Conservative quality selection: do not flush already-buffered video.
+    if (state) {
+      if (id === 'auto' && state.selected !== 'auto' && state.policy) {
+        state.policy.resumeAuto(state.manualLevel);
+        state.cap = state.policy.cap;
+      }
+      state.selected = id;
+      state.manualLevel = id === 'auto' ? null : level;
+    }
+    // Preserve already-playable pictures and the shared audio track.
     hls.loadLevel = level < 0 && state?.policy ? state.policy.cap : level;
     if (state) {
       state.switchAt = level < 0 || hls.currentLevel === level ? 0 : Date.now();
@@ -106,7 +114,7 @@
     return estimate || 750000;
   }
 
-  async function warmOriginal(state, force = false) {
+  async function warmOriginal(state, force = false, maxWaitMs = 1200) {
     const hls = state.hls;
     const session = state.abort;
     const level = hls.levels.find(isOriginal);
@@ -114,16 +122,23 @@
         (!force && Date.now() - state.lastWarm < 5000)) return;
     state.warming = true;
     state.lastWarm = Date.now();
+    // A session abort alone is not a timeout; bound every playlist preflight.
+    const request = new AbortController();
+    const onAbort = () => request.abort();
+    session.signal.addEventListener('abort', onAbort, {once:true});
+    const timeout = setTimeout(() => request.abort(), Math.max(1, maxWaitMs));
     try {
       const url = Array.isArray(level.url) ? level.url[0] : level.url;
-      const response = await fetch(url, {cache:'no-store', signal:session.signal});
-      // An old playlist preflight must never mark a replacement session ready.
-      if (state.abort === session && state.hls === hls && !session.signal.aborted) {
+      const response = await fetch(url, {cache:'no-store', signal:request.signal});
+      // Playlist availability does not establish hardware decoder support.
+      if (state.abort === session && state.hls === hls && !session.signal.aborted && !request.signal.aborted) {
         state.originalReady = response.ok;
       }
-      await response.body?.cancel();
-    } catch { /* Retry later without blocking playback. */ }
+      if (response.body) void response.body.cancel().catch(() => {});
+    } catch { /* A slow/aborted playlist must not delay startup indefinitely. */ }
     finally {
+      clearTimeout(timeout);
+      session.signal.removeEventListener('abort', onAbort);
       if (state.abort === session) state.warming = false;
     }
   }
@@ -137,6 +152,8 @@
     const session = state.abort;
     state.warming = false;
     state.selected = 'auto';
+    state.manualLevel = null;
+    state.decoderCapUntil = 0;
     state.seekLevel = null;
     state.audioProfile = 'audio'; // One default shared AAC track for the whole session.
     state.inflight = null;
@@ -158,13 +175,13 @@
     if (Object.getOwnPropertyDescriptor(video, 'currentQuality')?.configurable) {
       Object.defineProperty(video, 'currentQuality', {
         configurable:true, get:() => state.selected,
-        set:id => { state.seekLevel = null; state.selected = id; selectQuality(video, hls, id, state); },
+        set:id => { state.seekLevel = null; selectQuality(video, hls, id, state); },
       });
     }
     Object.assign(hls.config, {
       autoStartLoad:false, startFragPrefetch:false,
-      // Six seconds at startup and during playback; also bound high-bitrate bytes.
-      maxBufferLength:6, maxBufferSize:48*1024*1024, maxMaxBufferLength:6, backBufferLength:3,
+      // Keep a practical mobile reserve while capping high-bitrate memory use.
+      maxBufferLength:18, maxBufferSize:96*1024*1024, maxMaxBufferLength:18, backBufferLength:8,
       capLevelOnFPSDrop:true, fpsDroppedMonitoringThreshold:0.2,
     });
     // stopLoad also aborts an in-flight manifest in hls.js 1.7. Wait for
@@ -189,8 +206,11 @@
       if (isOriginal(hls.levels[chooseLevel(hls.levels, state.bps)])) {
         const deadline = Date.now() + 1500;
         while (!state.originalReady && Date.now() < deadline && active()) {
-          await warmOriginal(state, true);
-          if (!state.originalReady) await new Promise(resolve => setTimeout(resolve, 150));
+          const remaining = deadline - Date.now();
+          if (remaining <= 0) break;
+          await warmOriginal(state, true, Math.min(1200, remaining));
+          if (!state.originalReady && active())
+            await new Promise(resolve => setTimeout(resolve, Math.min(150, Math.max(1, deadline - Date.now()))));
         }
       }
       if (!active()) return;
@@ -261,7 +281,12 @@
       state.retries = 0;
       clearTimeout(state.retryTimer);
     });
-    listen(Events.FPS_DROP_LEVEL_CAPPING, (_event, data) => { state.decoderCap = data.level >= 0 ? data.level : Infinity; });
+    listen(Events.FPS_DROP_LEVEL_CAPPING, (_event, data) => {
+      // Retry higher qualities after a stable interval; fresh FPS drops
+      // refresh the temporary cap rather than stranding Auto forever.
+      state.decoderCap = data.level >= 0 ? data.level : Infinity;
+      state.decoderCapUntil = data.level >= 0 ? Date.now() + 45000 : 0;
+    });
     listen(Events.ERROR, (_event, data) => {
       if (data.frag && state.inflight === data.frag) state.inflight = null;
       state.badge.dataset.lastError = data.details || '';
@@ -331,6 +356,10 @@
     if (hls && state.hls !== hls) configure(video, state, hls);
     const buffer = bufferAhead(video);
     const now = Date.now();
+    if (state.decoderCapUntil && now >= state.decoderCapUntil) {
+      state.decoderCap = Infinity;
+      state.decoderCapUntil = 0;
+    }
     if (hls && state.policy && !state.checking) {
       const action = state.policy.step({
         now, buffer, playing:!video.paused && !video.ended, seeking:video.seeking,
