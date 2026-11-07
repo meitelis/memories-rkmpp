@@ -1,0 +1,52 @@
+name: Memories RKMPP Android native quality
+on:
+  push:
+    paths: ['android-v11/**', 'memories_rkmpp_v11/css/player.css', '.github/workflows/v11-android.yml']
+  pull_request:
+    paths: ['android-v11/**', 'memories_rkmpp_v11/css/player.css', '.github/workflows/v11-android.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  apk:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Checkout pinned upstream Android source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: pulsejet/memories
+          ref: e156f850ec5514433f1cfac9d4f1dbd461500c8d
+          path: android-upstream
+          persist-credentials: false
+      - name: Check bridge and apply native integration
+        run: |
+          node --test android-v11/native-video.test.cjs
+          sh -n android-v11/apply.sh
+          sh android-v11/apply.sh "$GITHUB_WORKSPACE/android-upstream"
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+          cache-dependency-path: android-upstream/android/**/*.gradle*
+      - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd
+        with:
+          packages: ''
+      - name: Install Android SDK
+        run: sdkmanager "platforms;android-37.2" "build-tools;36.0.0"
+      - name: Compile APK and run native policy tests
+        working-directory: android-upstream/android
+        run: ./gradlew testDebugUnitTest assembleDebug --console=plain
+      - name: Upload installable APK and test reports
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: memories-rkmpp-android-media3
+          path: |
+            android-upstream/android/app/build/outputs/apk/debug/*.apk
+            android-upstream/android/app/build/reports/tests/testDebugUnitTest/
+          retention-days: 30
