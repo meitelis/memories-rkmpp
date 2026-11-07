@@ -92,8 +92,9 @@ test('request age uses the monotonic loader clock',()=>{
 test('startup still uses one bounded probe and a six-second forward buffer',async()=>{
   const f=fixture();await boot(f);
   try{
-    assert.equal(f.hls.config.maxBufferLength,6);
-    assert.equal(f.hls.config.maxMaxBufferLength,6);
+    assert.equal(f.hls.config.maxBufferLength,18);
+    assert.equal(f.hls.config.maxMaxBufferLength,18);
+    assert.equal(f.hls.config.maxBufferSize,96*1024*1024);
     assert.equal(f.hls.config.autoStartLoad,false);
     assert.equal(f.hls.started,true);
     assert.equal(f.hls.loadLevel,0);
@@ -152,6 +153,44 @@ test('waiting with almost no buffer can still trigger immediate downshift',async
     update(f.video,f.state);
     assert.equal(f.state.policy.cap,1);
     assert.equal(f.hls.loadLevel,1);
+  }finally{f.state.abort.abort()}
+});
+
+test('returning from manual quality to Auto resets stale evidence and starts at safe rung',async()=>{
+  const f=fixture();await boot(f);
+  try{
+    f.video.qualityList=[{id:'720:800000',index:1}];
+    f.state.policy.cap=2;f.state.cap=2;
+    f.state.policy.phase='normal';f.state.policy.goodFragments=2;
+    selectQuality(f.video,f.hls,'720:800000',f.state);
+    assert.equal(f.state.selected,'720:800000');
+    selectQuality(f.video,f.hls,'auto',f.state);
+    assert.equal(f.state.selected,'auto');
+    assert.equal(f.state.policy.cap,1,'Auto cannot jump to stale 1080p policy');
+    assert.equal(f.hls.loadLevel,1);
+    assert.equal(f.state.policy.goodFragments,0);
+    assert.equal(f.state.policy.phase,'startup');
+  }finally{f.state.abort.abort()}
+});
+
+test('invalid manual quality does not corrupt the selected Auto state',async()=>{
+  const f=fixture();await boot(f);
+  try{
+    selectQuality(f.video,f.hls,'not-a-real-quality',f.state);
+    assert.equal(f.state.selected,'auto');
+  }finally{f.state.abort.abort()}
+});
+
+test('FPS-drop decoder limit expires if no further FPS drops occur',async()=>{
+  const f=fixture();await boot(f);
+  try{
+    f.emit('FPS_DROP_LEVEL_CAPPING',{level:1});
+    assert.equal(f.state.decoderCap,1);
+    assert.ok(f.state.decoderCapUntil>Date.now());
+    f.state.decoderCapUntil=Date.now()-1;
+    update(f.video,f.state);
+    assert.equal(f.state.decoderCap,Infinity);
+    assert.equal(f.state.decoderCapUntil,0);
   }finally{f.state.abort.abort()}
 });
 
@@ -261,6 +300,35 @@ test('a late Original response cannot mark the replacement session ready',async(
     assert.equal(old.state.originalReady,false);
   } finally {
     old.state.abort?.abort();
+    if(oldWindow===undefined)delete global.window;else global.window=oldWindow;
+    global.fetch=oldFetch;
+  }
+});
+
+test('hanging Original playlist preflight cannot block startup past its deadline',async()=>{
+  const oldWindow=global.window,oldFetch=global.fetch;
+  const f=fixture();let aborted=0;
+  global.window={OC:{generateUrl:()=>'/probe'}};
+  global.fetch=(url,options={})=>{
+    if(String(url).includes('/direct.m3u8')){
+      return new Promise((_resolve,reject)=>{
+        options.signal.addEventListener('abort',()=>{
+          aborted++;reject(new Error('simulated network timeout'));
+        },{once:true});
+      });
+    }
+    return Promise.resolve({ok:false,headers:{get:()=>''}});
+  };
+  try{
+    configure(f.video,f.state,f.hls);
+    f.hls.levels=[{bitrate:450000,width:640,height:360,url:['/direct.m3u8']}];
+    const started=Date.now();
+    await f.emit('MANIFEST_PARSED');
+    assert.ok(Date.now()-started<2100,'Original preflight exceeded bounded startup budget');
+    assert.ok(aborted>=1,'hanging preflight must be aborted');
+    assert.equal(f.hls.started,true);
+  }finally{
+    f.state.abort?.abort();
     if(oldWindow===undefined)delete global.window;else global.window=oldWindow;
     global.fetch=oldFetch;
   }
