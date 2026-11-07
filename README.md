@@ -4,7 +4,7 @@ Hardware transcoding for **Nextcloud Memories 11.0.2 / go-vod 0.7.0**, tested on
 
 The server requires hardware video processing: MPP decoding/encoding, RGA scaling/rotation and Mali HDR-to-SDR mapping. Unsupported video fails explicitly instead of silently using CPU video processing. Compatible SDR AVC/HEVC originals use stream copy. Audio is shared across video qualities; the browser keeps one default audio track during video quality changes.
 
-The browser helper measures connection speed once before startup and selects an affordable initial rendition, preferring compatible Original. After startup, one quality controller uses actual completed HLS fragments and transfer headroom to try one higher quality at a time. It reduces quality when delivered segments are unsustainable or playback is approaching starvation; ordinary fragment-sized buffer oscillations do not force changes. hls.js retains fragment scheduling, a 18-second buffer target and network error handling; switching uses conservative non-flushing quality selection. Paced encoder delivery does not masquerade as Internet speed. The browser badge shows the presented dimensions.
+The browser helper uses **hls.js native ABR** for Auto quality: hls.js selects each rendition, responds to buffer starvation and adapts as transfer bandwidth changes. Manual choices pin a rendition; reselecting Auto restores `loadLevel = -1` instead of pinning another resolution. A bounded same-origin probe seeds the initial bandwidth estimator; a new probe on supported network-change events, manual-to-Auto reentry or occasional low-quality recovery reseeds that estimator. FFmpeg's on-demand segment-production delay is measured separately from network transfer so it cannot perpetually masquerade as poor Internet speed. An 18-second forward buffer and 96 MiB cap provide headroom. Original stays available when compatible; its playlist may need a short background copy-grid preflight. The playback badge reports the actual presented dimensions.
 
 ## Playback flow
 
@@ -24,10 +24,10 @@ flowchart LR
     V --> N
     A --> N
     N -->|"HLS video + independent audio"| P
-    B["One startup speed check + fragment delivery evidence"] -->|"select quality"| P
+    B["hls.js ABR + bounded connection measurements"] -->|"select quality"| P
 ```
 
-Only requested renditions start workers. The player prefers compatible Original when the one-time startup estimate permits it, then learns from delivered fragments and short-term buffer safety rather than repeated synthetic probes. Audio has its own shared timeline and the browser does not automatically switch audio profiles during video changes. SDR skips HDR tone mapping. The native Android client is a separate integration.
+Only requested renditions start workers. The native hls.js estimator uses regular fragment data, with connection-change and low-quality recovery probes as safeguards; hls.js itself chooses the levels. Audio has its own shared timeline and the browser does not automatically change audio profiles during video quality changes. SDR skips HDR tone mapping. Native Android (ExoPlayer) and Safari native HLS are separate clients and are not changed by this browser helper.
 
 High audio is 192 kbps AAC when encoding, or the existing source bitrate when compatible AAC can be copied (up to 320 kbps). Lower profiles are 96, 64 and 32 kbps.
 
