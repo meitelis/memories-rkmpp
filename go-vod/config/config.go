@@ -79,8 +79,10 @@ func Defaults(version string) *Config {
 		},
 	}
 	if c.RKMPP {
-		c.GoalBufferMax = 2
-		c.StreamIdleTime = 15
+		// Allow the browser to build a multi-segment forward reserve.
+		// Retain the worker through the gap while a full buffer is consumed.
+		c.GoalBufferMax = 5
+		c.StreamIdleTime = 45
 	}
 	return c
 }
