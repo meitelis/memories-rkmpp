@@ -12,7 +12,7 @@
     const level = id === 'auto' ? -1 : option.index;
     if (state) {
       if (id === 'auto' && state.selected !== 'auto' && state.policy) {
-        state.policy.resumeAuto(state.manualLevel);
+        state.policy.resumeAuto?.(state.manualLevel);
         state.cap = state.policy.cap;
       }
       state.selected = id;
