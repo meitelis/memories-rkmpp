@@ -86,17 +86,16 @@ test('ordinary downshift has no blanket 45-second upgrade ban',()=>{
   assert.equal(p.cap,6);
 });
 
-test('failed recent upshift has a bounded 10-second cooldown',()=>{
+test('failed recent upshift delays its retry exactly ten seconds',()=>{
   const p=new PlaybackPolicy(levels,800000,true);
   tick(p,1000,6);
   for(let now=1500;now<=6500;now+=500)tick(p,now,5);
   assert.equal(p.cap,1);
-  tick(p,7000,2,{requestAge:2500});
+  assert.equal(tick(p,7000,2,{requestAge:2500}).cap,0);
   assert.equal(tick(p,8500,1.5,{requestAge:3500}).cap,0);
-  for(let now=9000;now<=17000;now+=500)tick(p,now,5);
+  for(let now=9000;now<=16500;now+=500)tick(p,now,5);
   assert.equal(p.cap,0);
-  for(let now=17500;now<=21000;now+=500)tick(p,now,5);
-  assert.ok(p.cap>=1);
+  assert.equal(tick(p,17000,5).cap,1);
 });
 
 test('do not queue a second upshift until the previous rendition is playing',()=>{
@@ -173,4 +172,49 @@ test('quality control exits startup with three seconds but retains six-second bu
   const p=new PlaybackPolicy(levels,30000000,true);
   assert.equal(tick(p,1000,3.5).phase,'normal');
   assert.equal(tick(p,1500,2.8).cap,6);
+});
+
+test('depletion without new fragments downshifts at two seconds remaining',()=>{
+  const p=new PlaybackPolicy(levels,400000000,true);
+  for(let now=1000;now<5000;now+=500)
+    assert.equal(tick(p,now,6-(now-1000)/1000).cap,6);
+  assert.equal(tick(p,5000,2).cap,5);
+});
+test('four-second HLS segment sawtooth never downshifts, including clock offsets',()=>{
+  for(const offset of [0,125,250,375]){
+    const p=new PlaybackPolicy(levels,400000000,true);
+    for(let now=1000+offset;now<=21000;now+=500) {
+      const buffer=6-(((now-1000)/1000)%4);
+      assert.equal(tick(p,now,buffer).cap,6);
+    }
+  }
+});
+test('slow persistent depletion prompts a downshift before exhaustion',()=>{
+  const p=new PlaybackPolicy(levels,400000000,true);
+  let first=null;
+  for(let now=1000;now<=15000;now+=500) {
+    const buffer=6-(now-1000)/2500;
+    const action=tick(p,now,buffer);
+    if(first===null && action.cap<6)first={now,buffer};
+  }
+  assert.ok(first && first.buffer>=1.5);
+});
+test('do not upgrade just because a buffer is above three seconds while falling',()=>{
+  const p=new PlaybackPolicy(levels,800000,true);
+  for(let now=1000;now<=7000;now+=500) {
+    const buffer=6-(now-1000)*0.00035;
+    assert.equal(tick(p,now,buffer).cap,0);
+  }
+});
+test('WiFi recovery still climbs from mobile quality to Original',()=>{
+  const p=new PlaybackPolicy(levels,800000,true);
+  tick(p,1000,6);
+  for(let now=1500;now<=65000;now+=500)
+    tick(p,now,3.1+2.9*(now%3000)/3000);
+  assert.equal(p.cap,6);
+});
+test('transient low buffer refill must not trigger a downgrade',()=>{
+  const p=new PlaybackPolicy(levels,400000000,true);
+  for(const [now,buffer] of [[1000,6],[2000,5],[3000,4],[3500,3.5],[4000,6],[4500,5.5]])
+    assert.equal(tick(p,now,buffer,{requestAge:2000}).cap,6);
 });
