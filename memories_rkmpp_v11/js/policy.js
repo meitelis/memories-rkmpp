@@ -31,6 +31,16 @@
       this.failures = new Map();
       this.lastDownshiftAt = -Infinity;
       this.waiting = false;
+      this.recoveryEstimate = null;
+    }
+
+    // A new connection sample is independent of FFmpeg's paced delivery.
+    // Consume each sample at most once: it authorizes a cautious one-rung
+    // recovery trial, not an immediate jump to Original.
+    offerNetworkEstimate(bps, now) {
+      if (Number.isFinite(bps) && bps > 0 && Number.isFinite(now)) {
+        this.recoveryEstimate = {bps, at:now};
+      }
     }
 
     // Manual playback provides no samples for the Auto policy. Resume
@@ -158,9 +168,25 @@
         return this.result(true);
       }
 
-      // Only upgrade on repeated, measured network headroom and a sustainable
-      // producer; RKMPP's 1x input pacing is not itself slow Wi-Fi.
+      // After switching from cellular to Wi-Fi, already-cached low-quality
+      // segments may provide no new transfer samples for a long time. A fresh
+      // same-origin connection probe can safely try ONE higher rendition.
       const next = this.cap + 1;
+      const probe = this.recoveryEstimate;
+      if (this.cap < limit && this.presentedLevel === this.cap &&
+          probe && now - probe.at >= 0 && now - probe.at <= 15000 &&
+          probe.bps >= bitrate(this.levels[next]) * 1.6 &&
+          buffer >= 4 && !this.waiting && now - this.lastDownshiftAt >= 5000) {
+        this.cap = next;
+        this.resetEvidence();
+        this.trialLevel = next;
+        this.recoveryEstimate = null;
+        this.phase = 'normal';
+        return this.result(true);
+      }
+
+      // Otherwise require repeated fragment transfer/producer evidence;
+      // RKMPP's 1x input pacing is not itself slow Wi-Fi.
       const needed = Math.min(4, 2 + (this.failures.get(next) || 0));
       if (this.cap < limit && this.presentedLevel === this.cap &&
           this.goodFragments >= needed && buffer >= 3 && !this.waiting) {
