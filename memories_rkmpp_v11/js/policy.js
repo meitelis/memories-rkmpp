@@ -27,6 +27,7 @@
       this.slowFragments = 0;
       this.lastSampledFragment = null;
       this.trialLevel = -1;
+      this.trialSuccesses = 0;
       this.failures = new Map();
       this.lastDownshiftAt = -Infinity;
       this.waiting = false;
@@ -41,6 +42,7 @@
       this.lastSampledFragment = null;
       this.waiting = false;
       this.trialLevel = -1;
+      this.trialSuccesses = 0;
     }
     onWaiting() { this.waiting = true; }
     onPlaying() { this.waiting = false; }
@@ -71,9 +73,14 @@
         productionRate < 0.85 ||
         (networkBps > 0 && networkBps < bitrate(this.levels[this.cap]) * 0.85)
       ) ? this.slowFragments + 1 : 0;
-      // A successful trial needs continued sustainable playback, not a timer.
-      if (this.trialLevel === this.cap && this.goodFragments >= 2) {
-        this.trialLevel = -1;
+      // A successful upgrade must sustain THIS level, not the next level.
+      // Original has no higher bitrate at all, so upgrade proof is distinct
+      // from the evidence required to attempt yet another upgrade.
+      if (this.trialLevel === this.cap) {
+        const sustainable = buffer >= 2.5 && productionRate >= 0.85 &&
+          networkBps >= bitrate(this.levels[this.cap]) * 1.1;
+        this.trialSuccesses = sustainable ? this.trialSuccesses + 1 : 0;
+        if (this.trialSuccesses >= 2) this.trialLevel = -1;
       }
     }
 
@@ -148,6 +155,7 @@
       this.slowFragments = 0;
       this.lastSampledFragment = null;
       this.trialLevel = -1;
+      this.trialSuccesses = 0;
     }
     result(change) { return {phase:this.phase, cap:this.cap, bps:this.bps, change}; }
   }
