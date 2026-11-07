@@ -81,7 +81,7 @@
         // Continue the bounded larger sample; the overall timer limits cost
         // even on a genuinely slow link.
       }
-    } catch { /* Timeout uses partial bytes; unavailable probe starts low. */ }
+    } catch { /* Network failures or timeouts retain the last complete sample. */ }
     finally {
       clearTimeout(timer);
       signal.removeEventListener('abort', onAbort);
