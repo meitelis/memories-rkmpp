@@ -17,6 +17,8 @@
       state.switchLevel = level;
       delete state.badge.dataset.switchMs;
     }
+    // The native Memories quality hook also listens for HLS level changes.
+    // Keep its displayed selection consistent with our one Auto controller.
     video._qualitySelected = id;
     video.dispatchEvent(new CustomEvent('quality-selected'));
   }
@@ -202,6 +204,12 @@
       if (data.frag?.type === 'main') state.inflight = data.frag;
     });
     listen(Events.LEVEL_SWITCHED, (_event, data) => {
+      // Memories' built-in hook treats manually pinned hls.loadLevel as
+      // "manual", even when the UI user has selected our adaptive Auto.
+      if (video._qualitySelected !== state.selected) {
+        video._qualitySelected = state.selected;
+        video.dispatchEvent(new CustomEvent('quality-selected'));
+      }
       if (data.level === state.switchLevel && state.switchAt) {
         state.badge.dataset.switchMs = String(Date.now() - state.switchAt);
         state.switchAt = 0;
@@ -210,14 +218,24 @@
     listen(Events.FRAG_BUFFERED, (_event, data) => {
       if (data.frag?.type !== 'main') return;
       if (state.policy && state.selected === 'auto') {
-        const start = data.stats?.loading?.start || data.frag.stats?.loading?.start;
-        const elapsedMs = start > 0 ? Math.max(1, performance.now() - start) : 0;
+        const stats = data.stats || data.frag.stats;
+        const loading = stats?.loading;
+        const elapsedMs = loading?.start > 0
+          ? Math.max(1, performance.now() - loading.start) : 0;
+        // Only first-byte -> final-byte represents network transfer.
+        // Request start -> first byte can include RKMPP's paced encoding.
+        const transferMs = loading?.first > 0 && loading?.end > loading.first
+          ? loading.end - loading.first : 0;
+        const bytes = stats?.loaded || 0;
         const duration = data.frag.duration || data.frag.end - data.frag.start;
         state.policy.onFragment({
-          level:data.frag.level, duration, elapsedMs, buffer:bufferAhead(video),
+          level:data.frag.level, duration, elapsedMs, transferMs, bytes,
+          buffer:bufferAhead(video),
         });
         if (elapsedMs > 0 && duration > 0) {
           state.badge.dataset.deliveryRate = (duration * 1000 / elapsedMs).toFixed(2);
+          state.badge.dataset.transferMbps = transferMs > 0
+            ? (bytes * 8 / (transferMs * 1000)).toFixed(2) : '';
         }
       }
       if (state.debug) {
@@ -234,6 +252,7 @@
     });
     listen(Events.FPS_DROP_LEVEL_CAPPING, (_event, data) => { state.decoderCap = data.level >= 0 ? data.level : Infinity; });
     listen(Events.ERROR, (_event, data) => {
+      if (data.frag && state.inflight === data.frag) state.inflight = null;
       state.badge.dataset.lastError = data.details || '';
       if (!data.fatal) return;
       state.badge.dataset.fatalError = `${data.type || ''}:${data.details || ''}:${data.response?.code || ''}`;
