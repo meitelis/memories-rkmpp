@@ -10,7 +10,10 @@
     if (id !== 'auto' && !Number.isInteger(option?.index)) return;
     const level = id === 'auto' ? -1 : option.index;
     const returning = id === 'auto' && state?.selected !== 'auto';
-    if (state) state.selected = id;
+    if (state) {
+      if (state.selected !== id) state.networkSamples = [];
+      state.selected = id;
+    }
     // Never pin Auto to a ladder index; -1 restores the native ABR.
     hls.loadLevel = level;
     if (returning) void refreshBandwidth(state, true);
@@ -46,6 +49,7 @@
   async function speedProbe(signal, sizes = [65536, 393216, 1572864]) {
     // Same TLS connection/path as playback. Random data cannot be compressed
     // or cached into an unrealistically fast result. Bound startup and traffic.
+    if (signal.aborted) return 0;
     const abort = new AbortController();
     const onAbort = () => abort.abort();
     signal.addEventListener('abort', onAbort, {once: true});
@@ -304,7 +308,7 @@
     metric('seeked', () => { badge.dataset.seekMs = String(Date.now() - state.seekAt); });
     attached.set(video, state);
     // Network Information API is optional (notably absent on some iPhones).
-    // Visibility/online hints and a 30s low-rendition fallback cover clients
+    // Visibility/online hints and a 20s low-rendition fallback cover clients
     // that do not report a cellular-to-Wi-Fi connection change.
     const connection = typeof navigator !== 'undefined'
       ? (navigator.connection || navigator.mozConnection || navigator.webkitConnection) : null;
