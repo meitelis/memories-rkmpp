@@ -9,7 +9,7 @@
     const option = id === 'auto' ? null : video.qualityList?.find(o => o.id === id);
     if (id !== 'auto' && !Number.isInteger(option?.index)) return;
     const level = id === 'auto' ? -1 : option.index;
-    const returning = id === 'auto' && state?.selected !== 'auto';
+    const returning = id === 'auto' && !!state && state.selected !== 'auto';
     if (state) {
       if (state.selected !== id) state.networkSamples = [];
       state.selected = id;
