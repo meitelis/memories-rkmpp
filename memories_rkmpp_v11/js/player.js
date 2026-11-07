@@ -60,7 +60,7 @@
   }
 
   if (typeof module !== 'undefined' && module.exports) {
-    module.exports = {chooseLevel, selectQuality, beginSeek, requestAge, renditionText, configure, update};
+    module.exports = {chooseLevel, selectQuality, beginSeek, requestAge, renditionText, configure, update, refreshBandwidth};
   }
   const debug = typeof location !== 'undefined' && new URLSearchParams(location.search).has('rkmpp_debug');
   if (typeof document === 'undefined') return;
@@ -75,7 +75,7 @@
     return 0;
   }
 
-  async function speedProbe(signal) {
+  async function speedProbe(signal, sizes = [65536, 393216, 1572864]) {
     // Same TLS connection/path as playback. Random data cannot be compressed
     // or cached into an unrealistically fast result. Bound startup and traffic.
     const abort = new AbortController();
@@ -84,7 +84,7 @@
     const timer = setTimeout(() => abort.abort(), 2200);
     let estimate = 0;
     try {
-      for (const size of [65536, 393216, 1572864]) {
+      for (const size of sizes) {
         const path = window.OC?.generateUrl('/apps/memories_rkmpp_v11/probe') || '/index.php/apps/memories_rkmpp_v11/probe';
         const response = await fetch(`${path}?bytes=${size}&t=${Date.now()}`, {cache:'no-store', signal:abort.signal});
         if (!response.ok || !response.headers.get('content-type')?.includes('application/octet-stream')) break;
@@ -112,6 +112,33 @@
       signal.removeEventListener('abort', onAbort);
     }
     return estimate || 750000;
+  }
+
+  // Network switches do not reset hls.js when Auto pins loadLevel. A short,
+  // independently measured sample is necessary when the small 480p fragments
+  // provide no dependable bandwidth evidence. Only one rung may be tried.
+  async function refreshBandwidth(state, force = false) {
+    const session = state.abort;
+    const hls = state.hls;
+    if (!session || session.signal.aborted || !hls || !state.policy ||
+        state.selected !== 'auto' || state.reprobing ||
+        state.policy.cap >= hls.levels.length - 1) return;
+    const now = Date.now();
+    if (now - (state.lastProbeAt || 0) < (force ? 4000 : 30000)) return;
+    state.reprobing = true;
+    state.lastProbeAt = now;
+    try {
+      // 128 KiB maximum per recovery check, versus a full startup probe.
+      const bps = await speedProbe(session.signal, [131072]);
+      if (session.signal.aborted || state.abort !== session || state.hls !== hls ||
+          state.selected !== 'auto') return;
+      state.bps = bps;
+      state.badge.dataset.recoveryBandwidth = String(Math.round(bps));
+      state.badge.dataset.recoveryProbeAt = String(Date.now());
+      state.policy.offerNetworkEstimate(bps, Date.now());
+    } finally {
+      if (state.abort === session) state.reprobing = false;
+    }
   }
 
   async function warmOriginal(state, force = false, maxWaitMs = 1200) {
@@ -151,6 +178,8 @@
     state.abort = new AbortController();
     const session = state.abort;
     state.warming = false;
+    state.reprobing = false;
+    state.lastProbeAt = Date.now();
     state.selected = 'auto';
     state.manualLevel = null;
     state.decoderCapUntil = 0;
@@ -200,6 +229,7 @@
       const bps = await measured;
       if (!active()) return;
       state.bps = bps;
+      state.lastProbeAt = Date.now();
       state.badge.dataset.initialBandwidth = String(Math.round(state.bps));
       // Give an affordable Original a bounded chance to finish its copy-grid
       // preflight, rather than racing that request and starting an encoder.
@@ -336,9 +366,26 @@
     });
     metric('seeked', () => { badge.dataset.seekMs = String(Date.now() - state.seekAt); });
     attached.set(video, state);
+    // Network Information API is optional (notably absent on some iPhones).
+    // Visibility/online hints and a 30s low-rendition fallback cover clients
+    // that do not report a cellular-to-Wi-Fi connection change.
+    const connection = typeof navigator !== 'undefined'
+      ? (navigator.connection || navigator.mozConnection || navigator.webkitConnection) : null;
+    const changedNetwork = () => {
+      if (!video.paused && !video.ended) void refreshBandwidth(state, true);
+    };
+    const visibleAgain = () => { if (!document.hidden) changedNetwork(); };
+    connection?.addEventListener?.('change', changedNetwork);
+    window.addEventListener('online', changedNetwork);
+    window.addEventListener('pageshow', changedNetwork);
+    document.addEventListener('visibilitychange', visibleAgain);
     const refresh = () => update(video, state);
     for (const event of ['resize','loadedmetadata','quality-list']) video.addEventListener(event, refresh);
     state.detach = () => {
+      connection?.removeEventListener?.('change', changedNetwork);
+      window.removeEventListener('online', changedNetwork);
+      window.removeEventListener('pageshow', changedNetwork);
+      document.removeEventListener('visibilitychange', visibleAgain);
       diagnostics.abort();
       state.abort?.abort();
       clearTimeout(state.retryTimer);
@@ -373,6 +420,10 @@
       state.badge.dataset.goodFragments = String(state.policy.goodFragments);
       state.badge.dataset.slowFragments = String(state.policy.slowFragments);
       if (state.selected === 'auto') {
+        // Independent bandwidth recovery is deliberately rate-limited and
+        // never interrupts the HLS session or replaces its shared audio.
+        if (!video.paused && !video.seeking && buffer >= 2.5)
+          void refreshBandwidth(state);
         if (state.seekLevel != null && action.phase !== 'seeking') {
           state.seekLevel = null;
           hls.loadLevel = action.cap;
