@@ -87,6 +87,38 @@ func TestWaitForChunkAbandoned(t *testing.T) {
 	require.Equal(t, http.StatusConflict, w.Code)
 }
 
+// Teardown must wake in-flight HTTP requests rather than leave them waiting
+// for the full ten-second chunk timeout after their producer is gone.
+func TestStreamClearWakesInFlightSegmentRequest(t *testing.T) {
+	s, _ := testStream(t)
+	chunk := NewChunk(7)
+	s.chunks[7] = chunk
+
+	oldWait := chunkWait
+	chunkWait = 2 * time.Second
+	defer func() { chunkWait = oldWait }()
+
+	result := make(chan int, 1)
+	go func() {
+		w := httptest.NewRecorder()
+		s.waitForChunk(w, chunk)
+		result <- w.Code
+	}()
+
+	s.mutex.Lock()
+	s.clear()
+	s.mutex.Unlock()
+
+	select {
+	case status := <-result:
+		// A synthetic test stream has no ffmpeg process to replace, so
+		// abandoned requests have the existing timeout response status.
+		require.Equal(t, http.StatusRequestTimeout, status)
+	case <-time.After(300 * time.Millisecond):
+		t.Fatal("segment waiter remained blocked after clear")
+	}
+}
+
 func TestWaitForChunkTimeout(t *testing.T) {
 	s, _ := testStream(t)
 	oldWait := chunkWait
