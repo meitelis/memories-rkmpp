@@ -264,6 +264,33 @@ test('an invalid probe response does not invent a high bandwidth',async()=>{
   }
 });
 
+test('truncated and interrupted probes do not seed bandwidth',async()=>{
+  const previousFetch=global.fetch,previousWindow=global.window;
+  global.window={OC:{generateUrl:()=>'/probe'}};
+  try{
+    for(const mode of ['truncated','interrupted']){
+      global.fetch=async()=>({
+        ok:true,headers:{get:()=> 'application/octet-stream'},
+        body:{getReader(){
+          let reads=0;
+          return {
+            async read(){
+              if(++reads===1)return {done:false,value:new Uint8Array(65536)};
+              if(mode==='interrupted')throw new Error('network interrupted');
+              return {done:true};
+            },
+            releaseLock(){},
+          };
+        }},
+      });
+      assert.equal(await speedProbe(new AbortController().signal,[131072]),0,mode);
+    }
+  }finally{
+    global.fetch=previousFetch;
+    if(previousWindow===undefined)delete global.window;else global.window=previousWindow;
+  }
+});
+
 test('diagnostics report actual native Auto, not the UI label',async()=>{
   const f=fixture();await boot(f);
   try{
