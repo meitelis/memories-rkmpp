@@ -1,108 +1,134 @@
-const {test}=require('node:test');
-const assert=require('node:assert/strict');
-const {PlaybackPolicy}=require('./policy.js');
-const levels=[400000,700000,1300000,2900000,6400000,7400000,8700000].map((bitrate,i)=>({bitrate,url:[i===6?'/direct.m3u8':`/${i}.m3u8`]}));
-const tick=(policy,values={})=>policy.step({now:0,buffer:18,playing:true,seeking:false,auto:true,originalReady:true,...values});
-function normal(){const p=new PlaybackPolicy(levels,30000000,true);tick(p);return p;}
+const {test} = require('node:test');
+const assert = require('node:assert/strict');
+const {PlaybackPolicy, chooseLevel} = require('./policy.js');
 
-test('metadata preloading and startup are not a bandwidth-collapse signal',()=>{
-  const p=new PlaybackPolicy(levels,30000000,true);
-  assert.equal(tick(p,{buffer:3,playing:false,requestAge:30000}).cap,6);
-  assert.equal(tick(p,{buffer:3,requestAge:2500}).cap,6);
-  assert.equal(p.phase,'startup');
-  assert.equal(tick(p).phase,'normal');
+const levels = [400000,700000,1300000,2900000,6400000,7400000,8700000]
+  .map((bitrate,i)=>({bitrate,url:[i===6?'/direct.m3u8':'/'+i+'.m3u8']}));
+const policy = (bps=100000000) => new PlaybackPolicy(levels,bps,true);
+const step=(p,now,buffer,more={})=>p.step({
+  now,buffer,requestAge:0,auto:true,playing:true,seeking:false,
+  originalReady:true,currentLevel:p.target,...more,
 });
-test('a stalled original download causes one rescue before the buffer empties',()=>{
+const fragment=(p,sn,more={})=>p.onFragment({
+  level:p.target,sn,duration:4,bytes:300000,
+  loading:{start:100,first:4000,end:4100},buffer:18,now:sn*4000,...more,
+});
+const normal=(bps=100000000)=>{
+  const p=policy(bps);p.onPlaying();step(p,0,18);return p;
+};
+
+test('start below unproven Original, even on an exceptionally fast probe',()=>{
+  assert.equal(chooseLevel(levels,100000000),6);
+  assert.equal(policy().target,5);
+  assert.equal(policy(800000).target,0);
+});
+test('three-to-five-second buffer sawtooth never changes quality',()=>{
+  for(const period of [3,4,4.5,5]){
+    const p=normal();
+    for(let n=500;n<90000;n+=250)
+      assert.equal(step(p,n,20-(n/1000%period),{requestAge:1200}).cap,5);
+  }
+});
+test('buffer cannot force an upgrade without completed video fragments',()=>{
+  const p=normal(800000);
+  for(let n=500;n<90000;n+=500)step(p,n,20);
+  assert.equal(p.target,0);
+});
+test('endangered buffer downshifts while a useful reserve remains',()=>{
   const p=normal();
-  const a=tick(p,{now:1000,buffer:9,requestAge:2500});
-  assert.deepEqual([a.phase,a.cap,a.audio,a.cancel],['recovering',0,'audio64',true]);
-  assert.equal(tick(p,{now:1500,buffer:8,requestAge:3000}).cancel,false);
+  assert.equal(step(p,500,8,{requestAge:1900}).cap,4);
 });
-test('a delayed proxy burst stays constrained for the full weak-link trace',()=>{
-  const p=normal();tick(p,{now:1000,buffer:9,requestAge:2500});
-  for(let now=2000;now<=62000;now+=3000){
-    p.sample({loaded:800000,loading:{start:now,first:now+7900,end:now+8000}});
-    const a=tick(p,{now,buffer:12});
-    assert.equal(a.cap,0);
-    assert.equal(a.audio,'audio64');
-    assert.equal(a.cancel,false);
+test('critical near-stall uses a two-rung emergency reduction',()=>{
+  const p=normal();
+  assert.equal(step(p,500,2,{requestAge:1000}).cap,3);
+});
+test('a pending non-flushing downgrade cannot cascade every polling tick',()=>{
+  const p=normal();
+  assert.equal(step(p,1000,8,{requestAge:2500}).cap,4);
+  for(let n=1500;n<6000;n+=500)
+    assert.equal(step(p,n,7,{requestAge:4000,currentLevel:5}).cap,4);
+});
+test('after a downgrade is actually playing, another confirmed danger can reduce again',()=>{
+  const p=normal();
+  step(p,1000,8,{requestAge:2000});
+  assert.equal(step(p,5000,8,{requestAge:2000,currentLevel:4}).cap,3);
+});
+test('a normal outstanding fragment at six seconds does not trigger a switch',()=>{
+  const p=normal();
+  for(let n=500;n<=5000;n+=500)
+    assert.equal(step(p,n,6,{requestAge:900}).cap,5);
+});
+test('three distinct real fragments can promote one step to Original',()=>{
+  const p=normal();
+  fragment(p,1);fragment(p,2);
+  assert.equal(step(p,15000,18).cap,5);
+  fragment(p,3);
+  assert.equal(step(p,16000,18).cap,6);
+});
+test('replayed fragment callbacks do not manufacture readiness',()=>{
+  const p=normal();
+  fragment(p,1);fragment(p,2);fragment(p,1);fragment(p,2);
+  assert.equal(p.samples.length,2);
+  assert.equal(step(p,16000,18).cap,5);
+});
+test('missing transfer timings cannot be used as fake bandwidth evidence',()=>{
+  const p=normal();
+  for(let i=1;i<=6;i++)fragment(p,i,{loading:{start:100,first:0,end:100}});
+  assert.equal(step(p,18000,18).cap,5);
+});
+test('slow producer cannot justify a quality upgrade even with high transfer speed',()=>{
+  const p=normal();
+  for(let i=1;i<=6;i++)fragment(p,i,{loading:{start:100,first:8000,end:8100}});
+  assert.equal(step(p,18000,18).cap,5);
+});
+test('Original requires sixteen seconds of buffer before first promotion',()=>{
+  const p=normal();
+  for(let i=1;i<=3;i++)fragment(p,i);
+  assert.equal(step(p,17000,15).cap,5);
+});
+test('switch to Original must be seen on screen before further changes',()=>{
+  const p=normal();
+  for(let i=1;i<=3;i++)fragment(p,i);
+  assert.equal(step(p,17000,18).cap,6);
+  for(let n=18000;n<=22000;n+=500)
+    assert.equal(step(p,n,18,{currentLevel:5}).cap,6);
+});
+test('failed Original trial is blacklisted after a draining buffer',()=>{
+  const p=normal();
+  for(let i=1;i<=3;i++)fragment(p,i);
+  step(p,17000,18);
+  step(p,19000,8,{requestAge:2000,currentLevel:5});
+  assert.equal(p.target,5);
+  assert.ok(p.blacklist.get(6)>19000);
+  p.onLevelPlayed(5);
+  for(let i=4;i<=8;i++)fragment(p,i);
+  assert.equal(step(p,40000,18,{currentLevel:5}).cap,5);
+});
+test('buffer evidence does not cross a seek',()=>{
+  const p=normal();
+  fragment(p,1);fragment(p,2);p.beginSeek();
+  assert.equal(p.samples.length,0);
+  assert.equal(step(p,30000,0,{seeking:true}).cap,5);
+  p.endSeek();
+});
+test('pause or manual selection suspends adaptation',()=>{
+  for(const options of [{playing:false},{auto:false}]) {
+    const p=normal();
+    assert.equal(step(p,30000,0,{requestAge:5000,...options}).cap,5);
   }
 });
-test('recovery remeasures capacity after healthy buffering instead of trusting paced segment waits',()=>{
-  const p=normal();tick(p,{now:1000,buffer:9,requestAge:2500});
-  for(let i=0;i<6;i++)p.sample({loaded:200000,loading:{start:1000,first:1050,end:1075}});
-  tick(p,{now:2000,buffer:12});
-  assert.equal(tick(p,{now:10000,buffer:12}).probe,false);
-  const recheck=tick(p,{now:12000,buffer:12});
-  assert.equal(recheck.probe,true);
-  assert.equal(recheck.cap,0);
-  p.measured(30000000,12000,true);
-  assert.equal(tick(p,{now:12500,buffer:12}).cap,6);
-  assert.equal(p.phase,'normal');
+test('decoder cap is respected independently of Original readiness',()=>{
+  const p=normal();
+  assert.equal(step(p,1000,18,{decoderCap:2}).cap,2);
 });
-
-test('recovery measurements respect affordability, Original readiness and decoder limits',()=>{
-  const p=normal();tick(p,{now:1000,buffer:9,requestAge:2500});
-  p.measured(800000,12000,true);
-  assert.equal(tick(p,{now:12500}).cap,0);
-  assert.equal(tick(p,{now:26000}).probe,false);
-  assert.equal(tick(p,{now:27000}).probe,true);
-  p.measured(30000000,28000,false,3);
-  assert.equal(tick(p,{now:28500,originalReady:false,decoderCap:3}).cap,3);
+test('Original is not requested until its preflight is ready',()=>{
+  const p=normal();
+  for(let i=1;i<=4;i++)fragment(p,i);
+  assert.equal(step(p,18000,18,{originalReady:false}).cap,5);
 });
-
-test('weak-startup playback rechecks capacity even without a buffer rescue',()=>{
-  const p=new PlaybackPolicy(levels,750000,true);
-  tick(p,{now:1000,currentLevel:0});
-  assert.equal(p.phase,'normal');
-  assert.equal(p.cap,0,'buffer warmup does not invalidate the measured network budget');
-  p.sample({loaded:800000,loading:{start:2000,first:9900,end:10000}});
-  assert.equal(p.bps,750000,'a proxy burst does not change the measured audio budget');
-  assert.equal(tick(p,{now:11000,currentLevel:0}).probe,true);
-  assert.equal(tick(p,{now:12000,currentLevel:0}).probe,false);
-  assert.equal(tick(p,{now:30000,currentLevel:6}).probe,false);
-  assert.equal(tick(p,{now:30000,currentLevel:0,playing:false}).probe,false);
-});
-
-test('recovery does not wait for a paced producer to fill ten seconds of buffer',()=>{
-  const p=normal();tick(p,{now:1000,buffer:9,requestAge:2500});
-  tick(p,{now:2000,buffer:7,currentLevel:0});
-  assert.equal(tick(p,{now:12000,buffer:7,currentLevel:0}).probe,true);
-});
-test('pause, seeking and manual selection never trigger a rescue',()=>{
-  for(const override of [{playing:false},{seeking:true},{auto:false}]){
-    const p=normal();const a=tick(p,{buffer:0,requestAge:20000,...override});
-    assert.equal(a.cap,6);assert.equal(a.cancel,false);
-  }
-});
-test('an encoded-only ladder is not accidentally capped to its lowest level',()=>{
-  const p=new PlaybackPolicy(levels.slice(0,6),30000000);
-  assert.equal(tick(p,{originalReady:false}).cap,5);
-});
-test('unready original and decoder limits remain respected',()=>{
-  const p=normal();assert.equal(tick(p,{originalReady:false}).cap,5);
-  assert.equal(tick(p,{decoderCap:3}).cap,3);
-  assert.equal(tick(p).cap,6,'availability and decoder gates do not erase the measured network budget');
-});
-
-test('a cold seek preserves quality after seeked until the producer has warmed',()=>{
-  const p=normal();p.beginSeek();
-  p.sample({loaded:2000000,loading:{start:0,first:4500,end:4600}});
-  assert.equal(p.bps,30000000,'cold generation must not poison the network estimate');
-  const pending=tick(p,{buffer:0,seeking:true,requestAge:4500});
-  assert.deepEqual([pending.phase,pending.cap,pending.cancel],['seeking',6,false]);
-  assert.equal(tick(p,{buffer:12}).phase,'normal');
-});
-
-test('byte-limited high-bitrate playback can warm up without ten buffered seconds',()=>{
-  const p=new PlaybackPolicy(levels,30000000,true);
-  assert.equal(tick(p,{buffer:4,targetBuffer:6}).phase,'normal');
-  const healthy=tick(p,{buffer:4,targetBuffer:6,requestAge:2500});
-  assert.equal(healthy.cap,6);assert.equal(healthy.cancel,false);
-});
-
-test('a seek does not suppress recovery indefinitely on an actually stalled link',()=>{
-  const p=normal();p.beginSeek();
-  const stalled=tick(p,{buffer:0,seeking:true,requestAge:6500});
-  assert.equal(stalled.cap,0);assert.equal(stalled.cancel,true);
+test('waiting discards the previous promotion evidence',()=>{
+  const p=normal();
+  fragment(p,1);fragment(p,2);p.onWaiting();p.onPlaying();
+  assert.equal(p.samples.length,0);
+  assert.equal(step(p,18000,18).cap,5);
 });
