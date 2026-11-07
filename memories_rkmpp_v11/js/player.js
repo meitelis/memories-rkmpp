@@ -108,18 +108,24 @@
 
   async function warmOriginal(state, force = false) {
     const hls = state.hls;
+    const session = state.abort;
     const level = hls.levels.find(isOriginal);
-    if (!level || state.originalReady || state.warming || (!force && Date.now() - state.lastWarm < 5000)) return;
+    if (!level || session.signal.aborted || state.originalReady || state.warming ||
+        (!force && Date.now() - state.lastWarm < 5000)) return;
     state.warming = true;
     state.lastWarm = Date.now();
     try {
       const url = Array.isArray(level.url) ? level.url[0] : level.url;
-      const response = await fetch(url, {cache:'no-store', signal:state.abort.signal});
-      state.originalReady = response.ok;
-      // A pending keyframe probe responds 409; encoded playback stays usable.
+      const response = await fetch(url, {cache:'no-store', signal:session.signal});
+      // An old playlist preflight must never mark a replacement session ready.
+      if (state.abort === session && state.hls === hls && !session.signal.aborted) {
+        state.originalReady = response.ok;
+      }
       await response.body?.cancel();
     } catch { /* Retry later without blocking playback. */ }
-    finally { state.warming = false; }
+    finally {
+      if (state.abort === session) state.warming = false;
+    }
   }
 
   function configure(video, state, hls) {
@@ -128,6 +134,8 @@
     for (const [event, fn] of state.events || []) state.hls.off(event, fn);
     state.hls = hls;
     state.abort = new AbortController();
+    const session = state.abort;
+    state.warming = false;
     state.selected = 'auto';
     state.seekLevel = null;
     state.audioProfile = 'audio'; // One default shared AAC track for the whole session.
@@ -164,26 +172,28 @@
     if (hls.levels.length) hls.stopLoad();
     state.badge.dataset.phase = 'waiting-manifest';
     let starting = false;
-    const measured = speedProbe(state.abort.signal);
+    const measured = speedProbe(session.signal);
+    const active = () => !session.signal.aborted && state.abort === session && state.hls === hls;
     const start = async () => {
-      if (starting || !hls.levels.length) return;
+      if (starting || !active() || !hls.levels.length) return;
       starting = true;
       state.badge.dataset.levels = hls.levels.map(l => `${l.width}x${l.height}:${l.bitrate}:${isOriginal(l) ? 'original' : 'encoded'}`).join(',');
       state.badge.dataset.phase = 'probing';
       void warmOriginal(state);
-      state.bps = await measured;
-      if (state.abort.signal.aborted) return;
+      const bps = await measured;
+      if (!active()) return;
+      state.bps = bps;
       state.badge.dataset.initialBandwidth = String(Math.round(state.bps));
       // Give an affordable Original a bounded chance to finish its copy-grid
       // preflight, rather than racing that request and starting an encoder.
       if (isOriginal(hls.levels[chooseLevel(hls.levels, state.bps)])) {
         const deadline = Date.now() + 1500;
-        while (!state.originalReady && Date.now() < deadline && !state.abort.signal.aborted) {
+        while (!state.originalReady && Date.now() < deadline && active()) {
           await warmOriginal(state, true);
           if (!state.originalReady) await new Promise(resolve => setTimeout(resolve, 150));
         }
       }
-      if (state.abort.signal.aborted) return;
+      if (!active()) return;
       state.policy = new PlaybackPolicy(hls.levels, state.bps, state.originalReady);
       state.cap = state.policy.cap;
       // One quality controller. hls.js schedules fragments and buffers, while
