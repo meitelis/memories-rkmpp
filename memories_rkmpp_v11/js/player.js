@@ -217,7 +217,8 @@
     });
     listen(Events.FRAG_BUFFERED, (_event, data) => {
       if (data.frag?.type !== 'main') return;
-      if (state.policy && state.selected === 'auto') {
+      if (state.policy && state.selected === 'auto' &&
+          !video.paused && !video.seeking) {
         const stats = data.stats || data.frag.stats;
         const loading = stats?.loading;
         const elapsedMs = loading?.start > 0
@@ -229,7 +230,7 @@
         const bytes = stats?.loaded || 0;
         const duration = data.frag.duration || data.frag.end - data.frag.start;
         state.policy.onFragment({
-          level:data.frag.level, duration, elapsedMs, transferMs, bytes,
+          level:data.frag.level, sn:data.frag.sn, duration, elapsedMs, transferMs, bytes,
           buffer:bufferAhead(video),
         });
         if (elapsedMs > 0 && duration > 0) {
