@@ -11,10 +11,12 @@
     if (id !== 'auto' && !Number.isInteger(option?.index)) return;
     const level = id === 'auto' ? -1 : option.index;
     // Conservative quality selection: do not flush already-buffered video.
-    hls.loadLevel = level < 0 && state?.policy ? state.policy.cap : level;
+    hls.loadLevel = level < 0 && state?.policy ? state.policy.target : level;
     if (state) {
       state.pendingLevel = null;
       state.policy?.onWaiting();
+      // A manual-to-Auto transition won't produce a new 'playing' event.
+      if (id === 'auto' && state.policy && !video.paused) state.policy.onPlaying();
       state.switchAt = level < 0 || hls.currentLevel === level ? 0 : Date.now();
       state.switchLevel = level;
       delete state.badge.dataset.switchMs;
@@ -61,13 +63,52 @@
   if (typeof document === 'undefined') return;
 
   const attached = new Map();
-  // Bounded local trace: video._rkmppTrace, never uploaded.
+  // Bounded local trace: only stall/fatal reports are sent to our Nextcloud.
   function eventTrace(state,event,fields={}) {
     state.trace ||= [];
     state.trace.push({at:Date.now(),event,...fields});
     if(state.trace.length>240)state.trace.shift();
     if(state.video)state.video._rkmppTrace=state.trace;
   }
+  // Mobile users cannot copy a browser console from their laptop.
+  // On a stall, POST a bounded and URL-free trace to this Nextcloud instance
+  // after recovery (or after a prolonged wait), at most once per 30 seconds.
+  async function reportMobileTrace(state, reason) {
+    if (!state.abort || state.abort.signal.aborted || !state.trace?.length) return;
+    const csrf = window.OC?.requestToken || window.oc_requesttoken;
+    if (!csrf) {
+      state.badge.dataset.traceSend = 'missing-csrf';
+      return;
+    }
+    const path = window.OC?.generateUrl('/apps/memories_rkmpp_v11/trace') ||
+      '/index.php/apps/memories_rkmpp_v11/trace';
+    try {
+      const response = await fetch(path, {
+        method:'POST', credentials:'same-origin',
+        headers:{'Content-Type':'application/json','Accept':'application/json',
+          'requesttoken':csrf},
+        body:JSON.stringify({reason,session:state.traceSession,
+          events:state.trace.slice(-60)}),
+        signal:state.abort.signal,
+        cache:'no-store',
+      });
+      state.badge.dataset.traceSend = response.ok ? 'saved' : 'http-' + response.status;
+    } catch {
+      state.badge.dataset.traceSend = 'delivery-failed';
+    }
+  }
+  function scheduleMobileTrace(state, reason, delay = 1200) {
+    if (!state.abort || state.abort.signal.aborted ||
+        Date.now() - (state.lastTraceReportAt || 0) < 30000) return;
+    clearTimeout(state.traceTimer);
+    state.traceTimer = setTimeout(() => {
+      state.traceTimer = null;
+      if (state.abort.signal.aborted) return;
+      state.lastTraceReportAt = Date.now();
+      void reportMobileTrace(state, reason);
+    }, delay);
+  }
+
   function bufferAhead(video) {
     for (let i = 0; i < video.buffered.length; i++) {
       if (video.buffered.start(i) <= video.currentTime + 0.1 && video.buffered.end(i) > video.currentTime) {
@@ -141,6 +182,7 @@
   function configure(video, state, hls) {
     state.abort?.abort();
     clearTimeout(state.retryTimer);
+    clearTimeout(state.traceTimer);
     for (const [event, fn] of state.events || []) state.hls.off(event, fn);
     state.hls = hls;
     state.video = video;
@@ -153,6 +195,8 @@
     state.inflight = null;
     state.pendingLevel = null;
     state.trace = [];
+    state.traceSession = Math.random().toString(36).slice(2,10);
+    state.lastTraceReportAt = 0;
     video._rkmppTrace = state.trace;
     state.decoderCap = Infinity;
     state.policy = null;
@@ -279,6 +323,8 @@
       state.badge.dataset.lastError = data.details || '';
       if (!data.fatal) return;
       state.badge.dataset.fatalError = `${data.type || ''}:${data.details || ''}:${data.response?.code || ''}`;
+      eventTrace(state,'hls-error',{detail:String(data.details || '').slice(0,64)});
+      scheduleMobileTrace(state,'fatal-error',1200);
       if (data.type === 'networkError' && state.retries < 4 && !state.abort.signal.aborted) {
         state.failure = 'Reconnecting…';
         clearTimeout(state.retryTimer);
@@ -308,6 +354,7 @@
       state.policy?.onPlaying();
       state.hasPlayed = true;
       eventTrace(state,'playing',{buffer:bufferAhead(video)});
+      if (state.waitingAt) scheduleMobileTrace(state,'stall-recovered',1200);
       if (state.waitingAt) state.waitingMs = (state.waitingMs || 0) + Date.now() - state.waitingAt;
       state.waitingAt = 0;
     });
@@ -316,6 +363,7 @@
       state.policy?.onWaiting();
       state.waitingAt = Date.now();
       eventTrace(state,'waiting',{buffer:bufferAhead(video)});
+      scheduleMobileTrace(state,'waiting',8000);
       state.waitingCount = (state.waitingCount || 0) + 1;
     });
     metric('seeking', () => {
@@ -331,6 +379,7 @@
       diagnostics.abort();
       state.abort?.abort();
       clearTimeout(state.retryTimer);
+      clearTimeout(state.traceTimer);
       for (const [event, fn] of state.events || []) state.hls.off(event, fn);
       for (const event of ['resize','loadedmetadata','quality-list']) video.removeEventListener(event, refresh);
       badge.remove();
