@@ -103,7 +103,8 @@
       // A non-flushing switch may take an entire buffered segment to appear.
       // Do not queue another producer while the previous choice is pending,
       // except when playback is already at the point of starvation.
-      if (currentLevel >= 0 && currentLevel !== this.cap && buffer >= 0.5) {
+      if (currentLevel >= 0 && currentLevel !== this.cap &&
+          this.trialLevel !== this.cap && buffer >= 0.5) {
         return this.result(false);
       }
 
