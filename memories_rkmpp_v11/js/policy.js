@@ -34,6 +34,7 @@
       this.started = false;
       this.lastReason = 'startup';
       this.upgradePending = false;
+      this.switchPending = false;
     }
 
     onPlaying() { this.started = true; this.buffering = false; }
@@ -43,7 +44,10 @@
 
     onLevelPlayed(level) {
       this.playingLevel = level;
-      if (level === this.target) this.upgradePending = false;
+      if (level === this.target) {
+        this.upgradePending = false;
+        this.switchPending = false;
+      }
     }
 
     // Only completed and distinct main video fragments count as evidence.
@@ -91,6 +95,12 @@
       const endangered = buffer < 9 && requestAge > 1800;
       const slow = this.samples.length >= 2 &&
         this.samples.slice(-2).every(s => s.rate > 0 && s.rate < 0.78 && s.buffer < 12);
+      // A non-flushing switch may take a whole buffered segment to appear.
+      // Do not cascade 1440p -> 1080p -> 480p before the first downshift plays.
+      // The one exception is cancelling a failing upgrade; a pending downgrade
+      // is only escalated after a true near-stall, not each 500ms tick.
+      if (this.switchPending && this.lastReason !== 'upgrade' &&
+          (buffer >= 2.5 || now - this.lastChange < 6000)) return this.result(false);
       if (this.target > 0 && (urgent || endangered || slow)) {
         const old = this.target;
         const lower = Math.max(0, old - (urgent ? 2 : 1));
@@ -127,6 +137,7 @@
       this.samples = [];
       this.seen.clear();
       this.upgradePending = reason === 'upgrade';
+      this.switchPending = true;
       this.phase = reason === 'upgrade' ? 'upgrading' : 'recovering';
       return this.result(true);
     }
