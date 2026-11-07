@@ -30,11 +30,16 @@ function fixture(){
     buffered:{length:1,start:()=>0,end:()=>5},
     closest:()=>null,dispatchEvent(){},qualityList:[],
   };
+  Object.defineProperty(video,'currentQuality',{
+    configurable:true,get(){return this._qualitySelected},
+    set(value){this._qualitySelected=value},
+  });
   const state={badge:{dataset:{},textContent:''},debug:false,decoderCap:Infinity,bps:0};
   return {hls,video,state,writes,
     emit:(event,data={})=>listeners.get(event)?.(event,data),
-    frame:(level,elapsedMs=1000)=> {
-      const stats={loading:{start:Math.max(1,performance.now()-elapsedMs)}};
+    frame:(level,elapsedMs=4100,transferMs=100,bytes=200000)=> {
+      const now=performance.now();
+      const stats={loaded:bytes,loading:{start:Math.max(1,now-elapsedMs),first:now-transferMs,end:now}};
       listeners.get('FRAG_BUFFERED')?.('FRAG_BUFFERED',
         {frag:{type:'main',duration:4,level,stats,start:0,end:4},stats});
     },
@@ -161,5 +166,45 @@ test('manual selection is not overridden by automatic quality decisions',async()
     f.video.buffered.end=()=>0.2;
     update(f.video,f.state);
     assert.equal(f.writes.length,before);
+  }finally{f.state.abort.abort()}
+});
+
+test('native Memories level changes cannot mislabel Auto as manual',async()=>{
+  const f=fixture();await boot(f);
+  try {
+    f.video._qualitySelected='360:400000';
+    f.emit('LEVEL_SWITCHED',{level:0});
+    assert.equal(f.video._qualitySelected,'auto');
+    assert.equal(f.video.currentQuality,'auto');
+  }finally{f.state.abort.abort()}
+});
+test('network telemetry excludes four seconds of paced RKMPP production',async()=>{
+  const f=fixture();await boot(f);
+  try{
+    const previous=global.performance;
+    Object.defineProperty(global,'performance',{configurable:true,value:{now:()=>5000}});
+    try{
+      update(f.video,f.state);
+      f.frame(0,4100,100,200000);
+      assert.equal(f.state.badge.dataset.transferMbps,'16.00');
+      assert.equal(f.state.badge.dataset.deliveryRate,(4000/4100).toFixed(2));
+    }finally{Object.defineProperty(global,'performance',{configurable:true,value:previous})}
+  }finally{f.state.abort.abort()}
+});
+test('missing HTTP first-byte timestamps cannot falsely upgrade Auto',async()=>{
+  const f=fixture();await boot(f);
+  try {
+    update(f.video,f.state);
+    const previous=global.performance;
+    Object.defineProperty(global,'performance',{configurable:true,value:{now:()=>5000}});
+    try{
+      for(let i=0;i<9;i++){
+        const stats={loaded:200000,loading:{start:100,first:0,end:5000}};
+        f.emit('FRAG_BUFFERED',{frag:{type:'main',duration:4,level:0,stats},stats});
+        update(f.video,f.state);
+      }
+      assert.equal(f.state.policy.cap,0);
+      assert.equal(f.state.badge.dataset.transferMbps,'');
+    }finally{Object.defineProperty(global,'performance',{configurable:true,value:previous})}
   }finally{f.state.abort.abort()}
 });
