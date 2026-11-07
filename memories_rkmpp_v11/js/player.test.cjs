@@ -208,3 +208,60 @@ test('missing HTTP first-byte timestamps cannot falsely upgrade Auto',async()=>{
     }finally{Object.defineProperty(global,'performance',{configurable:true,value:previous})}
   }finally{f.state.abort.abort()}
 });
+
+
+test('aborted startup cannot initialize a replacement HLS instance',async()=>{
+  const oldWindow=global.window,oldFetch=global.fetch, pending=[];
+  global.window={OC:{generateUrl:()=>'/probe'}};
+  global.fetch=()=>new Promise(resolve=>pending.push(resolve));
+  const old=fixture(),newSession=fixture();
+  try {
+    configure(old.video,old.state,old.hls);
+    old.hls.levels=levels;
+    const firstStart=old.emit('MANIFEST_PARSED');
+    configure(old.video,old.state,newSession.hls);
+    newSession.hls.levels=levels;
+    const secondStart=newSession.emit('MANIFEST_PARSED');
+    assert.equal(pending.length,2);
+    const failedProbe={ok:false,headers:{get:()=>''}};
+    pending[0](failedProbe);
+    await firstStart;
+    assert.equal(old.hls.started,undefined,'old HLS should not start after replacement');
+    assert.equal(old.state.policy,null,'old startup should not mutate new policy');
+    pending[1](failedProbe);
+    await secondStart;
+    assert.equal(newSession.hls.started,true);
+    assert.ok(old.state.policy,'new session should start normally');
+    assert.equal(old.state.hls,newSession.hls);
+  } finally {
+    old.state.abort?.abort();
+    if(oldWindow===undefined)delete global.window;else global.window=oldWindow;
+    global.fetch=oldFetch;
+  }
+});
+
+test('a late Original response cannot mark the replacement session ready',async()=>{
+  const oldWindow=global.window,oldFetch=global.fetch;
+  global.window={OC:{generateUrl:()=>'/probe'}};
+  let resolveOriginal;
+  const oldCopy=new Promise(resolve=>{resolveOriginal=resolve});
+  global.fetch=url=>String(url).includes('/direct.m3u8')
+    ? oldCopy : Promise.resolve({ok:false,headers:{get:()=>''}});
+  const old=fixture(),next=fixture();
+  try {
+    configure(old.video,old.state,old.hls);
+    old.hls.levels=[...levels,{bitrate:8000000,width:3200,height:1800,url:['/direct.m3u8']}];
+    await old.emit('MANIFEST_PARSED');
+    configure(old.video,old.state,next.hls);
+    next.hls.levels=levels;
+    await next.emit('MANIFEST_PARSED');
+    assert.equal(old.state.originalReady,false);
+    resolveOriginal({ok:true,body:{cancel:async()=>{}}});
+    for(let i=0;i<5;i++)await Promise.resolve();
+    assert.equal(old.state.originalReady,false);
+  } finally {
+    old.state.abort?.abort();
+    if(oldWindow===undefined)delete global.window;else global.window=oldWindow;
+    global.fetch=oldFetch;
+  }
+});
