@@ -33,6 +33,19 @@
       this.waiting = false;
     }
 
+    // Manual playback provides no samples for the Auto policy. Resume
+    // from the manually selected rung (or a safer prior cap), then rebuild
+    // fragment evidence before allowing further upgrades.
+    resumeAuto(manualLevel) {
+      if (Number.isInteger(manualLevel) && manualLevel >= 0) {
+        this.cap = Math.min(this.cap, manualLevel);
+      }
+      this.resetEvidence();
+      this.phase = 'startup';
+      this.warmStartedAt = null;
+      this.waiting = false;
+    }
+
     beginSeek() {
       this.phase = 'seeking';
       this.warmStartedAt = null;
