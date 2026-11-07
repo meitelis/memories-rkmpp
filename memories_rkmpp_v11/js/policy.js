@@ -4,124 +4,128 @@
   const original = level => (Array.isArray(level?.url) ? level.url : [level?.url])
     .some(url => /\/direct\.m3u8(?:\?|$)/.test(url || ''));
 
-  // Only the initial connection check selects a starting rendition.
-  // Later changes depend on playable buffer health, not FFmpeg throughput.
+  // The one startup connection probe determines the initial rendition.
   function chooseLevel(levels, bps, ready = true, limit = Infinity) {
     let best = 0;
-    levels.forEach((level, index) => {
-      if (index <= limit && (ready || !original(level)) && bitrate(level) <= bps * 0.8) best = index;
+    levels.forEach((level, i) => {
+      if (i <= limit && (ready || !original(level)) && bitrate(level) <= bps * 0.8) best = i;
     });
     return best;
   }
-  const audioProfile = bps => bps < 450000 ? 'audio32'
-    : bps < 1000000 ? 'audio64' : bps < 4000000 ? 'audio96' : 'audio';
 
-  // One owner for Auto quality. hls.js schedules/downloads/fragments,
-  // but its encoder-contaminated segment-rate estimate does not pick levels.
+  // Buffer fluctuations alone are not congestion evidence: a completed
+  // fragment proves whether the chosen rendition is sustainable in real time.
   class PlaybackPolicy {
     constructor(levels, initialBps, ready = false) {
       this.levels = levels;
       this.bps = initialBps;
       this.cap = chooseLevel(levels, initialBps, ready);
       this.phase = 'startup';
-      this.phaseStartedAt = null;
-      this.samples = [];
-      this.healthySince = null;
-      this.dangerSince = null;
-      this.lastChangeAt = 0;
-      this.retryAfter = 0;
-      this.lastUpgradeAt = -Infinity;
+      this.warmStartedAt = null;
+      this.presentedLevel = -1;
+      this.goodFragments = 0;
+      this.slowFragments = 0;
+      this.trialLevel = -1;
+      this.failures = new Map();
+      this.lastDownshiftAt = -Infinity;
+      this.waiting = false;
     }
+
     beginSeek() {
       this.phase = 'seeking';
-      this.phaseStartedAt = null;
-      this.samples = [];
-      this.healthySince = null;
-      this.dangerSince = null;
+      this.warmStartedAt = null;
+      this.presentedLevel = -1;
+      this.goodFragments = 0;
+      this.slowFragments = 0;
+      this.waiting = false;
+      this.trialLevel = -1;
     }
+    onWaiting() { this.waiting = true; }
+    onPlaying() { this.waiting = false; }
+
+    // Measure wall-clock delivery of playable video, including RKMPP work.
+    // Pure network bandwidth is not enough when segments are made on demand.
+    onFragment({level, duration, elapsedMs, buffer}) {
+      if (level !== this.cap || this.presentedLevel !== this.cap ||
+          !(duration > 0 && elapsedMs > 0)) return;
+      const rate = duration * 1000 / elapsedMs;
+      const retry = (this.failures.get(this.cap + 1) || 0) > 0;
+      const good = rate >= (retry ? 2 : 1.4) && buffer >= 3;
+      this.goodFragments = good ? this.goodFragments + 1 : 0;
+      this.slowFragments = rate < 1 && buffer < 4 ? this.slowFragments + 1 : 0;
+      // Two sustainable fragments establish that this upgrade succeeded.
+      if (this.trialLevel === this.cap && this.goodFragments >= 2) {
+        this.trialLevel = -1;
+      }
+    }
+
     step({now, buffer, playing, seeking, auto, originalReady = false,
-          decoderCap = Infinity, requestAge = 0, currentLevel = this.cap}) {
+          decoderCap = Infinity, requestAge = 0, currentLevel = -1}) {
       const originalIndex = this.levels.findIndex(original);
-      const limit = Math.min(decoderCap, originalReady || originalIndex < 0
-        ? this.levels.length - 1 : Math.max(0, originalIndex - 1));
+      const limit = Math.max(0, Math.min(decoderCap, originalReady || originalIndex < 0
+        ? this.levels.length - 1 : originalIndex - 1));
       if (this.cap > limit) {
         this.cap = limit;
-        this.healthySince = null;
+        this.resetEvidence();
+        return this.result(true);
       }
-      if (!auto || !playing || seeking) {
-        this.samples = [];
-        this.healthySince = null;
-        this.dangerSince = null;
-        return this.result(false);
-      }
+      if (!auto || !playing || seeking) return this.result(false);
 
-      this.samples.push({now, buffer});
-      this.samples = this.samples.filter(s => now - s.now <= 4500);
-      const first = this.samples[0];
-      const seconds = (now - first.now) / 1000;
-      const trend = seconds >= 1 ? (buffer - first.buffer) / seconds : 0;
-
-      // Six seconds is the HLS target, not a requirement before adapting.
-      // Begin evaluating after 3s are playable. Bound cold producer warm-up
-      // by elapsed time, not the age of each resetting fragment request.
       if (this.phase === 'startup' || this.phase === 'seeking') {
-        if (this.phaseStartedAt === null) this.phaseStartedAt = now;
-        const warmupMs = this.phase === 'seeking' ? 6000 : 9000;
-        if (buffer >= 3 || now - this.phaseStartedAt >= warmupMs) {
-          this.phase = 'normal';
-          this.phaseStartedAt = null;
-        } else return this.result(false);
-      }
-
-      // Sustained loss of playable buffer is the only reason to downshift.
-      // Avoid overreacting to the normal three-second fragment sawtooth.
-      // A fragment can consume 3-4s of buffer before the next arrives.
-      // Look for net depletion across that interval before downshifting early.
-      const sustainedDrain = seconds >= 4 && buffer < 4 && trend < -0.45;
-      const danger = buffer < 0.5 || sustainedDrain ||
-        (buffer < 2.5 && (trend < -0.25 || requestAge > 1800));
-      if (!danger) this.dangerSince = null;
-      else if (this.dangerSince === null) this.dangerSince = now;
-
-      if (this.cap > 0 && this.dangerSince !== null &&
-          (buffer < 0.5 || sustainedDrain || now - this.dangerSince >= 1000) &&
-          now - this.lastChangeAt >= 2000) {
-        this.cap = Math.max(0, this.cap - (buffer < 0.5 ? 2 : 1));
-        this.phase = 'recovering';
-        this.lastChangeAt = now;
-        // Only a recent failed upgrade gets a short retry delay.
-        if (now - this.lastUpgradeAt < 15000) this.retryAfter = now + 10000;
-        this.healthySince = null;
-        this.dangerSince = null;
-        this.samples = [];
-        return this.result(true);
-      }
-
-      // Three playable seconds during six-second buffering is sufficient
-      // for a cautious one-rung quality trial.
-      const healthy = buffer >= 3 && !danger;
-      if (!healthy) this.healthySince = null;
-      else if (this.healthySince === null) this.healthySince = now;
-      if (this.healthySince !== null && now - this.healthySince >= 4000 &&
-          now >= this.retryAfter && now - this.lastChangeAt >= 4000 &&
-          currentLevel >= this.cap && this.cap < limit &&
-          (seconds < 2 || trend >= -0.25)) {
-        this.cap++;
+        if (this.warmStartedAt === null) this.warmStartedAt = now;
+        if (buffer < 2.5 && now - this.warmStartedAt < 6000) return this.result(false);
         this.phase = 'normal';
-        this.lastChangeAt = now;
-        this.lastUpgradeAt = now;
-        this.healthySince = null;
+      }
+      if (currentLevel === this.cap && this.presentedLevel !== this.cap) {
+        this.presentedLevel = this.cap;
+        this.goodFragments = 0;
+        this.slowFragments = 0;
+      }
+
+      // Only threatened playback or repeated slow fragments justify going
+      // lower. A normal HLS buffer sawtooth never triggers a switch.
+      const danger = buffer < 0.5 ||
+        (buffer < 2.3 && requestAge >= 1400) ||
+        (this.waiting && buffer < 1.5) ||
+        (this.slowFragments >= 2 && buffer < 4);
+      if (this.cap > 0 && danger && now - this.lastDownshiftAt >= 2000) {
+        const previous = this.cap;
+        this.cap = Math.max(0, previous - (buffer < 0.5 ? 2 : 1));
+        if (this.trialLevel === previous) {
+          this.failures.set(previous, (this.failures.get(previous) || 0) + 1);
+        }
+        this.resetEvidence();
+        this.phase = 'recovering';
+        this.lastDownshiftAt = now;
         return this.result(true);
       }
-      if (this.phase === 'recovering' && healthy) this.phase = 'normal';
+
+      // Don't try another rung until the current one is actually playing
+      // and has supplied two fast segments. After a failed trial, require
+      // more (and faster) evidence rather than an arbitrary long timeout.
+      const next = this.cap + 1;
+      const needed = Math.min(6, 2 + 2 * (this.failures.get(next) || 0));
+      if (this.cap < limit && this.presentedLevel === this.cap &&
+          this.goodFragments >= needed && buffer >= 3 && !this.waiting) {
+        this.cap = next;
+        this.resetEvidence();
+        this.trialLevel = next;
+        this.phase = 'normal';
+        return this.result(true);
+      }
+      if (this.phase === 'recovering' && buffer >= 3) this.phase = 'normal';
       return this.result(false);
     }
-    result(change) {
-      return {phase:this.phase, cap:this.cap, bps:this.bps,
-        audio:audioProfile(bitrate(this.levels[this.cap])), change};
+
+    resetEvidence() {
+      this.presentedLevel = -1;
+      this.goodFragments = 0;
+      this.slowFragments = 0;
+      this.trialLevel = -1;
     }
+    result(change) { return {phase:this.phase, cap:this.cap, bps:this.bps, change}; }
   }
-  const api = {PlaybackPolicy, chooseLevel, audioProfile};
+  const api = {PlaybackPolicy, chooseLevel};
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.MemoriesRkmppPolicy = api;
 })(typeof window === 'undefined' ? null : window);
