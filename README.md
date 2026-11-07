@@ -2,9 +2,9 @@
 
 Hardware transcoding for **Nextcloud Memories 11.0.2 / go-vod 0.7.0**, tested on a ROCK 5B+ with the Armbian 6.1 vendor kernel, Rockchip MPP/RGA and Mali-G610 OpenCL.
 
-The server requires hardware video processing: MPP decoding/encoding, RGA scaling/rotation and Mali HDR-to-SDR mapping. Unsupported video fails explicitly instead of silently using CPU video processing. Compatible SDR AVC/HEVC originals use stream copy. Audio is shared across video qualities and can adapt independently.
+The server requires hardware video processing: MPP decoding/encoding, RGA scaling/rotation and Mali HDR-to-SDR mapping. Unsupported video fails explicitly instead of silently using CPU video processing. Compatible SDR AVC/HEVC originals use stream copy. Audio is shared across video qualities; the browser keeps one default audio track during video quality changes.
 
-The browser helper measures connection speed once before startup and selects an affordable initial rendition, preferring compatible Original. After startup, a small buffer-health controller raises quality one step at a time when at least three seconds remain buffered and lowers it only on genuine depletion. hls.js retains fragment scheduling, a six-second buffer target and network error handling; switching uses conservative non-flushing quality selection. Paced encoder delivery does not masquerade as Internet speed. The browser badge shows the presented dimensions.
+The browser helper measures connection speed once before startup and selects an affordable initial rendition, preferring compatible Original. After startup, one quality controller uses actual completed HLS fragments and transfer headroom to try one higher quality at a time. It reduces quality when delivered segments are unsustainable or playback is approaching starvation; ordinary fragment-sized buffer oscillations do not force changes. hls.js retains fragment scheduling, a six-second buffer target and network error handling; switching uses conservative non-flushing quality selection. Paced encoder delivery does not masquerade as Internet speed. The browser badge shows the presented dimensions.
 
 ## Playback flow
 
@@ -24,10 +24,10 @@ flowchart LR
     V --> N
     A --> N
     N -->|"HLS video + independent audio"| P
-    B["One startup speed check + buffer health"] -->|"select quality"| P
+    B["One startup speed check + fragment delivery evidence"] -->|"select quality"| P
 ```
 
-Only requested renditions start workers. The player prefers compatible Original when the one-time startup estimate permits it, then learns from its playable buffer rather than repeated synthetic probes. Audio has its own shared timeline, so a video-quality change does not restart its worker. SDR skips HDR tone mapping. The native Android client is a separate integration.
+Only requested renditions start workers. The player prefers compatible Original when the one-time startup estimate permits it, then learns from delivered fragments and short-term buffer safety rather than repeated synthetic probes. Audio has its own shared timeline and the browser does not automatically switch audio profiles during video changes. SDR skips HDR tone mapping. The native Android client is a separate integration.
 
 High audio is 192 kbps AAC when encoding, or the existing source bitrate when compatible AAC can be copied (up to 320 kbps). Lower profiles are 96, 64 and 32 kbps.
 
