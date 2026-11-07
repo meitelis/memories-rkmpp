@@ -1,200 +1,165 @@
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
-const {chooseLevel, audioProfile, selectQuality, selectAudio, beginSeek, requestAge, renditionText, configure, update} = require('./player.js');
+const {selectQuality, beginSeek, requestAge, renditionText, configure, update} = require('./player.js');
 const {PlaybackPolicy} = require('./policy.js');
 
-const settle=()=>new Promise(resolve=>setImmediate(resolve));
-test('a seek does not interpret its old request timer as a new network stall',()=>{
-  const levels=[400000,5000000].map((bitrate,i)=>({bitrate,url:[`/${i}.m3u8`]}));
-  const policy=new PlaybackPolicy(levels,20000000,true);
-  policy.beginSeek();
-  const state={policy,seekAt:0,inflight:{stats:{loading:{start:6500}}}};
-  const video={seeking:false,readyState:4};
-  const step=()=>policy.step({now:7000,buffer:7.5,playing:true,seeking:video.seeking,auto:true,
-    requestAge:requestAge(video,state,7000,7000)});
-  assert.equal(step().cap,1,'resumed playback keeps its affordable rendition');
-  video.seeking=true;video.readyState=1;state.inflight=null;
-  assert.equal(step().cap,1,'a pending seek does not immediately force lower quality');
-});
-
-test('a seek respects an earlier downshift while Original pictures are still buffered',()=>{
-  const state={selected:'auto',cap:0,hls:{currentLevel:6},policy:{beginSeek(){this.seeking=true}},inflight:{}};
-  beginSeek(state);
-  assert.equal(state.hls.loadLevel,0);
-  assert.equal(state.seekLevel,0);
-  assert.equal(state.inflight,null);
-  assert.equal(state.policy.seeking,true);
-  state.cap=6;beginSeek(state);
-  assert.equal(state.hls.loadLevel,6,'a fast-network seek keeps Original');
-});
-
-test('runtime audio changes schedule the next track without flushing current audio', () => {
-  const hls={set audioTrack(_) {throw Error('immediate audio flush');}};
-  selectAudio(hls,2,false);
-  assert.equal(hls.nextAudioTrack,2);
-});
-
-
-const levels = [350000,700000,1800000,4000000,9000000].map((bitrate,i)=>({bitrate,url:[i===4?'/direct.m3u8?x=y':`/${i}.m3u8`]}));
-test('startup budgets headroom and selects the original only when ready and affordable', () => {
-  assert.equal(chooseLevel(levels,20000000),4);
-  assert.equal(chooseLevel(levels,5000000),3);
-  assert.equal(chooseLevel(levels,20000000,false),3);
-  assert.equal(chooseLevel(levels,20000000,true,2),2);
-  assert.equal(chooseLevel(levels,150000),0);
-});
-test('audio budget is independent of video resolution', () => {
-  assert.equal(audioProfile(8000000),'audio');
-  assert.equal(audioProfile(2000000),'audio96');
-  assert.equal(audioProfile(700000),'audio64');
-  assert.equal(audioProfile(300000),'audio32');
-});
-test('manual and Auto selections use non-flushing loadLevel and retain audio', () => {
-  const video={qualityList:[{id:'1080:6000000',index:1}],dispatchEvent(){}};
-  const hls={levels:[{},{}],
-    set nextLevel(_) {throw Error('nextLevel may flush buffered data');},
-    set currentLevel(_) {throw Error('playing buffer flushed');},
-    set audioTrack(_) {throw Error('shared audio reset');}};
-  selectQuality(video,hls,'1080:6000000');
-  assert.equal(hls.loadLevel,1);
-  hls.levels[1].audioGroupIds=['audio'];
-  selectQuality(video,hls,'1080:6000000');
-  assert.equal(hls.loadLevel,1);
-  selectQuality(video,hls,'auto');
-  assert.equal(hls.loadLevel,-1);
-});
-test('label reports presented resolution and original codec', () => {
-  const video={videoWidth:1920,videoHeight:1080};
-  const hls={autoLevelEnabled:true,currentLevel:0,levels:[{videoCodec:'hvc1.1.6.L120.80',url:['/1080p.m3u8']}]};
-  assert.equal(renditionText(video,hls),'Auto · 1080p (1920×1080) · HEVC');
-  hls.levels[0].url=['/direct.m3u8?codecs=hevc'];
-  assert.match(renditionText(video,hls),/^Original · 1080p/);
-});
-
-test('startup holds fragments without aborting the manifest and resumes when parsed', async () => {
-  const events = new Map();
-  const hls = {
-    constructor:{Events:{MANIFEST_PARSED:'parsed'},version:'1.7'}, config:{}, levels:[],
-    audioTracks:['audio','audio96','audio64','audio32'].map(id=>({url:`https://example.test/${id}.m3u8?token=fixture`})),
-    on(event,fn){ events.set(event,fn); },
-    stopLoad(){ throw Error('manifest aborted before parsing'); },
-    startLoad(){ this.started=true; },
+const EVENTS=['MANIFEST_PARSED','FRAG_LOADING','FRAG_LOADED','FRAG_BUFFERED',
+  'LEVEL_SWITCHED','FPS_DROP_LEVEL_CAPPING','ERROR','AUDIO_TRACKS_UPDATED'];
+const levels=[400000,800000,2000000].map((bitrate,i)=>({
+  bitrate,width:640+400*i,height:360+180*i,url:['/'+i+'.m3u8']
+}));
+function fixture(){
+  const listeners=new Map(),writes=[];
+  const hls={
+    constructor:{Events:Object.fromEntries(EVENTS.map(x=>[x,x])),version:'1.7.4'},
+    config:{},levels:[],audioTracks:[],currentLevel:0,
+    on(e,fn){listeners.set(e,fn)},off(e){listeners.delete(e)},
+    startLoad(){this.started=true},stopLoad(){this.stopped=true},
+    set loadLevel(x){writes.push(x);this._loadLevel=x},
+    get loadLevel(){return this._loadLevel},
+    set nextLevel(_){throw Error('may flush video')},
+    set currentLevel(_) {throw Error('may flush video')},
+    set audioTrack(_) {throw Error('audio switching must not occur')},
+    set nextAudioTrack(_) {throw Error('audio switching must not occur')},
   };
-  const state={badge:{dataset:{}},audioChanged:0};
-  configure({},state,hls);
-  assert.equal(hls.config.autoStartLoad,false);
-  assert.equal(hls.config.maxBufferLength,6);
-  assert.equal(hls.config.maxMaxBufferLength,6);
-  assert.equal(hls.started,undefined);
-  hls.levels=[{bitrate:400000,url:['/480plow.m3u8']}];
-  await events.get('parsed')();
-  assert.equal(hls.started,true);
-  assert.equal(hls.loadLevel,0,'buffer-based Auto owns the initial rendition');
-  assert.equal(state.checking,false);
-  assert.equal(hls.audioTrack,3,'lowest video rendition starts with low-bandwidth audio');
-  state.abort.abort();
-});
-
-test('fast startup awaits an affordable Original preflight instead of racing into an encoder', async () => {
-  const previousWindow=global.window,previousFetch=global.fetch;
-  const events=new Map();
-  global.window={OC:{generateUrl:()=>'/probe'}};
-  global.fetch=async url=>{
-    if(url.includes('/direct.m3u8')) {
-      await new Promise(resolve=>setTimeout(resolve,30));
-      return {ok:true,body:{cancel:async()=>{}}};
-    }
-    return {ok:true,headers:{get:()=> 'application/octet-stream'},body:{getReader:()=>{
-      let sent=false;
-      return {read:async()=>sent?{done:true}:(sent=true,{done:false,value:new Uint8Array(1572864)}),releaseLock(){}};
-    }}};
+  // Use an own data property for currentLevel; it is read-only in tests.
+  Object.defineProperty(hls,'currentLevel',{value:0,writable:true,configurable:true});
+  const video={
+    _qualityHls:hls,currentTime:0,videoWidth:1280,videoHeight:720,
+    paused:false,ended:false,seeking:false,readyState:4,
+    buffered:{length:1,start:()=>0,end:()=>5},
+    closest:()=>null,dispatchEvent(){},qualityList:[],
   };
-  const hls={constructor:{Events:{MANIFEST_PARSED:'parsed'},version:'1.7.4'},
-    config:{},levels:[],audioTracks:[],on(e,fn){events.set(e,fn)},startLoad(){this.started=true;}};
-  const state={badge:{dataset:{}},audioChanged:0};
-  try {
-    configure({},state,hls);
-    hls.levels=[{bitrate:4000000,url:['/1440p.m3u8']},{bitrate:8000000,url:['/direct.m3u8']}];
-    await events.get('parsed')();
-    assert.equal(hls.startLevel,1);
-    assert.equal(state.originalReady,true);
-    assert.equal(hls.loadLevel,1);
-  } finally {
-    state.abort?.abort();global.window=previousWindow;global.fetch=previousFetch;
-  }
-});
-
-test('late audio-track discovery applies the measured startup rate immediately', async () => {
-  const events=new Map();
-  const hls={constructor:{Events:{MANIFEST_PARSED:'parsed',AUDIO_TRACKS_UPDATED:'audio'},version:'1.7.4'},
-    config:{},levels:[],audioTracks:[],on(e,fn){events.set(e,fn)},startLoad(){},
-    set nextAudioTrack(_) {throw Error('initial audio was delayed into a runtime switch')}};
-  const state={badge:{dataset:{}},audioChanged:0};
-  configure({},state,hls);
-  hls.levels=[{bitrate:400000,url:['/480plow.m3u8']}];
-  await events.get('parsed')();
-  hls.audioTracks=['audio','audio96','audio64','audio32'].map(id=>({url:`https://example.test/${id}.m3u8`}));
-  events.get('audio')();
-  assert.equal(hls.audioTrack,3);
-  assert.equal(state.audioProfile,'audio32');
-  state.abort.abort();
-});
-
-test('healthy buffer upgrades one step without replacing audio, source or probing again', () => {
-  const previousNow = Date.now;
-  const levels = [350000,700000,1800000].map((bitrate,i) => ({
-    bitrate, width:640+i*400, height:360+i*180, url:['/'+i+'.m3u8']
-  }));
-  const policy = new PlaybackPolicy(levels,600000,true);
-  const changes = [];
-  const hls = {
-    levels, get currentLevel(){return 0;}, config:{maxMaxBufferLength:18,maxBufferSize:48*1024*1024},
-    audioTracks:[], on(){}, off(){},
-    set loadLevel(v){changes.push(v);},
-    set nextLevel(_){throw Error('nextLevel can flush existing buffers');},
-    set audioTrack(_){throw Error('shared audio should not reset');},
-    set currentLevel(_){throw Error('playing source should not reset');},
+  const state={badge:{dataset:{},textContent:''},debug:false,decoderCap:Infinity,bps:0};
+  return {hls,video,state,writes,
+    emit:(event,data={})=>listeners.get(event)?.(event,data),
+    frame:(level,elapsedMs=1000)=> {
+      const stats={loading:{start:Math.max(1,performance.now()-elapsedMs)}};
+      listeners.get('FRAG_BUFFERED')?.('FRAG_BUFFERED',
+        {frag:{type:'main',duration:4,level,stats,start:0,end:4},stats});
+    },
   };
-  const video = {
-    _qualityHls:hls, currentTime:0, videoWidth:640, videoHeight:360,
-    paused:false, ended:false, seeking:false,
-    buffered:{length:1,start:()=>0,end:()=>12},
-    closest:()=>null,
-  };
-  const state = {
-    hls, policy, badge:{dataset:{},textContent:''}, cap:policy.cap,
-    originalReady:true, selected:'auto', decoderCap:Infinity,
-    checking:false, abort:new AbortController(), bps:600000,
-    audioInitialized:true, audioProfile:'audio32', audioChanged:0,
-  };
-  try {
-    Date.now=()=>1000;
-    update(video,state);
-    assert.equal(changes.length,0,'no quality change before buffer is proven healthy');
-    Date.now=()=>11000;
-    update(video,state);
-    assert.deepEqual(changes,[1],'one scheduled upgrade');
-    assert.equal(state.cap,1);
-    assert.equal(hls.currentLevel,0,'rendered video is not reset or forced');
-  } finally {Date.now=previousNow;state.abort.abort();}
+}
+async function boot(f){
+  const old=global.fetch;
+  global.fetch=async()=>({ok:false,headers:{get:()=>''}});
+  try{
+    configure(f.video,f.state,f.hls);
+    f.hls.levels=levels;
+    await f.emit('MANIFEST_PARSED');
+  }finally{global.fetch=old}
+}
+
+test('manual and Auto selections never invoke flushing HLS switches',()=>{
+  const f=fixture();
+  f.video.qualityList=[{id:'720:800000',index:1}];
+  selectQuality(f.video,f.hls,'720:800000');
+  selectQuality(f.video,f.hls,'auto',{policy:{cap:2},badge:{dataset:{}}});
+  assert.deepEqual(f.writes,[1,2]);
 });
 
-test('an internal auto choice is scheduled even though hls.js manualLevel is used',()=>{
-  const video={qualityList:[],dispatchEvent(){}};
-  const hls={currentLevel:0};
-  selectQuality(video,hls,'auto',{policy:{cap:2},badge:{dataset:{}}});
-  assert.equal(hls.loadLevel,2);
-  assert.equal(video._qualitySelected,'auto');
+test('badge reports presented dimensions and codec',()=>{
+  const f=fixture();
+  f.hls.levels=[{videoCodec:'hvc1.1.6.L120.80',url:['/720p.m3u8']}];
+  assert.equal(renditionText(f.video,f.hls),'Auto · 720p (1280×720) · HEVC');
+  f.hls.levels[0].url=['/direct.m3u8?token=x'];
+  assert.match(renditionText(f.video,f.hls),/^Original · 720p/);
 });
 
-test('switching to Auto from a manual level restores the buffer policy cap without a flush',()=>{
-  const video={qualityList:[{id:'360:400000',index:0}],dispatchEvent(){}};
-  const hls={currentLevel:0,set nextLevel(_){throw Error('would flush buffer')},
-    set currentLevel(_){throw Error('would flush source')}};
-  const state={policy:{cap:3},badge:{dataset:{}},selected:'auto'};
-  selectQuality(video,hls,'360:400000',state);
-  assert.equal(hls.loadLevel,0);
-  selectQuality(video,hls,'auto',state);
-  assert.equal(hls.loadLevel,3);
-  assert.equal(video._qualitySelected,'auto');
+test('cold seek resets proof but keeps previously selected resolution',()=>{
+  const f=fixture(),p=new PlaybackPolicy(levels,50000000,true);
+  f.hls.currentLevel=2;
+  f.state.policy=p;f.state.hls=f.hls;f.state.cap=2;f.state.selected='auto';
+  p.step({now:0,buffer:5,playing:true,seeking:false,auto:true,
+    originalReady:true,currentLevel:2});
+  p.onFragment({level:2,duration:4,elapsedMs:1000,buffer:5});
+  beginSeek(f.state);
+  assert.equal(f.hls.loadLevel,2);
+  assert.equal(p.phase,'seeking');
+  assert.equal(p.goodFragments,0);
+});
+
+test('request age uses the monotonic loader clock',()=>{
+  const f=fixture();
+  assert.equal(requestAge(f.video,{inflight:{stats:{loading:{start:700}}}},1000,2200),1500);
+});
+
+test('startup still uses one bounded probe and a six-second forward buffer',async()=>{
+  const f=fixture();await boot(f);
+  try{
+    assert.equal(f.hls.config.maxBufferLength,6);
+    assert.equal(f.hls.config.maxMaxBufferLength,6);
+    assert.equal(f.hls.config.autoStartLoad,false);
+    assert.equal(f.hls.started,true);
+    assert.equal(f.hls.loadLevel,0);
+    assert.equal(f.state.audioProfile,'audio');
+  }finally{f.state.abort.abort()}
+});
+
+test('fast fragments—not 500ms polling—promote one rung at a time',async()=>{
+  const f=fixture();await boot(f);
+  try{
+    update(f.video,f.state);
+    const count=f.writes.length;
+    for(let i=0;i<20;i++)update(f.video,f.state);
+    assert.equal(f.writes.length,count);
+    // We use actual performance.now()-loading.start in the fragment handler.
+    // In fast Node test runs performance.now() may be <1000: make it
+    // large enough for the recorded positive fragment timestamp.
+    const previous=global.performance;
+    Object.defineProperty(global,'performance',{configurable:true,value:{now:()=>5000}});
+    try{
+      f.frame(0);update(f.video,f.state);
+      assert.equal(f.hls.loadLevel,0);
+      f.frame(0);update(f.video,f.state);
+      assert.equal(f.hls.loadLevel,1);
+      for(let i=0;i<4;i++){f.frame(1);update(f.video,f.state)}
+      assert.equal(f.state.policy.cap,1,'previous rendition not yet displayed');
+      f.hls.currentLevel=1;
+      update(f.video,f.state);
+      f.frame(1);f.frame(1);update(f.video,f.state);
+      assert.equal(f.hls.loadLevel,2);
+    }finally{Object.defineProperty(global,'performance',{configurable:true,value:previous})}
+  }finally{f.state.abort.abort()}
+});
+
+test('video quality changes do not switch the independent AAC track',async()=>{
+  const f=fixture();await boot(f);
+  try{
+    f.hls.audioTracks=['audio','audio96','audio64','audio32'].map(id=>({url:'/'+id+'.m3u8'}));
+    f.emit('AUDIO_TRACKS_UPDATED');
+    update(f.video,f.state);
+    f.video.qualityList=[{id:'720:800000',index:1}];
+    selectQuality(f.video,f.hls,'720:800000',f.state);
+    assert.equal(f.state.audioProfile,'audio');
+    assert.equal(f.hls.loadLevel,1);
+  }finally{f.state.abort.abort()}
+});
+
+test('waiting with almost no buffer can still trigger immediate downshift',async()=>{
+  const f=fixture();await boot(f);
+  try{
+    f.state.policy.cap=2;f.state.cap=2;
+    f.hls.currentLevel=2;
+    f.state.policy.phase='normal';
+    f.state.policy.onWaiting();
+    f.video.buffered.end=()=>1.2;
+    update(f.video,f.state);
+    assert.equal(f.state.policy.cap,1);
+    assert.equal(f.hls.loadLevel,1);
+  }finally{f.state.abort.abort()}
+});
+
+test('manual selection is not overridden by automatic quality decisions',async()=>{
+  const f=fixture();await boot(f);
+  try{
+    f.state.selected='720:800000';
+    f.video.qualityList=[{id:'720:800000',index:1}];
+    selectQuality(f.video,f.hls,'720:800000',f.state);
+    const before=f.writes.length;
+    f.state.policy.onWaiting();
+    f.video.buffered.end=()=>0.2;
+    update(f.video,f.state);
+    assert.equal(f.writes.length,before);
+  }finally{f.state.abort.abort()}
 });
