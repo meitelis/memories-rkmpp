@@ -114,6 +114,12 @@ test('manual 480p to Auto immediately releases the manual lock',async()=>{
   }finally{f.state.abort.abort()}
 });
 
+test('Auto selector is safe without a per-video state object',()=>{
+  const f=fixture();
+  assert.doesNotThrow(()=>selectQuality(f.video,f.hls,'auto'));
+  assert.equal(f.hls.autoLevelEnabled,true);
+});
+
 test('invalid manual selection cannot silently turn off Auto',async()=>{
   const f=fixture();await boot(f);
   try{
