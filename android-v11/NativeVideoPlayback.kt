@@ -28,7 +28,14 @@ class NativeVideoPlayback(private val activity: MainActivity) {
     private var bandwidthMeter: DefaultBandwidthMeter? = null
     private var selected = "auto"
 
-    fun reset() { selected = "auto" }
+    /** A new clip must not inherit the previous clip's manual track group. */
+    fun reset(player: ExoPlayer?) {
+        selected = "auto"
+        if (player != null) {
+            player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+                .clearOverridesOfType(C.TRACK_TYPE_VIDEO).build()
+        }
+    }
 
     fun createPlayer(): ExoPlayer {
         selected = "auto"
