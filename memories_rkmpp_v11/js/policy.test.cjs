@@ -13,6 +13,17 @@ const fragment = (p, level, opts={}) => p.onFragment({
   buffer:5, ...opts,
 });
 
+test('resuming Auto from manual lower quality discards stale upgrades',()=>{
+  const p=new PlaybackPolicy(levels,50000000,true);
+  p.phase='normal';p.goodFragments=2;p.presentedLevel=6;
+  p.resumeAuto(0);
+  assert.equal(p.cap,0);
+  assert.equal(p.goodFragments,0);
+  assert.equal(p.presentedLevel,-1);
+  assert.equal(p.phase,'startup');
+  assert.equal(p.warmStartedAt,null);
+});
+
 test('one startup bandwidth selection prefers Original when ready and affordable',()=>{
   assert.equal(chooseLevel(levels,50000000),6);
   assert.equal(chooseLevel(levels,800000),0);
