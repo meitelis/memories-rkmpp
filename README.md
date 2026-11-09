@@ -1,6 +1,6 @@
-# Memories 11.0.2 on RK3588
+# Memories 11.1.1 on RK3588
 
-Hardware transcoding for **Nextcloud Memories 11.0.2 / go-vod 0.7.0**, tested on a ROCK 5B+ with the Armbian 6.1 vendor kernel, Rockchip MPP/RGA and Mali-G610 OpenCL.
+Hardware transcoding for **Nextcloud Memories 11.1.1 / go-vod 0.7.0** on a ROCK 5B+ with the Armbian 6.1 vendor kernel, Rockchip MPP/RGA and Mali-G610 OpenCL. Hardware validation was performed with the earlier Memories 11.0.2 setup; the 11.1.1 integration requires fresh real-device validation.
 
 The server requires hardware video processing: MPP decoding/encoding, RGA scaling/rotation and Mali HDR-to-SDR mapping. Unsupported video fails explicitly instead of silently using CPU video processing. Compatible SDR AVC/HEVC originals use stream copy. Audio is shared across video qualities; the browser keeps one default audio track during video quality changes.
 
@@ -41,12 +41,13 @@ git pull --ff-only
 sh scripts/deploy-v11.sh
 ```
 
-The script checks Memories 11.0.2, builds and tests the ARM64 image, starts the health-checked service, installs the browser helper and verifies the real go-vod 0.7.0 handshake. The container has a read-only root, no capabilities, no published host port and a dedicated cache volume. Original media is fetched through authenticated Nextcloud callbacks.
+**First upgrade the official Memories app to 11.1.1 using Nextcloud's normal update process.** The script then checks for exactly Memories 11.1.1, builds and tests the ARM64 image, starts the health-checked service, installs the browser helper and verifies the real go-vod 0.7.0 handshake. It does not upgrade the official Memories app. Do not run it until the draft PR is reviewed and merged. The container has a read-only root, no capabilities, no published host port and a dedicated cache volume. Original media is fetched through authenticated Nextcloud callbacks.
 
 ## Validate
 
 ```sh
 node --test memories_rkmpp_v11/js/*.test.cjs
+php scripts/test-v11-compat.php
 bash scripts/test-v11-rkmpp.sh --matrix
 ```
 
