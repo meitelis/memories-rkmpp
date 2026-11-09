@@ -4,6 +4,8 @@ Hardware transcoding for **Nextcloud Memories 11.1.1 / go-vod 0.7.0** on a ROCK 
 
 The server requires hardware video processing: MPP decoding/encoding, RGA scaling/rotation and Mali HDR-to-SDR mapping. Unsupported video fails explicitly instead of silently using CPU video processing. Compatible SDR AVC/HEVC originals use stream copy. Audio is shared across video qualities; the browser keeps one default audio track during video quality changes.
 
+This combined 11.1.1 compatibility update also includes the complete-response bandwidth-probe fix and its regression tests from PR #17. A failed/truncated probe no longer overwrites the last valid complete sample.
+
 The browser helper uses **hls.js native ABR** for Auto quality: hls.js selects each rendition, responds to buffer starvation and adapts as transfer bandwidth changes. Manual choices pin a rendition; reselecting Auto restores `loadLevel = -1` instead of pinning another resolution. A bounded same-origin probe seeds the initial bandwidth estimator; a new probe on supported network-change events, manual-to-Auto reentry or occasional low-quality recovery reseeds that estimator. FFmpeg's on-demand segment-production delay is measured separately from network transfer so it cannot perpetually masquerade as poor Internet speed. An 18-second forward buffer and 96 MiB cap provide headroom. Original stays available when compatible; its playlist may need a short background copy-grid preflight. The playback badge reports the actual presented dimensions.
 
 ## Playback flow
