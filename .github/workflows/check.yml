@@ -30,7 +30,8 @@ jobs:
       - name: Browser and deployment checks
         run: |
           node --test memories_rkmpp_v11/js/*.test.cjs
-          sh -n scripts/deploy-v11.sh
+          sh -n scripts/deploy-v11.sh scripts/test-v11-deploy-preflight.sh
+          sh scripts/test-v11-deploy-preflight.sh
           bash -n scripts/test-v11-rkmpp.sh scripts/test-v11-network.sh
           find memories_rkmpp_v11 -name '*.php' -print0 | xargs -0 -n1 php -l
           php -l scripts/test-v11-compat.php
