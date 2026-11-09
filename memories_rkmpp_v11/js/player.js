@@ -70,15 +70,18 @@
             bytes += part.value.byteLength;
           }
         } finally {
-          if (bytes) estimate = bytes * 8000 / Math.max(25, performance.now() - start);
           reader.releaseLock();
         }
+        // A truncated or aborted response is not a valid bandwidth sample:
+        // partial bytes over a short interval can wildly overstate capacity.
+        if (bytes !== size || abort.signal.aborted) break;
+        estimate = bytes * 8000 / Math.max(25, performance.now() - start);
         // The small request warms the connection. TCP slow start, mobile
         // latency and browser scheduling can make it severely pessimistic.
         // Continue the bounded larger sample; the overall timer limits cost
         // even on a genuinely slow link.
       }
-    } catch { /* Timeout uses partial bytes; unavailable probe starts low. */ }
+    } catch { /* Network failures or timeouts retain the last complete sample. */ }
     finally {
       clearTimeout(timer);
       signal.removeEventListener('abort', onAbort);

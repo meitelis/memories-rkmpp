@@ -11,8 +11,10 @@ use OCP\Util;
 class PlayerScriptListener implements IEventListener {
     public function handle(Event $event): void {
         if (!$event instanceof BeforeTemplateRenderedEvent) { return; }
-        // This adapter uses the pinned 11.0.2 native quality-controller API.
-        if (Server::get(IConfig::class)->getAppValue('memories', 'installed_version') !== '11.0.2') { return; }
+        // Only inject on verified upstream player interfaces. Do not assume future
+        // Memories releases retain the same hls.js quality-controller hooks.
+        $version = Server::get(IConfig::class)->getAppValue('memories', 'installed_version');
+        if (!in_array($version, ['11.0.2', '11.1.1'], true)) { return; }
         $path = parse_url(Server::get(IRequest::class)->getRequestUri(), PHP_URL_PATH);
         if (is_string($path) && preg_match('~/apps/memories(?:/|$)~', $path)) {
             Util::addScript('memories_rkmpp_v11', 'policy');

@@ -1,6 +1,6 @@
 services:
   memories-rkmpp:
-    image: local/memories-rkmpp:memories-11.0.2-govod-0.7.0-r9
+    image: local/memories-rkmpp:memories-11.1.1-govod-0.7.0-r10
     pull_policy: never
     container_name: memories-rkmpp
     init: true

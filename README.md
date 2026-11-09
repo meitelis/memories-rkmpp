@@ -1,8 +1,10 @@
-# Memories 11.0.2 on RK3588
+# Memories 11.1.1 on RK3588
 
-Hardware transcoding for **Nextcloud Memories 11.0.2 / go-vod 0.7.0**, tested on a ROCK 5B+ with the Armbian 6.1 vendor kernel, Rockchip MPP/RGA and Mali-G610 OpenCL.
+Hardware transcoding for **Nextcloud Memories 11.1.1 / go-vod 0.7.0** on a ROCK 5B+ with the Armbian 6.1 vendor kernel, Rockchip MPP/RGA and Mali-G610 OpenCL. Hardware validation was performed with the earlier Memories 11.0.2 setup; the 11.1.1 integration requires fresh real-device validation.
 
 The server requires hardware video processing: MPP decoding/encoding, RGA scaling/rotation and Mali HDR-to-SDR mapping. Unsupported video fails explicitly instead of silently using CPU video processing. Compatible SDR AVC/HEVC originals use stream copy. Audio is shared across video qualities; the browser keeps one default audio track during video quality changes.
+
+This combined 11.1.1 compatibility update also includes the complete-response bandwidth-probe fix and its regression tests from PR #17. A failed/truncated probe no longer overwrites the last valid complete sample.
 
 The browser helper uses **hls.js native ABR** for Auto quality: hls.js selects each rendition, responds to buffer starvation and adapts as transfer bandwidth changes. Manual choices pin a rendition; reselecting Auto restores `loadLevel = -1` instead of pinning another resolution. A bounded same-origin probe seeds the initial bandwidth estimator; a new probe on supported network-change events, manual-to-Auto reentry or occasional low-quality recovery reseeds that estimator. FFmpeg's on-demand segment-production delay is measured separately from network transfer so it cannot perpetually masquerade as poor Internet speed. An 18-second forward buffer and 96 MiB cap provide headroom. Original stays available when compatible; its playlist may need a short background copy-grid preflight. The playback badge reports the actual presented dimensions.
 
@@ -41,12 +43,13 @@ git pull --ff-only
 sh scripts/deploy-v11.sh
 ```
 
-The script checks Memories 11.0.2, builds and tests the ARM64 image, starts the health-checked service, installs the browser helper and verifies the real go-vod 0.7.0 handshake. The container has a read-only root, no capabilities, no published host port and a dedicated cache volume. Original media is fetched through authenticated Nextcloud callbacks.
+**First upgrade the official Memories app to 11.1.1 using Nextcloud's normal update process.** The script then checks for exactly Memories 11.1.1, builds and tests the ARM64 image, starts the health-checked service, installs the browser helper and verifies the real go-vod 0.7.0 handshake. It does not upgrade the official Memories app. Do not run it until the draft PR is reviewed and merged. The container has a read-only root, no capabilities, no published host port and a dedicated cache volume. Original media is fetched through authenticated Nextcloud callbacks.
 
 ## Validate
 
 ```sh
 node --test memories_rkmpp_v11/js/*.test.cjs
+php scripts/test-v11-compat.php
 bash scripts/test-v11-rkmpp.sh --matrix
 ```
 
