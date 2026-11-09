@@ -33,4 +33,6 @@ jobs:
           sh -n scripts/deploy-v11.sh
           bash -n scripts/test-v11-rkmpp.sh scripts/test-v11-network.sh
           find memories_rkmpp_v11 -name '*.php' -print0 | xargs -0 -n1 php -l
+          php -l scripts/test-v11-compat.php
+          php scripts/test-v11-compat.php
           docker compose -f compose.yml config --quiet
