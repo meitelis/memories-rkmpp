@@ -264,6 +264,124 @@ test('an invalid probe response does not invent a high bandwidth',async()=>{
   }
 });
 
+test('truncated and interrupted probes do not seed bandwidth',async()=>{
+  const previousFetch=global.fetch,previousWindow=global.window;
+  global.window={OC:{generateUrl:()=>'/probe'}};
+  try{
+    for(const mode of ['truncated','interrupted']){
+      global.fetch=async()=>({
+        ok:true,headers:{get:()=> 'application/octet-stream'},
+        body:{getReader(){
+          let reads=0;
+          return {
+            async read(){
+              if(++reads===1)return {done:false,value:new Uint8Array(65536)};
+              if(mode==='interrupted')throw new Error('network interrupted');
+              return {done:true};
+            },
+            releaseLock(){},
+          };
+        }},
+      });
+      assert.equal(await speedProbe(new AbortController().signal,[131072]),0,mode);
+    }
+  }finally{
+    global.fetch=previousFetch;
+    if(previousWindow===undefined)delete global.window;else global.window=previousWindow;
+  }
+});
+
+test('a valid first sample survives a truncated or interrupted second response',async()=>{
+  const previousFetch=global.fetch,previousWindow=global.window;
+  global.window={OC:{generateUrl:()=>'/probe'}};
+  try{
+    for(const mode of ['truncated','interrupted']){
+      let requests=0;
+      global.fetch=async()=>{
+        const request=++requests;
+        let reads=0;
+        return {ok:true,headers:{get:()=> 'application/octet-stream'},
+          body:{getReader(){return {
+            async read(){
+              if(++reads===1)return {done:false,
+                value:new Uint8Array(request===1 ? 131072 : 1)};
+              if(request===2 && mode==='interrupted')throw new Error('network interrupted');
+              return {done:true};
+            },
+            releaseLock(){},
+          }}},
+        };
+      };
+      const measured=await speedProbe(new AbortController().signal,[131072,393216,1572864]);
+      assert.equal(requests,2,'the probe must stop after the failed second response');
+      // An old implementation overwrote the 128 KiB measurement with a 1-byte
+      // partial sample (at most 320 bps, given the 25 ms timing floor).
+      assert.ok(measured>100000,mode+' must retain the complete first measurement');
+    }
+  }finally{
+    global.fetch=previousFetch;
+    if(previousWindow===undefined)delete global.window;else global.window=previousWindow;
+  }
+});
+
+test('explicit cancellation rejects a complete-size but aborted response',async()=>{
+  const previousFetch=global.fetch,previousWindow=global.window;
+  const controller=new AbortController();
+  global.window={OC:{generateUrl:()=>'/probe'}};
+  global.fetch=async()=>({
+    ok:true,headers:{get:()=> 'application/octet-stream'},
+    body:{getReader(){let reads=0;return {
+      async read(){
+        if(++reads===1){
+          controller.abort();
+          return {done:false,value:new Uint8Array(131072)};
+        }
+        return {done:true};
+      },
+      releaseLock(){},
+    }}},
+  });
+  try{
+    assert.equal(await speedProbe(controller.signal,[131072]),0);
+  }finally{
+    global.fetch=previousFetch;
+    if(previousWindow===undefined)delete global.window;else global.window=previousWindow;
+  }
+});
+
+test('probe timeout discards incomplete read even after bytes arrived',async()=>{
+  const previousFetch=global.fetch,previousWindow=global.window;
+  const previousSetTimeout=global.setTimeout;
+  global.window={OC:{generateUrl:()=>'/probe'}};
+  // Exercise the actual internal 2200 ms timer without slowing CI by 2.2 s.
+  global.setTimeout=(callback,delay,...args)=>
+    previousSetTimeout(callback,delay===2200 ? 1 : delay,...args);
+  let timedOut=false;
+  global.fetch=async(_url,{signal})=>{
+    signal.addEventListener('abort',()=>{timedOut=true},{once:true});
+    return {ok:true,headers:{get:()=> 'application/octet-stream'},
+      body:{getReader(){let reads=0;return {
+        read(){
+          if(++reads===1)return Promise.resolve({done:false,value:new Uint8Array(65536)});
+          return new Promise((_resolve,reject)=>{
+            if(signal.aborted)reject(new Error('timeout'));
+            else signal.addEventListener('abort',()=>reject(new Error('timeout')),{once:true});
+          });
+        },
+        releaseLock(){},
+      }}},
+    };
+  };
+  try{
+    assert.equal(await speedProbe(new AbortController().signal,[131072]),0);
+    assert.equal(timedOut,true,'the internal timeout must have fired');
+  }finally{
+    global.fetch=previousFetch;
+    global.setTimeout=previousSetTimeout;
+    if(previousWindow===undefined)delete global.window;else global.window=previousWindow;
+  }
+});
+
 test('diagnostics report actual native Auto, not the UI label',async()=>{
   const f=fixture();await boot(f);
   try{
