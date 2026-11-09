@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -47,6 +48,38 @@ done`)
 		defer s.mutex.Unlock()
 		return s.exited && s.chunks[3] != nil && s.chunks[3].done
 	}, 2*time.Second, 10*time.Millisecond)
+}
+
+// Simultaneous requests for the same absent HLS segment must not each
+// replace the encoder. A concurrent restart would invalidate other waiters
+// and produce spurious 409s that hls.js can mistake for network starvation.
+func TestConcurrentRequestsForMissingSegmentShareProducer(t *testing.T) {
+	m := newCopyManager(t, hevcProbeJSON, "", false, nil)
+	bin, runs := stubFFmpeg(t, `while [ $# -gt 0 ]; do [ "$1" = -hls_segment_filename ] && p="$2"; shift; done
+sleep 0.2
+f=$(printf "$p" 0); echo data > "$f"; basename "$f"`)
+	m.c.FFmpeg = bin
+
+	const parallel = 24
+	start := make(chan struct{})
+	statuses := make([]int, parallel)
+	var wg sync.WaitGroup
+	wg.Add(parallel)
+	for i := 0; i < parallel; i++ {
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			w := httptest.NewRecorder()
+			m.ServeChunk(w, QUALITY_MAX, 0)
+			statuses[i] = w.Code
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	for _, code := range statuses {
+		require.Equal(t, http.StatusOK, code, "concurrent requests must share a single producer")
+	}
+	require.Equal(t, 1, countRuns(t, runs), "a second encoder start would invalidate pending requests")
 }
 
 func TestStreamFailureRestartsOnRetry(t *testing.T) {
