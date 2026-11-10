@@ -4,7 +4,7 @@
   <name>Memories 11 RK3588 playback</name>
   <summary>Current resolution and smooth native player quality changes</summary>
   <description>Memories 11.1.1 native video integration with actual rendition display, bandwidth and buffer controlled Auto quality and buffer-preserving manual switches.</description>
-  <version>1.1.26</version><licence>agpl</licence><author>meitelis</author>
+  <version>1.1.27</version><licence>agpl</licence><author>meitelis</author>
   <namespace>MemoriesRkmppV11</namespace><category>multimedia</category>
   <dependencies><nextcloud min-version="35" max-version="35"/></dependencies>
 </info>

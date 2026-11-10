@@ -8,3 +8,4 @@ tmp/
 go-vod/go-vod
 *.key
 *.pem
+node_modules/

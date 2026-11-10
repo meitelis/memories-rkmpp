@@ -6,7 +6,9 @@ The server requires hardware video processing: MPP decoding/encoding, RGA scalin
 
 This combined 11.1.1 compatibility update also includes the complete-response bandwidth-probe fix and its regression tests from PR #17. A failed/truncated probe no longer overwrites the last valid complete sample.
 
-The browser helper uses **hls.js native ABR** for Auto quality: hls.js selects each rendition, responds to buffer starvation and adapts as transfer bandwidth changes. Manual choices pin a rendition; reselecting Auto restores `loadLevel = -1` instead of pinning another resolution. A bounded same-origin probe seeds the initial bandwidth estimator; a new probe on supported network-change events, manual-to-Auto reentry or occasional low-quality recovery reseeds that estimator. FFmpeg's on-demand segment-production delay is measured separately from network transfer so it cannot perpetually masquerade as poor Internet speed. An 18-second forward buffer and 96 MiB cap provide headroom. Original stays available when compatible; its playlist may need a short background copy-grid preflight. The playback badge reports the actual presented dimensions.
+The browser helper uses **hls.js native ABR** for Auto quality: hls.js selects each rendition, responds to buffer starvation and adapts as transfer bandwidth changes. **Original** is named in the quality menu and participates in Auto when its source codec is compatible and the connection has enough capacity. It copies the source video packets instead of re-encoding them; compatible shared audio follows the existing audio policy. Main10 SDR HEVC requires an explicit browser MediaSource capability. Its HLS declaration identifies Main10 accurately, while encoded fallbacks remain Main. HDR retains the existing SDR tone-mapping path.
+
+Manual choices pin a rendition; reselecting Auto restores `loadLevel = -1`. A bounded same-origin probe seeds the initial bandwidth estimator. The redundant hls.js lowest-rendition bitrate test is disabled: on-demand encoder startup makes that test misleading and used to insert a 480p segment into otherwise 4K playback. Genuine slow-transfer adaptation remains enabled. Original is temporarily capped out of Auto until its copy-grid playlist is ready. An 18-second forward buffer and 96 MiB cap provide headroom. The playback badge reports the actual presented dimensions. See [the startup and Original verification](STARTUP_ORIGINAL_FIX.md).
 
 ## Playback flow
 
@@ -48,7 +50,8 @@ sh scripts/deploy-v11.sh
 ## Validate
 
 ```sh
-node --test memories_rkmpp_v11/js/*.test.cjs
+npm ci --ignore-scripts
+npm test
 php scripts/test-v11-compat.php
 bash scripts/test-v11-rkmpp.sh --matrix
 ```

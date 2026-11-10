@@ -1,8 +1,9 @@
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
-const {selectQuality, renditionText, configure, update, refreshBandwidth, speedProbe} = require('./player.js');
+const {selectQuality, renditionText, configure, update, refreshBandwidth, speedProbe, negotiateMain10} = require('./player.js');
 
-const EVENTS=['MANIFEST_PARSED','FRAG_LOADED','FRAG_BUFFERED','LEVEL_SWITCHED','ERROR'];
+const EVENTS=['MANIFEST_PARSED','FRAG_LOADING','FRAG_LOADED','FRAG_BUFFERED',
+  'LEVEL_SWITCHING','LEVEL_SWITCHED','FRAG_LOAD_EMERGENCY_ABORTED','ERROR'];
 const levels=[
   {bitrate:400000,maxBitrate:400000,width:854,height:480,url:['/480p.m3u8']},
   {bitrate:2000000,maxBitrate:2000000,width:1920,height:1080,url:['/1080p.m3u8']},
@@ -75,6 +76,7 @@ test('cold startup leaves hls.js in actual automatic mode',async()=>{
     assert.equal(f.hls.startLevel,-1);
     assert.equal(f.hls.loadLevel,-1);
     assert.equal(f.hls.autoLevelEnabled,true);
+    assert.equal(f.hls.config.testBandwidth,false);
     assert.equal(f.state.selected,'auto');
     assert.equal(f.state.badge.dataset.phase,'native-auto');
   }finally{f.state.abort.abort()}
@@ -399,4 +401,37 @@ test('fatal media errors remain visible without endless retries',async()=>{
     f.emit('ERROR',{fatal:true,type:'mediaError',details:'bufferAppendError'});
     assert.equal(f.state.failure,'Playback error');
   }finally{f.state.abort.abort()}
+});
+
+test('Main10 negotiation requires MediaSource support and preserves the authenticated URL',()=>{
+  const previousWindow=global.window;
+  const reloads=[];
+  const hls={url:'https://example.test/apps/memories/api/video/transcode/client/7/index.m3u8?codecs=h264%2Chevc&token=private',
+    loadSource(url){this.url=url;reloads.push(url)}};
+  try {
+    global.window={location:{href:'https://example.test/',origin:'https://example.test'},
+      MediaSource:{isTypeSupported:()=>false}};
+    assert.equal(negotiateMain10(hls),false);
+    window.MediaSource.isTypeSupported=()=>true;
+    assert.equal(negotiateMain10(hls),true);
+    const url=new URL(hls.url);
+    assert.equal(url.searchParams.get('codecs'),'h264,hevc,hevc10');
+    assert.equal(url.searchParams.get('token'),'private');
+    assert.equal(negotiateMain10(hls),false,'never reload an already-negotiated source');
+    assert.equal(reloads.length,1);
+    hls.url='https://other.test/index.m3u8?codecs=hevc';
+    assert.equal(negotiateMain10(hls),false,'do not rewrite other origins');
+  } finally { if(previousWindow===undefined)delete global.window;else global.window=previousWindow; }
+});
+
+test('opt-in fragment diagnostics are bounded and omit media URLs and headers',async()=>{
+  const f=fixture();f.state.debug=true;await boot(f);
+  try {
+    for(let i=0;i<80;i++) f.emit('FRAG_LOADING',{frag:{type:'main',level:1,sn:i,url:'https://private.test/?token=secret',headers:{Authorization:'secret'}}});
+    const trace=JSON.parse(f.state.badge.dataset.trace);
+    assert.equal(trace.length,60);
+    assert.equal(trace.at(-1).track,'main');
+    assert.equal(f.state.badge.dataset.trace.includes('secret'),false);
+    assert.equal(f.state.badge.dataset.trace.includes('private.test'),false);
+  } finally {f.state.abort.abort();}
 });

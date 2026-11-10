@@ -167,6 +167,10 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, req VodRequest) {
 			w.WriteHeader(http.StatusConflict)
 			return
 		}
+		if errors.Is(err, core.ErrCopyUnavailable) {
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			return
+		}
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			return

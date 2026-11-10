@@ -190,7 +190,7 @@ func buildRKMPPArgs(s Spec) []string {
 	if RKMPPInputPaced(s) {
 		// Fill the player's buffer quickly on startup/seek, then follow its
 		// clock. Idle streams are still killed by the normal stream timeout.
-		args = append(args, "-readrate", "1", "-readrate_initial_burst", "18", "-readrate_catchup", "3")
+		args = append(args, "-readrate", "1", "-readrate_initial_burst", "18", "-readrate_catchup", "3.5")
 	}
 	args = append(args, "-i", s.Input, "-copyts", "-fflags", "+genpts")
 

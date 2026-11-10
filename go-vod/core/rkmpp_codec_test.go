@@ -83,3 +83,51 @@ func TestRenditionsPreservePortraitDimensions(t *testing.T) {
 		}
 	}
 }
+
+func TestRKMPPMain10OriginalRequiresExplicitCapability(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		codecs   []string
+		transfer string
+		depth    int
+		want     bool
+	}{
+		{"Main only", []string{"hevc"}, "bt709", 10, false},
+		{"Main10 SDR", []string{"hevc", "hevc10"}, "bt709", 10, true},
+		{"HDR still maps to SDR", []string{"hevc", "hevc10"}, "smpte2084", 10, false},
+		{"unsupported depth", []string{"hevc", "hevc10"}, "bt709", 12, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := config.Defaults("0.7.0")
+			c.RKMPP, c.RKMPPOutputCodec = true, "hevc"
+			c.TempDir, c.CacheDir_ = t.TempDir(), t.TempDir()
+			c.RKMPPOpenCL = true
+			pix := "yuv420p10le"
+			if tc.depth == 12 {
+				pix = "yuv420p12le"
+			}
+			probe := `{"streams":[{"codec_type":"video","codec_name":"hevc","width":3840,"height":2160,"duration":"20","avg_frame_rate":"60/1","pix_fmt":"` + pix + `","color_transfer":"` + tc.transfer + `","bit_rate":"3200000"}]}`
+			c.FFprobe = stubCopyProbe(t, probe, "0,K__\n3,K__\n6,K__\n", false)
+			m, err := NewManager(NewManagerArgs{C: c, ManagerParams: ManagerParams{URL: "http://localhost/source.mp4", StreamID: "main10", PlayableCodecs: tc.codecs, TConfig: config.TCfg{ChunkSize: 3}}, Idle: make(chan IdleEvent, 1)})
+			if tc.depth == 12 {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			defer m.Destroy()
+			require.Equal(t, tc.want, m.HasStream(QUALITY_DIRECT))
+			if tc.want {
+				_, copied := m.EnsureCopySegments()
+				require.True(t, copied)
+				require.True(t, m.streams[QUALITY_DIRECT].spec(0, true).Copy)
+				for _, r := range m.Renditions() {
+					if r.Quality == QUALITY_DIRECT {
+						require.Equal(t, "hvc1.2.4.L153.B0", r.Codecs)
+					} else {
+						require.Contains(t, r.Codecs, "hvc1.1.6.")
+					}
+				}
+			}
+		})
+	}
+}

@@ -52,8 +52,8 @@ func MasterPlaylist(renditions []core.Rendition, frameRate int, query string) (s
 }
 
 // VariantPlaylist serves a rendition's playlist. direct.m3u8 never blocks:
-// cache hits serve copy, a finished probe without a grid serves uniform
-// re-encoded segments, and a pending probe answers ErrCopyPending (409).
+// cache hits serve copy, a finished probe without a grid is unavailable,
+// and a pending probe answers ErrCopyPending (409).
 // audio.m3u8 is served like any other transcoded rendition.
 func VariantPlaylist(m *core.Manager, quality string, query string) (string, error) {
 	if quality == core.QUALITY_DIRECT {
@@ -61,7 +61,7 @@ func VariantPlaylist(m *core.Manager, quality string, query string) (string, err
 			return CopyVariantPlaylist(quality, segs, query)
 		}
 		if m.CopyProbed() {
-			return TranscodeVariantPlaylist(quality, m.Duration(), m.ChunkSize(), query)
+			return "", core.ErrCopyUnavailable
 		}
 		m.StartCopyProbeAsync()
 		return "", core.ErrCopyPending

@@ -31,7 +31,7 @@ func TestRKMPPInputPacingOnlyAppliesToEncodedHLSVideo(t *testing.T) {
 	args := BuildArgs(s)
 	assertHasPair(t, args, "-readrate", "1")
 	assertHasPair(t, args, "-readrate_initial_burst", "18")
-	assertHasPair(t, args, "-readrate_catchup", "3")
+	assertHasPair(t, args, "-readrate_catchup", "3.5")
 	require.Less(t, slices.Index(args, "-readrate"), slices.Index(args, "-i"))
 	for _, other := range []Spec{
 		{RKMPP: true, HLS: true, Copy: true},
