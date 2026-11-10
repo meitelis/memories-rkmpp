@@ -1,3 +1,5 @@
+> Historical snapshot. Version numbers, acceptance gates and deployment statements below describe that stage of development. Use the [current deployment](../deployment.md), [playback](../playback.md) and [testing](../testing/README.md) guides for main.
+
 # Memories 11.0.2 migration
 
 The active and only engine is `go-vod/`, based on upstream Memories 11.0.2 commit `e156f850ec5514433f1cfac9d4f1dbd461500c8d` and protocol **0.7.0**. The root Compose and `scripts/deploy-v11.sh` target that version explicitly.

@@ -41,13 +41,6 @@ also remained at encoded 4K, including an immediate start after reload. Server
 logs distinguish `-c:v copy` from hardware video encoding. These checks establish
 the observed browser/device behavior, not universal playback guarantees.
 
-## Existing Portainer installations
+## Deployment
 
-Keep the service in its existing Portainer stack. Build the candidate from the
-reviewed source and update that service's image in the saved stack definition,
-preserving its mounts, devices, network, environment and cache. Install the
-matching `memories_rkmpp_v11` helper in Nextcloud's existing writable app path,
-apply its normal app upgrade, and advance the template asset cache. Back up the
-stack definition and previous helper, and retain the prior image for rollback.
-Do not run a deployment script that would adopt the service into another Compose
-project. Test playback after updating both engine and helper.
+Follow the [current deployment guide](../deployment.md). The working update used the existing Portainer stack, preserved its service configuration and retained the old image and helper for rollback.
