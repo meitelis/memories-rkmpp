@@ -38,6 +38,10 @@ func isAudioQuality(quality string) bool {
 // so the client fails over and retries later once the grid is warm.
 var ErrCopyPending = errors.New("keyframe probe pending")
 
+// ErrCopyUnavailable prevents an Original-labelled playlist from silently
+// re-encoding when the source's stream-copy timeline cannot be established.
+var ErrCopyUnavailable = errors.New("original stream-copy timeline unavailable")
+
 // isValidStreamRe matches 8-128 hex chars, safe for use in a temp dir name.
 var isValidStreamRe = regexp.MustCompile(`^[0-9a-fA-F]{8,128}$`)
 
@@ -448,6 +452,9 @@ func (m *Manager) Renditions() []Rendition {
 		codecs := ""
 		if m.OutputCodec() == "hevc" {
 			codecs = ffmpeg.HEVCCodecs(width, height, m.FrameRate(), m.probe.Audio.CodecName != "")
+			if s.quality == QUALITY_DIRECT && m.probe.BitDepth == 10 {
+				codecs = ffmpeg.HEVCMain10Codecs(width, height, m.FrameRate(), m.probe.Audio.CodecName != "")
+			}
 		}
 		// Video renditions link to the shared audio group when present.
 		separateAudio := hasAudio
@@ -746,8 +753,12 @@ func (m *Manager) ffprobe() error {
 		IsCodecFMP4(m.probe.CodecName)
 
 	if m.c.RKMPP {
+		// Main10 requires an explicit MediaSource capability from the browser;
+		// the upstream "hevc" probe only establishes 8-bit Main support.
+		copyDepth := m.probe.BitDepth <= 8 || (m.probe.CodecName == "hevc" &&
+			m.probe.BitDepth == 10 && slices.Contains(m.playableCodecs, "hevc10"))
 		m.copyEligible = m.copyEligible && m.probe.CodecName == m.OutputCodec() &&
-			!m.probe.HDR && m.probe.BitDepth <= 8
+			!m.probe.HDR && copyDepth
 	}
 
 	return nil

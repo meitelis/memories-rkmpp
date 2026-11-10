@@ -1,9 +1,9 @@
 name: Source checks
 on:
   push:
-    paths: ['go-vod/**', 'memories_rkmpp_v11/**', 'scripts/**', 'compose.yml', '.env.example', '.github/workflows/check.yml']
+    paths: ['go-vod/**', 'memories_rkmpp_v11/**', 'tests/**', 'package*.json', 'scripts/**', 'compose.yml', '.env.example', '.github/workflows/check.yml']
   pull_request:
-    paths: ['go-vod/**', 'memories_rkmpp_v11/**', 'scripts/**', 'compose.yml', '.env.example', '.github/workflows/check.yml']
+    paths: ['go-vod/**', 'memories_rkmpp_v11/**', 'tests/**', 'package*.json', 'scripts/**', 'compose.yml', '.env.example', '.github/workflows/check.yml']
 permissions:
   contents: read
 concurrency:
@@ -29,7 +29,8 @@ jobs:
           go build ./...
       - name: Browser and deployment checks
         run: |
-          node --test memories_rkmpp_v11/js/*.test.cjs
+          npm ci --ignore-scripts
+          npm test
           sh -n scripts/deploy-v11.sh scripts/test-v11-deploy-preflight.sh
           sh scripts/test-v11-deploy-preflight.sh
           bash -n scripts/test-v11-rkmpp.sh scripts/test-v11-network.sh

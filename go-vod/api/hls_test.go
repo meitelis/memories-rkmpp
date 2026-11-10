@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"math"
 	"os"
 	"path/filepath"
@@ -183,7 +184,7 @@ func TestVariantPlaylistDirectPending(t *testing.T) {
 	}
 }
 
-func TestVariantPlaylistDirectFallback(t *testing.T) {
+func TestVariantPlaylistDirectUnavailableDoesNotTranscodeOriginal(t *testing.T) {
 	m := stubVariantManager(t, true)
 
 	_, err := VariantPlaylist(m, "direct", "")
@@ -192,15 +193,13 @@ func TestVariantPlaylistDirectFallback(t *testing.T) {
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		got, err := VariantPlaylist(m, "direct", "")
-		if err == nil {
-			require.Contains(t, got, "direct-000000.m4s")
-			require.NotContains(t, got, "max-")
-			require.Contains(t, got, "#EXT-X-TARGETDURATION:3")
+		if errors.Is(err, core.ErrCopyUnavailable) {
+			require.Empty(t, got)
 			break
 		}
 		require.ErrorIs(t, err, core.ErrCopyPending)
 		if time.Now().After(deadline) {
-			t.Fatal("direct.m3u8 never fell back past 409")
+			t.Fatal("direct.m3u8 did not finish its failed copy probe")
 		}
 		time.Sleep(20 * time.Millisecond)
 	}

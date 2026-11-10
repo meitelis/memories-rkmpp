@@ -1,0 +1,10 @@
+{
+  "name": "memories-rkmpp-player-tests",
+  "private": true,
+  "scripts": {
+    "test": "node --test memories_rkmpp_v11/js/*.test.cjs tests/*.test.cjs"
+  },
+  "devDependencies": {
+    "hls.js": "1.7.4"
+  }
+}

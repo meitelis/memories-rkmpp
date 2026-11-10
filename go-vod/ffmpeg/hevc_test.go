@@ -40,4 +40,5 @@ func TestHEVCLevel(t *testing.T) {
 	}
 	require.Equal(t, "hvc1.1.6.L123.80,mp4a.40.2", HEVCCodecs(1080, 1920, 60, true))
 	require.Equal(t, "hvc1.1.6.L120.80", HEVCCodecs(1920, 1080, 30, false))
+	require.Equal(t, "hvc1.2.4.L153.B0,mp4a.40.2", HEVCMain10Codecs(3840, 2160, 60, true))
 }

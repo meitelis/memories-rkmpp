@@ -31,7 +31,7 @@
   }
 
   if (typeof module !== 'undefined' && module.exports) {
-    module.exports = {selectQuality, renditionText, configure, update, refreshBandwidth, speedProbe};
+    module.exports = {selectQuality, renditionText, configure, update, refreshBandwidth, speedProbe, negotiateMain10};
   }
   const debug = typeof location !== 'undefined' && new URLSearchParams(location.search).has('rkmpp_debug');
   if (typeof document === 'undefined') return;
@@ -44,6 +44,67 @@
       }
     }
     return 0;
+  }
+
+  function trace(state, type, data = {}) {
+    if (!state.debug) return;
+    const frag = data.frag, stats = data.stats || frag?.stats;
+    const t = stats?.loading;
+    const rows = state.trace || (state.trace = []);
+    rows.push({type, time:Number(state.video.currentTime.toFixed(3)),
+      track:frag?.type, level:frag?.level ?? data.level, sn:frag?.sn,
+      buffer:Number(bufferAhead(state.video).toFixed(2)),
+      bandwidth:Math.round(state.hls.bandwidthEstimate || 0),
+      ttfb:Math.round(state.hls.ttfbEstimate || 0),
+      wait:t?.first > t?.start ? Math.round(t.first-t.start) : undefined,
+      transfer:t?.end > t?.first ? Math.round(t.end-t.first) : undefined,
+      bytes:stats?.loaded, error:data.details});
+    if (rows.length > 60) rows.shift();
+    state.badge.dataset.trace = JSON.stringify(rows);
+  }
+
+  function negotiateMain10(hls) {
+    try {
+      if (!window.MediaSource?.isTypeSupported('video/mp4; codecs="hvc1.2.4.L153.B0"')) return false;
+      const url = new URL(hls.url, window.location.href);
+      if (url.origin !== window.location.origin || !/\/index\.m3u8$/.test(url.pathname)) return false;
+      const codecs = (url.searchParams.get('codecs') || '').split(',').filter(Boolean);
+      if (!codecs.includes('hevc') || codecs.includes('hevc10')) return false;
+      codecs.push('hevc10');
+      url.searchParams.set('codecs', codecs.join(','));
+      hls.loadSource(url.href);
+      return true;
+    } catch { return false; }
+  }
+
+  function releaseOriginalCap(state) {
+    if (state.originalCap === undefined) return;
+    const hls = state.hls;
+    const index = hls.levels.findIndex(isOriginal);
+    if (hls.autoLevelCapping === index-1) hls.autoLevelCapping = state.originalCap;
+    state.originalCap = undefined;
+  }
+
+  // Memories 11's public quality options expose size/bitrate, but no label.
+  // Keep its native radio actions and selection handlers; only name the
+  // direct rendition accurately inside this video's own controls.
+  function labelOriginal(video, state) {
+    const options = video.qualityList || [];
+    const direct = options.find(o=>isOriginal(state.hls?.levels?.[o.index]));
+    const controls = video.closest('.video-container')?.querySelector('.m-vc-controls');
+    if (!direct || !controls) return;
+    const rate = direct.bitrate >= 1000000 ? `${(direct.bitrate/1000000).toFixed(1)} Mbps`
+      : `${Math.round(direct.bitrate/1000)} kbps`;
+    const plain = `${direct.size}p`;
+    for (const button of controls.querySelectorAll('[role="menuitemradio"]')) {
+      const name = button.querySelector('.action-button__name');
+      if (name?.textContent === `${plain} · ${rate}`) name.textContent = `Original · ${plain} · ${rate}`;
+    }
+    if (state.selected === direct.id) {
+      const name = controls.querySelector('.tune-icon')?.closest('button')?.querySelector('.action-button__name');
+      if (name?.textContent.endsWith(` · ${plain}`))
+        name.textContent = name.textContent.slice(0,-plain.length)+'Original';
+    }
   }
 
   async function speedProbe(signal, sizes = [65536, 393216, 1572864]) {
@@ -138,6 +199,7 @@
       // Playlist availability does not establish hardware decoder support.
       if (state.abort === session && state.hls === hls && !session.signal.aborted && !request.signal.aborted) {
         state.originalReady = response.ok;
+        if (state.originalReady) releaseOriginalCap(state);
       }
       if (response.body) void response.body.cancel().catch(() => {});
     } catch { /* A slow/aborted playlist must not delay startup indefinitely. */ }
@@ -162,10 +224,12 @@
     state.warming = false;
     state.reprobing = false;
     state.originalReady = false;
+    state.originalCap = undefined;
     state.lastWarm = 0;
     state.lastProbeAt = Date.now();
     state.networkSamples = [];
     state.events = [];
+    state.trace = [];
     state.failure = '';
     state.retries = 0;
     state.badge.dataset.hlsVersion = hls.constructor.version || '';
@@ -181,6 +245,10 @@
     }
     Object.assign(hls.config, {
       autoStartLoad:false, startFragPrefetch:false,
+      // The same-origin probe already measures the connection. The built-in
+      // bitrate test otherwise starts an unnecessary lowest-rendition worker
+      // and contaminates startup with cold-transcoder timing.
+      testBandwidth:false,
       maxBufferLength:18, maxMaxBufferLength:18,
       maxBufferSize:96*1024*1024, backBufferLength:8,
       capLevelOnFPSDrop:true, fpsDroppedMonitoringThreshold:0.2,
@@ -199,6 +267,12 @@
       state.badge.dataset.levels = hls.levels.map(l =>
         String(l.width) + 'x' + String(l.height) + ':' + String(l.bitrate) +
         (isOriginal(l) ? ':original' : ':encoded')).join(',');
+      const originalIndex = hls.levels.findIndex(isOriginal);
+      if (originalIndex > 0 && !state.originalReady) {
+        state.originalCap = hls.autoLevelCapping ?? -1;
+        hls.autoLevelCapping = Math.min(originalIndex-1,
+          state.originalCap < 0 ? originalIndex-1 : state.originalCap);
+      }
       void warmOriginal(state);
       const raw = await probe;
       if (!active()) return;
@@ -228,7 +302,11 @@
       hls.startLoad();
     };
     listen(Events.MANIFEST_PARSED, start);
+    listen(Events.FRAG_LOADING, (_e, data) => trace(state, 'loading', data));
+    listen(Events.LEVEL_SWITCHING, (_e, data) => trace(state, 'switching', data));
+    listen(Events.FRAG_LOAD_EMERGENCY_ABORTED, (_e, data) => trace(state, 'emergency', data));
     listen(Events.FRAG_LOADED, (_e, data) => {
+      trace(state, 'loaded', data);
       if (data.frag?.type === 'main') state.badge.dataset.lastVideoFragmentAt = String(Date.now());
     });
     listen(Events.LEVEL_SWITCHED, () => {
@@ -239,6 +317,7 @@
     });
     listen(Events.FRAG_BUFFERED, (_e, data) => {
       if (data.frag?.type !== 'main') return;
+      trace(state, 'buffered', data);
       state.failure = '';
       state.retries = 0;
       clearTimeout(state.retryTimer);
@@ -265,6 +344,7 @@
       }
     });
     listen(Events.ERROR, (_e, data) => {
+      trace(state, 'error', data);
       state.badge.dataset.lastError = data.details || '';
       if (!data.fatal) return;
       state.badge.dataset.fatalError = String(data.type || '') + ':' + String(data.details || '');
@@ -277,7 +357,7 @@
         }, delay);
       } else state.failure = 'Playback error';
     });
-    if (hls.levels.length) void start();
+    if (!negotiateMain10(hls) && hls.levels.length) void start();
   }
 
   function attach(video) {
@@ -345,6 +425,7 @@
     if (controls && state.badge.parentElement !== controls) controls.prepend(state.badge);
     const hls = video._qualityHls;
     if (hls && state.hls !== hls) configure(video, state, hls);
+    labelOriginal(video, state);
     const buffer = bufferAhead(video);
     const now = Date.now();
     if (hls && !state.checking && state.selected === 'auto' &&
@@ -391,6 +472,7 @@
       if (node.matches('video')) attach(node);
       node.querySelectorAll('video').forEach(attach);
     }
+    for (const [video, state] of attached) labelOriginal(video, state);
   }).observe(document.documentElement, {childList:true, subtree:true});
   document.querySelectorAll('video').forEach(attach);
   setInterval(() => {

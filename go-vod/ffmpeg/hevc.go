@@ -45,3 +45,13 @@ func HEVCCodecs(width, height, fps int, audio bool) string {
 	}
 	return codecs
 }
+
+// HEVCMain10Codecs describes SDR Main10 stream-copy output. Encoded fallback
+// renditions still use Main; claiming Main for a copied Main10 stream is wrong.
+func HEVCMain10Codecs(width, height, fps int, audio bool) string {
+	codecs := fmt.Sprintf("hvc1.2.4.L%d.B0", HEVCLevel(width, height, fps).IDC)
+	if audio {
+		codecs += ",mp4a.40.2"
+	}
+	return codecs
+}
