@@ -1,3 +1,5 @@
+> Historical snapshot. Version numbers, acceptance gates and deployment statements below describe that stage of development. Use the [current deployment](../deployment.md), [playback](../playback.md) and [testing](../testing/README.md) guides for main.
+
 # Memories 11.1.1 browser integration — native hls.js Auto
 
 **11.1.1 compatibility scope:** Upstream `PsVideo.ts`, `PsVideoQuality.ts`, `VideoControls.vue`, the player API service and the entire `go-vod/` tree are unchanged from 11.0.2 to 11.1.1. The adapter now explicitly permits both 11.0.2 and 11.1.1; the deployment script accepts only 11.1.1. Server-side and Android upstream changes are maintained by the official Memories update, not copied into this separate adapter. Previous 11.0.2 player measurements are not proof of 11.1.1 hardware playback. This PR incorporates the browser bandwidth-probe correction and regression coverage from PR #17 (identical source and tests); the historical PR #17 remains available for reference.

@@ -1,9 +1,9 @@
 name: Source checks
 on:
   push:
-    paths: ['go-vod/**', 'memories_rkmpp_v11/**', 'tests/**', 'package*.json', 'scripts/**', 'compose.yml', '.env.example', '.github/workflows/check.yml']
+    paths: ['README.md', 'docs/**', 'go-vod/**', 'memories_rkmpp_v11/**', 'tests/**', 'package*.json', 'scripts/**', 'compose.yml', '.env.example', '.github/workflows/check.yml']
   pull_request:
-    paths: ['go-vod/**', 'memories_rkmpp_v11/**', 'tests/**', 'package*.json', 'scripts/**', 'compose.yml', '.env.example', '.github/workflows/check.yml']
+    paths: ['README.md', 'docs/**', 'go-vod/**', 'memories_rkmpp_v11/**', 'tests/**', 'package*.json', 'scripts/**', 'compose.yml', '.env.example', '.github/workflows/check.yml']
 permissions:
   contents: read
 concurrency:
@@ -31,7 +31,7 @@ jobs:
         run: |
           npm ci --ignore-scripts
           npm test
-          sh -n scripts/deploy-v11.sh scripts/test-v11-deploy-preflight.sh
+          sh -n scripts/build-v11.sh scripts/install-player-v11.sh scripts/deploy-v11.sh scripts/test-v11-deploy-preflight.sh
           sh scripts/test-v11-deploy-preflight.sh
           bash -n scripts/test-v11-rkmpp.sh scripts/test-v11-network.sh
           find memories_rkmpp_v11 -name '*.php' -print0 | xargs -0 -n1 php -l

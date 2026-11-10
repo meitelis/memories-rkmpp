@@ -1,4 +1,4 @@
-# Isolated RK3588 test: Memories 11.0.2 / go-vod 0.7.0
+# RK3588 hardware validation
 
 This is a separate development image and runner. It does not change Nextcloud,
 Portainer, the running transcoder, production Compose or the old player helper.
@@ -49,7 +49,7 @@ The input-format suite generates AVC, HEVC, VP8, VP9, AV1, H.263, MPEG-1,
 MPEG-2, MPEG-4 and MJPEG sources and tests both output codecs. In the pinned
 runtime VP8 failed MPP decoder initialization before the optional-control fix.
 All ten input codecs now pass to both output encoders with the patched library.
-The full hardware matrix, including HDR, core and API suites, passes. Open-GOP AVC/HEVC
+The recorded 5 November 2026 hardware matrix, including HDR, core and API suites, passed. Re-run the matrix to establish coverage for a later source revision. Open-GOP AVC/HEVC
 tests compare raw presentation ranges with the server plan and verify full/cold
 hardware output against the same ranges. Do not confuse these synthetic codec
 checks with real-browser/mobile playback acceptance.
@@ -102,4 +102,4 @@ The API fixture checks the v11 protocol, not a live PHP/bridge deployment.
 It does not prove real share-link authentication, Safari/native HLS, hls.js ABR
 or audible quality switching in a browser. Generated HDR patterns validate
 execution and metadata, not perceptual tone-map quality. See
-`PLAYER_INTEGRATION_V11.md` before planning a staging deployment.
+the [playback guide](../playback.md) before planning a staging deployment.

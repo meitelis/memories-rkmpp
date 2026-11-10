@@ -1,3 +1,5 @@
+> Historical snapshot. Version numbers, acceptance gates and deployment statements below describe that stage of development. Use the [current deployment](../deployment.md), [playback](../playback.md) and [testing](../testing/README.md) guides for main.
+
 # PR #14: native hls.js Auto — review checklist
 
 Date: 2026-11-07. This is a *draft* browser-player change. The following are thirty focused source/CI checks, not thirty real-device playback trials.
