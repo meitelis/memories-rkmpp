@@ -32,4 +32,5 @@ jobs:
           docker compose logs --no-color --tail=100
           sudo find data/jobs -name result.json -exec cat {} \; 2>/dev/null || true
           sudo find data/jobs -name agent.jsonl -exec tail -n 15 {} \; 2>/dev/null || true
+          sudo tail -n 100 data/model.log 2>/dev/null || true
           docker compose down --volumes

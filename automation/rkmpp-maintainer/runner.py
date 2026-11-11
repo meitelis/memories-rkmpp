@@ -25,6 +25,7 @@ class Docker:
             return
         self.verify()
         spec = self.config["models"]["smoke" if smoke else "coding"]
+        print(f"Validating/downloading {spec["filename"]} ({spec["bytes"]} bytes)", flush=True)
         path = download_model(spec, self.workspace / "models" / spec["filename"])
         name = "rkmpp-maintainer-model"
         # Only touch this stack's transient model in its own daemon.
@@ -47,6 +48,8 @@ class Docker:
                         if response.status == 200:
                             break
                 except (OSError, urllib.error.URLError):
+                    if command(["docker", "inspect", name, "--format", "{{.State.Running}}"], timeout=15) != "true":
+                        raise RuntimeError("Local model exited during startup; see model.log")
                     time.sleep(2)
             else:
                 raise RuntimeError("Local model did not become ready in ten minutes")

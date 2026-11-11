@@ -7,7 +7,7 @@ This is a prototype to test on the board, not a claim that a small model can mai
 ## What runs
 
 - **Maintainer:** a Python controller with a bounded JSON file-editing agent. It reads upstream diffs and edits source, with three repair rounds of up to 24 tool turns. Tests, workflows, build commands and the maintainer itself are protected from model edits.
-- **Local model:** a transient llama.cpp container, loaded during editing and removed before tests/builds. The coding model is Qwen2.5-Coder-7B-Instruct Q4_K_M (4.68 GB weights plus context/runtime). The smoke test uses the much smaller 0.5B variant to test the machinery, not maintenance quality. URLs, revisions, sizes and SHA-256 checksums are pinned in `config.json`.
+- **Local model:** a transient llama.cpp container, loaded during editing and removed before tests/builds. The coding model is Qwen2.5-Coder-7B-Instruct Q4_K_M (4.68 GB weights plus context/runtime). The smoke test uses this same 7B model. An earlier 0.5B trial started correctly but failed to follow the file tools, so it is not used as the acceptance test. URLs, revisions, sizes and SHA-256 checksums are pinned in `config.json`.
 - **Builder:** a separate Docker-in-Docker daemon. It has its own images/cache and no host Docker socket. The controller refuses a daemon without its dedicated label. DinD is privileged and is not a hardened boundary against hostile repositories; use it for these trusted source trees.
 
 No production container is updated. Candidates are saved as `data/jobs/<job>/image.tar`, alongside `result.json`, logs and a patch. Memories jobs also save the matching `memories-helper.tar.gz`.
@@ -20,7 +20,7 @@ Run from this directory. Docker Compose is required.
 docker compose run --build --rm maintainer smoke
 ```
 
-This pulls the pinned images, downloads the 491 MB smoke model, asks it to fix a broken addition function, unloads it, runs immutable tests, builds a small Docker image, and exports the image. It uses neither your GitHub write credentials nor your running application stacks. Success ends with `"kind": "real-local-model-smoke"` and `"status": "ready"`.
+This pulls the pinned images, downloads the 4.68 GB coding model, asks it to fix a broken addition function, unloads it, runs immutable tests, builds a small Docker image, and exports the image. It uses neither your GitHub write credentials nor your running application stacks. Success ends with `"kind": "real-local-model-smoke"` and `"status": "ready"`.
 
 If nested overlay2 is unavailable on the host, set `DIND_STORAGE_DRIVER=vfs` in `.env` and recreate the builder. VFS needs substantially more disk space. Data and the nested image cache stay in this stack's directories/volume.
 
@@ -32,7 +32,7 @@ After smoke passes:
 docker compose run --rm maintainer run --repo memories --target 11.1.2 --base-ref d6a9471dfbd3dd721bd67698c062ddcc773e232c --source-version 11.1.1
 ```
 
-This starts from your actual pre-upgrade main, reads official 11.1.1 and 11.1.2, reconciles go-vod changes and version contracts, lets the 7B model inspect/adapt the candidate, then runs browser, Go race/vet/build, PHP and deployment checks before building/exporting the ARM64 engine. This first coding-model download is about 4.68 GB. The result remains local.
+This starts from your actual pre-upgrade main, reads official 11.1.1 and 11.1.2, reconciles go-vod changes and version contracts, lets the 7B model inspect/adapt the candidate, then runs browser, Go race/vet/build, PHP and deployment checks before building/exporting the ARM64 engine. The coding model is cached after the smoke test. The result remains local.
 
 For diagnosis, `prepare` performs just cloning/reconciliation, and `run --no-agent` tests deterministic reconciliation and builds. Neither substitutes for evaluating the local model's ability to resolve a future incompatible change.
 
@@ -81,8 +81,8 @@ python3 -m py_compile *.py
 docker compose config --quiet
 ```
 
-Unit tests cover release selection, token isolation, job locking, process timeouts, file/symlink restrictions, protected checks, bounded malformed-model output and a three-way upgrade fixture. The CI workflow builds the controller on ARM64 and runs the actual small-model smoke in the isolated daemon. Check the workflow result for the specific commit before claiming that Docker/LLM smoke has passed. A successful smoke does not imply that the 7B model has completed the full historical replay on the Radxa.
+Unit tests cover release selection, token isolation, job locking, process timeouts, file/symlink restrictions, protected checks, bounded malformed-model output and a three-way upgrade fixture. The CI workflow builds the controller on ARM64 and runs the actual 7B-model smoke in the isolated daemon. Check the workflow result for the specific commit before claiming that Docker/LLM smoke has passed. A successful smoke does not imply that the 7B model has completed the full historical replay on the Radxa.
 
 Data and caches can grow with builds. Keep the result folders/images you need and remove obsolete ones deliberately; this prototype does not delete old job evidence automatically.
 
-Sources: [llama.cpp server](https://github.com/ggml-org/llama.cpp/tree/master/tools/server), [official small GGUF](https://huggingface.co/Qwen/Qwen2.5-Coder-0.5B-Instruct-GGUF), [official coding GGUF](https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF), [Rockchip RKLLM](https://github.com/airockchip/rknn-llm).
+Sources: [llama.cpp server](https://github.com/ggml-org/llama.cpp/tree/master/tools/server), [official coding GGUF](https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF), [Rockchip RKLLM](https://github.com/airockchip/rknn-llm).
