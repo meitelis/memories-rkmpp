@@ -1,0 +1,117 @@
+diff --git a/go-vod/core/chunk_test.go b/go-vod/core/chunk_test.go
+index f4a9156360e2e256d72d88e0279d987a7df18c1a..a070ac7478a25b36f5923229b01a2861f83ab5be 100644
+--- a/go-vod/core/chunk_test.go
++++ b/go-vod/core/chunk_test.go
+@@ -87,6 +87,79 @@ func TestWaitForChunkAbandoned(t *testing.T) {
+ 	require.Equal(t, http.StatusConflict, w.Code)
+ }
+ 
++// Teardown must wake in-flight HTTP requests rather than leave them waiting
++// for the full ten-second chunk timeout after their producer is gone.
++func TestStreamClearWakesInFlightSegmentRequest(t *testing.T) {
++	s, _ := testStream(t)
++	chunk := NewChunk(7)
++	s.chunks[7] = chunk
++
++	oldWait := chunkWait
++	chunkWait = 2 * time.Second
++	defer func() { chunkWait = oldWait }()
++
++	result := make(chan int, 1)
++	go func() {
++		w := httptest.NewRecorder()
++		s.waitForChunk(w, chunk)
++		result <- w.Code
++	}()
++
++	s.mutex.Lock()
++	s.clear()
++	s.mutex.Unlock()
++
++	select {
++	case status := <-result:
++		// A synthetic test stream has no ffmpeg process to replace, so
++		// abandoned requests have the existing timeout response status.
++		require.Equal(t, http.StatusRequestTimeout, status)
++	case <-time.After(300 * time.Millisecond):
++		t.Fatal("segment waiter remained blocked after clear")
++	}
++}
++
++// Run() can prune old segment IDs while a request is still waiting for
++// FFmpeg to finish one. That request must not remain blocked after removal.
++func TestPrunePendingChunkWakesInFlightRequest(t *testing.T) {
++	s, _ := testStream(t)
++	chunk := NewChunk(3)
++	s.chunks[3] = chunk
++
++	oldWait := chunkWait
++	chunkWait = 3 * time.Second
++	defer func() { chunkWait = oldWait }()
++
++	started := make(chan struct{})
++	result := make(chan int, 1)
++	go func() {
++		close(started)
++		w := httptest.NewRecorder()
++		s.waitForChunk(w, chunk)
++		result <- w.Code
++	}()
++	<-started
++
++	s.mutex.Lock()
++	s.pruneChunk(3)
++	s.mutex.Unlock()
++
++	select {
++	case <-chunk.doneCh:
++		// The pending request is explicitly invalidated by pruning.
++	default:
++		t.Fatal("pruning did not wake its pending chunk")
++	}
++	require.NotContains(t, s.chunks, 3)
++
++	select {
++	case status := <-result:
++		require.Equal(t, http.StatusRequestTimeout, status)
++	case <-time.After(time.Second):
++		t.Fatal("pruned segment request remained blocked until chunkWait")
++	}
++}
++
+ func TestWaitForChunkTimeout(t *testing.T) {
+ 	s, _ := testStream(t)
+ 	oldWait := chunkWait
+diff --git a/go-vod/core/stream.go b/go-vod/core/stream.go
+index 9b8f86cc8ccfbdd689b6f5171c2846b367bd2acd..4fbbd09384b9172f2b9060894bf897a0296a0159 100644
+--- a/go-vod/core/stream.go
++++ b/go-vod/core/stream.go
+@@ -104,6 +104,9 @@ func (s *Stream) clear() {
+ 	log.Printf("%s-%s: stopping stream", s.m.id, s.quality)
+ 
+ 	for _, chunk := range s.chunks {
++		if !chunk.done {
++			chunk.signal(false)
++		}
+ 		os.Remove(s.getSegmentPath(chunk.id))
+ 	}
+ 
+@@ -289,6 +292,9 @@ func (s *Stream) createChunk(id int) *Chunk {
+ }
+ 
+ func (s *Stream) pruneChunk(id int) {
++	if chunk, ok := s.chunks[id]; ok && !chunk.done {
++		chunk.signal(false)
++	}
+ 	delete(s.chunks, id)
+ 
+ 	// Remove file
+@@ -334,7 +340,7 @@ func (s *Stream) waitForChunk(w http.ResponseWriter, chunk *Chunk) {
+ 	s.mutex.Lock()
+ 	current, ok := s.chunks[chunk.id]
+ 	finished := ok && current.done
+-	restarted := coder != s.coder && s.coder != nil
++	restarted := coder != s.coder
+ 	s.mutex.Unlock()
+ 
+ 	if finished {

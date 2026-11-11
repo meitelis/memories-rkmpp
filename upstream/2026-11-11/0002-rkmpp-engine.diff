@@ -1,0 +1,4638 @@
+diff --git a/go-vod/api/hls.go b/go-vod/api/hls.go
+index d2235b2e748d2853faae536d2b76d4d010430e88..a88c261b2c8fd4a51815f35b3da4e61ed04300a1 100644
+--- a/go-vod/api/hls.go
++++ b/go-vod/api/hls.go
+@@ -6,6 +6,7 @@ import (
+ 	"math"
+ 	"net/http"
+ 	"sort"
++	"strings"
+ 	"time"
+ 
+ 	"github.com/grafov/m3u8"
+@@ -21,31 +22,53 @@ func MasterPlaylist(renditions []core.Rendition, frameRate int, query string) (s
+ 	})
+ 
+ 	m := m3u8.NewMasterPlaylist()
+-	m.SetIndependentSegments(true)
++	independent := true
+ 	for _, r := range sorted {
+-		m.Append(r.Quality+".m3u8"+query, nil, m3u8.VariantParams{
++		if r.Quality == core.QUALITY_DIRECT {
++			independent = false
++			break
++		}
++	}
++	m.SetIndependentSegments(independent)
++	for _, r := range sorted {
++		params := m3u8.VariantParams{
+ 			Bandwidth:  uint32(r.Bitrate),
+ 			Resolution: fmt.Sprintf("%dx%d", r.Width, r.Height),
+ 			FrameRate:  float64(frameRate),
+-		})
++			Codecs:     r.Codecs,
++		}
++		if r.SeparateAudio {
++			params.Audio = "audio"
++			params.Alternatives = []*m3u8.Alternative{
++				{GroupId: "audio", Type: "AUDIO", Name: "Original / high", Default: true, Autoselect: "YES", URI: "audio.m3u8" + query},
++				{GroupId: "audio", Type: "AUDIO", Name: "96 kbps", Autoselect: "NO", URI: "audio96.m3u8" + query},
++				{GroupId: "audio", Type: "AUDIO", Name: "64 kbps", Autoselect: "NO", URI: "audio64.m3u8" + query},
++				{GroupId: "audio", Type: "AUDIO", Name: "32 kbps", Autoselect: "NO", URI: "audio32.m3u8" + query},
++			}
++		}
++		m.Append(r.Quality+".m3u8"+query, nil, params)
+ 	}
+ 	return m.Encode().String(), nil
+ }
+ 
+ // VariantPlaylist serves a rendition's playlist. direct.m3u8 never blocks:
+-// cache hits serve copy, a finished probe without a grid serves uniform
+-// re-encoded segments, and a pending probe answers ErrCopyPending (409).
++// cache hits serve copy, a finished probe without a grid is unavailable,
++// and a pending probe answers ErrCopyPending (409).
++// audio.m3u8 is served like any other transcoded rendition.
+ func VariantPlaylist(m *core.Manager, quality string, query string) (string, error) {
+ 	if quality == core.QUALITY_DIRECT {
+ 		if segs, ok := m.TryCacheCopySegments(); ok {
+ 			return CopyVariantPlaylist(quality, segs, query)
+ 		}
+ 		if m.CopyProbed() {
+-			return TranscodeVariantPlaylist(quality, m.Duration(), m.ChunkSize(), query)
++			return "", core.ErrCopyUnavailable
+ 		}
+ 		m.StartCopyProbeAsync()
+ 		return "", core.ErrCopyPending
+ 	}
++	if grid := m.AlignedGrid(quality); grid != nil {
++		return CopyVariantPlaylist(quality, grid.Segments, query)
++	}
+ 	return TranscodeVariantPlaylist(quality, m.Duration(), m.ChunkSize(), query)
+ }
+ 
+@@ -79,29 +102,25 @@ func TranscodeVariantPlaylist(quality string, total time.Duration, chunkSize int
+ 	return p.Encode().String(), nil
+ }
+ 
+-// CopyVariantPlaylist renders the variant playlist for a stream-copy
+-// rendition from its keyframe-derived segments.
++// CopyVariantPlaylist renders the source keyframe grid shared by Original and
++// aligned hardware renditions. Keep microsecond precision: the m3u8 writer's
++// three decimal places accumulate drift across fractional GOPs.
+ func CopyVariantPlaylist(quality string, segments []ffmpeg.Segment, query string) (string, error) {
+-	n := len(segments)
+-	p, err := m3u8.NewMediaPlaylist(uint(n), uint(n))
+-	if err != nil {
+-		return "", err
+-	}
+-	initVariant(p, quality, query)
+-
+ 	longest := 0.0
+ 	for _, s := range segments {
+ 		longest = max(longest, s.Duration)
+ 	}
+-	p.TargetDuration = math.Ceil(longest)
+-
++	var p strings.Builder
++	fmt.Fprintf(&p, "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-TARGETDURATION:%.0f\n#EXT-X-MAP:URI=\"%s%s\"\n",
++		math.Ceil(longest), ffmpeg.InitName(quality), query)
++	if quality != core.QUALITY_DIRECT {
++		p.WriteString("#EXT-X-INDEPENDENT-SEGMENTS\n")
++	}
+ 	for i, s := range segments {
+-		if err := p.Append(fmt.Sprintf("%s-%06d.m4s%s", quality, i, query), s.Duration, "nodesc"); err != nil {
+-			return "", err
+-		}
++		fmt.Fprintf(&p, "#EXTINF:%.6f,nodesc\n%s-%06d.m4s%s\n", s.Duration, quality, i, query)
+ 	}
+-	p.Close()
+-	return p.Encode().String(), nil
++	p.WriteString("#EXT-X-ENDLIST\n")
++	return p.String(), nil
+ }
+ 
+ // initVariant sets up a VOD fMP4 playlist; EXT-X-MAP needs version 6.
+diff --git a/go-vod/api/hls_test.go b/go-vod/api/hls_test.go
+index 395e00c7a7536d3cd593f09501761989814043c5..cebcfca340b292092abc52803a33e02e416cbe11 100644
+--- a/go-vod/api/hls_test.go
++++ b/go-vod/api/hls_test.go
+@@ -1,8 +1,11 @@
+ package api
+ 
+ import (
++	"errors"
++	"math"
+ 	"os"
+ 	"path/filepath"
++	"strconv"
+ 	"strings"
+ 	"testing"
+ 	"time"
+@@ -27,6 +30,32 @@ func TestMasterPlaylist(t *testing.T) {
+ 	require.Contains(t, got, "#EXT-X-INDEPENDENT-SEGMENTS")
+ }
+ 
++func TestCopyPlaylistPreservesFractionalBoundaries(t *testing.T) {
++	// 4.133333 s GOPs lose a third of a second after 1000 segments when
++	// rounded to milliseconds; exact grid starts must survive serialization.
++	keys := make([]float64, 1000)
++	for i := range keys {
++		keys[i] = math.Round(float64(i)*124/30*1e6) / 1e6
++	}
++	end := keys[len(keys)-1] + 124.0/30
++	segments := ffmpeg.CopySegments(keys, time.Duration(end*float64(time.Second)))
++	text, err := CopyVariantPlaylist("direct", segments, "")
++	require.NoError(t, err)
++	var start float64
++	var id int
++	for _, line := range strings.Split(text, "\n") {
++		if !strings.HasPrefix(line, "#EXTINF:") {
++			continue
++		}
++		require.InDelta(t, segments[id].Start, start, 0.000001, "boundary %d", id)
++		duration, err := strconv.ParseFloat(strings.SplitN(strings.TrimPrefix(line, "#EXTINF:"), ",", 2)[0], 64)
++		require.NoError(t, err)
++		start += duration
++		id++
++	}
++	require.Equal(t, len(segments), id)
++}
++
+ func TestTranscodeVariantPlaylist(t *testing.T) {
+ 	got, err := TranscodeVariantPlaylist("720p", 62*time.Second+500*time.Millisecond, 3, "?t=123")
+ 	require.NoError(t, err)
+@@ -64,7 +93,7 @@ func TestCopyVariantPlaylist(t *testing.T) {
+ 	require.True(t, strings.HasSuffix(strings.TrimSpace(got), "#EXT-X-ENDLIST"))
+ }
+ 
+-func stubVariantManager(t *testing.T, keyFail bool) *core.Manager {
++func stubVariantManager(t *testing.T, keyFail bool, rkmpp ...bool) *core.Manager {
+ 	t.Helper()
+ 	dir := t.TempDir()
+ 	probeJSON := `{"streams":[{"codec_type":"video","codec_name":"h264","width":1280,"height":720,"avg_frame_rate":"30/1","duration":"12","bit_rate":"1000000"}],"format":{}}`
+@@ -80,6 +109,9 @@ func stubVariantManager(t *testing.T, keyFail bool) *core.Manager {
+ 	require.NoError(t, os.WriteFile(bin, []byte(script), 0755))
+ 
+ 	cfg := config.Defaults("test")
++	if len(rkmpp) > 0 && rkmpp[0] {
++		cfg.RKMPP, cfg.RKMPPOutputCodec = true, "h264"
++	}
+ 	cfg.TempDir = t.TempDir()
+ 	cfg.FFprobe = bin
+ 	m, err := core.NewManager(core.NewManagerArgs{
+@@ -97,6 +129,23 @@ func stubVariantManager(t *testing.T, keyFail bool) *core.Manager {
+ 	return m
+ }
+ 
++func TestVariantPlaylistAlignedHardwareGrid(t *testing.T) {
++	m := stubVariantManager(t, false, true)
++	_, ok := m.EnsureCopySegments()
++	require.True(t, ok)
++	for _, quality := range []string{"direct", "480p", core.QUALITY_MAX} {
++		got, err := VariantPlaylist(m, quality, "?t=123")
++		require.NoError(t, err)
++		require.Contains(t, got, "#EXT-X-TARGETDURATION:4")
++		require.Equal(t, 3, strings.Count(got, "#EXTINF:"))
++		require.Contains(t, got, quality+"-000002.m4s?t=123")
++	}
++	audio, err := VariantPlaylist(m, core.QUALITY_AUDIO, "")
++	require.NoError(t, err)
++	require.Contains(t, audio, "#EXT-X-TARGETDURATION:3")
++	require.Equal(t, 4, strings.Count(audio, "#EXTINF:"), "audio retains its independent timeline")
++}
++
+ func TestVariantPlaylistLazyDirect(t *testing.T) {
+ 	m := stubVariantManager(t, false)
+ 
+@@ -135,7 +184,7 @@ func TestVariantPlaylistDirectPending(t *testing.T) {
+ 	}
+ }
+ 
+-func TestVariantPlaylistDirectFallback(t *testing.T) {
++func TestVariantPlaylistDirectUnavailableDoesNotTranscodeOriginal(t *testing.T) {
+ 	m := stubVariantManager(t, true)
+ 
+ 	_, err := VariantPlaylist(m, "direct", "")
+@@ -144,15 +193,13 @@ func TestVariantPlaylistDirectFallback(t *testing.T) {
+ 	deadline := time.Now().Add(10 * time.Second)
+ 	for {
+ 		got, err := VariantPlaylist(m, "direct", "")
+-		if err == nil {
+-			require.Contains(t, got, "direct-000000.m4s")
+-			require.NotContains(t, got, "max-")
+-			require.Contains(t, got, "#EXT-X-TARGETDURATION:3")
++		if errors.Is(err, core.ErrCopyUnavailable) {
++			require.Empty(t, got)
+ 			break
+ 		}
+ 		require.ErrorIs(t, err, core.ErrCopyPending)
+ 		if time.Now().After(deadline) {
+-			t.Fatal("direct.m3u8 never fell back past 409")
++			t.Fatal("direct.m3u8 did not finish its failed copy probe")
+ 		}
+ 		time.Sleep(20 * time.Millisecond)
+ 	}
+diff --git a/go-vod/api/rkmpp_hardware_test.go b/go-vod/api/rkmpp_hardware_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..7cacc66859a5bcc1dc9a8ee0c03a792ebeb35ce3
+--- /dev/null
++++ b/go-vod/api/rkmpp_hardware_test.go
+@@ -0,0 +1,95 @@
++package api
++
++import (
++	"bytes"
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"strings"
++	"testing"
++
++	"github.com/pulsejet/memories/go-vod/config"
++	"github.com/pulsejet/memories/go-vod/core"
++	"github.com/stretchr/testify/require"
++)
++
++// The Memories 11 PHP envelope, callback authentication and HLS profiles are
++// exercised against a local fixture server. This is a protocol test, not a
++// browser test and not a connection to the user's Nextcloud instance.
++func TestRKMPPHardwareAPI(t *testing.T) {
++	if os.Getenv("MEMORIES_RKMPP_HW_TEST") != "1" {
++		t.Skip("set MEMORIES_RKMPP_HW_TEST=1 on RK3588")
++	}
++	t.Setenv("CACHE_DIR", t.TempDir())
++	bin, err := exec.LookPath("ffmpeg")
++	require.NoError(t, err)
++	probe, err := exec.LookPath("ffprobe")
++	require.NoError(t, err)
++	dir := t.TempDir()
++	src := filepath.Join(dir, "fixture.mkv")
++	out, err := exec.Command(bin, "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=1280x720:r=30",
++		"-f", "lavfi", "-i", "sine=sample_rate=48000", "-t", "9", "-c:v", "libx264", "-threads", "2",
++		"-c:a", "pcm_s16le", src).CombinedOutput()
++	require.NoError(t, err, string(out))
++	callback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.URL.Path != "/index.php/apps/memories/api/stream/1" {
++			http.NotFound(w, r)
++			return
++		}
++		if r.Header.Get(core.ServiceTokenHeader) != "fixture-service-token" {
++			w.WriteHeader(http.StatusForbidden)
++			return
++		}
++		http.ServeFile(w, r, src)
++	}))
++	defer callback.Close()
++	cfg := config.Defaults("0.7.0")
++	cfg.RKMPP, cfg.RKMPPOutputCodec, cfg.VersionMonitor = true, "hevc", true
++	cfg.TempDir, cfg.CacheDir_ = t.TempDir(), t.TempDir()
++	cfg.FFmpeg, cfg.FFprobe, cfg.NextcloudURL = bin, probe, callback.URL
++	cfg.Bridge.Enabled = false
++	s := NewServer(cfg)
++	params := core.ManagerParams{URL: cfg.FileURL(1), StreamID: "aabbccdd", FileID: 1, Etag: "fixture",
++		ServiceToken: "fixture-service-token", PlayableCodecs: []string{"h264", "hevc"}, TConfig: config.TCfg{ChunkSize: 3, QF: 24}}
++	m, err := s.reg.GetOrCreate(params)
++	require.NoError(t, err)
++	defer m.Destroy()
++	request := VodRequest{Client: params.StreamID, FileID: 1, Etag: params.Etag, ServiceToken: params.ServiceToken,
++		TConfig: params.TConfig, Query: VodQuery{Codecs: "h264,hevc", Token: "fixture-share-token"}}
++	fetch := func(profile string) []byte {
++		request.Profile = profile
++		body, err := json.Marshal(request)
++		require.NoError(t, err)
++		r := httptest.NewRequest("POST", "/vod", bytes.NewReader(body))
++		r.Header.Set("X-Go-Vod-Version", "0.7.0")
++		w := httptest.NewRecorder()
++		s.routes().ServeHTTP(w, r)
++		require.Equal(t, http.StatusOK, w.Code, profile)
++		require.NotEmpty(t, w.Body.Bytes(), profile)
++		return w.Body.Bytes()
++	}
++	w := httptest.NewRecorder()
++	s.routes().ServeHTTP(w, httptest.NewRequest("GET", "/ping", nil))
++	require.Contains(t, w.Body.String(), `"version":"0.7.0"`)
++	master := string(fetch("index.m3u8"))
++	require.Equal(t, 4, strings.Count(master, "#EXT-X-MEDIA:"))
++	require.Contains(t, master, `AUDIO="audio"`)
++	require.Contains(t, master, "hvc1.")
++	require.Contains(t, master, "mp4a.40.2")
++	require.Contains(t, master, "fixture-share-token")
++	for _, quality := range []string{"480plow", "480pmobile", "480p", "max", "audio", "audio96", "audio64", "audio32"} {
++		playlist := string(fetch(quality + ".m3u8"))
++		require.Contains(t, playlist, "#EXT-X-MAP:")
++		require.Contains(t, playlist, quality+"-init.m4s")
++		require.Contains(t, playlist, "fixture-share-token")
++		init := fetch(quality + "-init.m4s")
++		segment := fetch(quality + "-000002.m4s")
++		joined := filepath.Join(dir, quality+".mp4")
++		require.NoError(t, os.WriteFile(joined, append(init, segment...), 0644))
++		out, err := exec.Command(bin, "-v", "error", "-xerror", "-i", joined, "-map", "0", "-f", "null", "-").CombinedOutput()
++		require.NoError(t, err, string(out))
++	}
++}
+diff --git a/go-vod/api/server.go b/go-vod/api/server.go
+index d2dd1cf8412bd34c32e5822aea7666e1018e8608..f525cda75b2e051646f0354b48b7d5fdd90c1663 100644
+--- a/go-vod/api/server.go
++++ b/go-vod/api/server.go
+@@ -167,6 +167,10 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, req VodRequest) {
+ 			w.WriteHeader(http.StatusConflict)
+ 			return
+ 		}
++		if errors.Is(err, core.ErrCopyUnavailable) {
++			w.WriteHeader(http.StatusUnprocessableEntity)
++			return
++		}
+ 		if err != nil {
+ 			w.WriteHeader(http.StatusInternalServerError)
+ 			return
+diff --git a/go-vod/cmd/govod-health/main.go b/go-vod/cmd/govod-health/main.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..4aa32b84d34bf513e0482d5fe1e1f274d91205df
+--- /dev/null
++++ b/go-vod/cmd/govod-health/main.go
+@@ -0,0 +1,29 @@
++package main
++
++import (
++	"encoding/json"
++	"fmt"
++	"net/http"
++	"os"
++	"time"
++)
++
++func main() {
++	client := &http.Client{Timeout: 4 * time.Second}
++	res, err := client.Get("http://127.0.0.1:47788/health")
++	if err != nil {
++		fmt.Fprintln(os.Stderr, err)
++		os.Exit(1)
++	}
++	defer res.Body.Close()
++	var health struct {
++		Status  string `json:"status"`
++		Version string `json:"version"`
++	}
++	if err := json.NewDecoder(res.Body).Decode(&health); err != nil ||
++		res.StatusCode != http.StatusOK || health.Status != "healthy" || health.Version != "0.7.0" {
++		fmt.Fprintf(os.Stderr, "go-vod health: HTTP %d status=%s version=%s error=%v\n", res.StatusCode, health.Status, health.Version, err)
++		os.Exit(1)
++	}
++	fmt.Println("go-vod 0.7.0 healthy; Nextcloud reachable")
++}
+diff --git a/go-vod/cmd/rkmpp-smoke/main.go b/go-vod/cmd/rkmpp-smoke/main.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..18d066332987cee1d005be80a318f6496d7ae0a1
+--- /dev/null
++++ b/go-vod/cmd/rkmpp-smoke/main.go
+@@ -0,0 +1,236 @@
++// rkmpp-smoke is an offline hardware preflight for the RK3588 go-vod 0.7.0
++// FFmpeg argument builder. It does not contact Nextcloud or run a server.
++package main
++
++import (
++	"bytes"
++	"context"
++	"errors"
++	"flag"
++	"fmt"
++	"math"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"strings"
++	"time"
++
++	"github.com/pulsejet/memories/go-vod/ffmpeg"
++)
++
++func evenDimension(v int) int {
++	if v < 2 {
++		return 2
++	}
++	return v &^ 1
++}
++
++func targetDimensions(width, height int) (int, int) {
++	if width < 2 || height < 2 {
++		return 0, 0
++	}
++	// Keep RAW source orientation. go-vod rotates only after RGA scaling.
++	long := max(width, height)
++	short := min(width, height)
++	ratio := math.Min(1, math.Min(1280/float64(long), 720/float64(short)))
++	return evenDimension(int(float64(width) * ratio)), evenDimension(int(float64(height) * ratio))
++}
++
++func hasFlagValue(args []string, flag, want string) bool {
++	for i := 0; i+1 < len(args); i++ {
++		if args[i] == flag && args[i+1] == want {
++			return true
++		}
++	}
++	return false
++}
++
++func checkCapabilities(ctx context.Context, ffbin string) error {
++	for _, tc := range []struct {
++		option, required string
++	}{
++		{"-encoders", "h264_rkmpp"},
++		{"-encoders", "hevc_rkmpp"},
++		{"-hwaccels", "rkmpp"},
++		{"-filters", "scale_rkrga"},
++		{"-filters", "vpp_rkrga"},
++	} {
++		c, cancel := context.WithTimeout(ctx, 20*time.Second)
++		out, err := exec.CommandContext(c, ffbin, "-hide_banner", tc.option).CombinedOutput()
++		cancel()
++		if err != nil {
++			return fmt.Errorf("%s failed: %w: %s", tc.option, err, out)
++		}
++		if !strings.Contains(string(out), tc.required) {
++			return fmt.Errorf("FFmpeg %s missing %q: wrong image/FFmpeg build", tc.option, tc.required)
++		}
++		fmt.Printf("OK: FFmpeg supports %s\n", tc.required)
++	}
++	return nil
++}
++
++func run(ctx context.Context, input, output, codec string, start, seconds float64, opencl bool) error {
++	ffbin, err := exec.LookPath("ffmpeg")
++	if err != nil {
++		return err
++	}
++	probebin, err := exec.LookPath("ffprobe")
++	if err != nil {
++		return err
++	}
++	if err := checkCapabilities(ctx, ffbin); err != nil {
++		return err
++	}
++	if input == "" {
++		fmt.Println("Capability check complete. No real hardware was exercised (provide -input).")
++		return nil
++	}
++	if !filepath.IsAbs(input) || !filepath.IsAbs(output) {
++		return errors.New("-input and -output must be absolute paths")
++	}
++	info, err := ffmpeg.Probe(ctx, probebin, input, "")
++	if err != nil {
++		return fmt.Errorf("probe sample: %w", err)
++	}
++	if info.DolbyVision {
++		return errors.New("Dolby Vision is not supported by the v11 RKMPP pipeline")
++	}
++	if info.Width < 2 || info.Height < 2 || info.Duration <= 0 {
++		return fmt.Errorf("unsupported video dimensions/duration: %dx%d %s", info.Width, info.Height, info.Duration)
++	}
++	if start >= info.Duration.Seconds() {
++		return fmt.Errorf("start %.1fs is beyond video duration %s", start, info.Duration)
++	}
++	if seconds > info.Duration.Seconds()-start {
++		seconds = info.Duration.Seconds() - start
++	}
++	if seconds < 1 {
++		return errors.New("need at least one second of media after seek")
++	}
++	width, height := targetDimensions(info.Width, info.Height)
++	fmt.Printf("Source: %s %dx%d fps=%d pixel=%s depth=%d HDR=%v rotation=%d, target=%dx%d\n",
++		info.CodecName, info.Width, info.Height, info.FrameRate, info.PixelFormat,
++		info.BitDepth, info.HDR, info.Rotation, width, height)
++	if err := os.MkdirAll(output, 0755); err != nil {
++		return err
++	}
++	// Never allow leftovers from an earlier run to satisfy this run's checks.
++	output, err = os.MkdirTemp(output, "run-")
++	if err != nil {
++		return err
++	}
++	fmt.Printf("Run directory: %s\n", output)
++	codecs := []string{"h264", "hevc"}
++	if codec != "both" {
++		codecs = []string{codec}
++	}
++	for _, outCodec := range codecs {
++		dst := filepath.Join(output, outCodec)
++		if err := os.MkdirAll(dst, 0755); err != nil {
++			return err
++		}
++		spec := ffmpeg.Spec{
++			Bin: ffbin, Input: input, RKMPP: true, RKMPPOutputCodec: outCodec,
++			CodecName: info.CodecName, PixelFormat: info.PixelFormat,
++			FrameRate: info.FrameRate, FrameRateExact: info.FrameRateExact,
++			Rotation: info.Rotation, HDR: info.HDR, BitDepth: info.BitDepth,
++			ColorTransfer: info.ColorTransfer, ColorPrimaries: info.ColorPrimaries,
++			ColorSpace: info.ColorSpace, ColorRange: info.ColorRange,
++			Width: width, Height: height, QF: 24,
++			Bitrate: 3_500_000, HLS: true, ChunkSize: 3,
++			StartAt: start, Audio: info.Audio, RKMPPOpenCL: opencl,
++		}
++		pattern := filepath.Join(dst, "test-%06d.m4s")
++		init := filepath.Join(dst, "test-init.mp4")
++		playlist := filepath.Join(dst, "test.m3u8")
++		segmentNum := int(start / 3)
++		args := ffmpeg.SegmentArgs(spec, segmentNum, pattern, init)
++		if len(args) == 0 || args[len(args)-1] != "-" {
++			return errors.New("unexpected go-vod fMP4 argument layout")
++		}
++		if !hasFlagValue(args, "-c:v", outCodec+"_rkmpp") {
++			return fmt.Errorf("wrong output encoder for %s", outCodec)
++		}
++		if !hasFlagValue(args, "-hls_segment_type", "fmp4") {
++			return errors.New("fMP4 segment flag is missing")
++		}
++		if !hasFlagValue(args, "-hwaccel", "rkmpp") {
++			fmt.Println("WARNING: source needs CPU decode (unsupported surface or HDR CPU fallback). This test does NOT validate hardware decoding.")
++		}
++		// Keep the production stdout playlist: FFmpeg resolves an absolute
++		// init path differently when the playlist itself is a filesystem path.
++		// With -copyts the output cutoff is on the absolute source clock.
++		args = append(args[:len(args)-1], "-to", fmt.Sprintf("%.6f", start+seconds), "-")
++		fmt.Printf("Encoding %s into %s (%.1fs)\n", outCodec, dst, seconds)
++		fmt.Printf("FFmpeg: %s\n", ffmpeg.QuoteForLog(ffmpeg.RedactArgs(args)))
++		c, cancel := context.WithTimeout(ctx, 3*time.Minute)
++		cmd := exec.CommandContext(c, ffbin, args...)
++		var stderr bytes.Buffer
++		cmd.Stderr = &stderr
++		out, e := cmd.Output()
++		cancel()
++		if e != nil {
++			return fmt.Errorf("%s RKMPP pipeline failed: %w\n%s", outCodec, e, stderr.String())
++		}
++		// The HLS muxer republishes its growing playlist on stdout. Retain
++		// only the final complete snapshot for independent decode validation.
++		final, e := finalPlaylist(out)
++		if e != nil {
++			return e
++		}
++		if e = os.WriteFile(playlist, final, 0644); e != nil {
++			return e
++		}
++		entries, e := filepath.Glob(filepath.Join(dst, "test-*.m4s"))
++		if e != nil || len(entries) == 0 {
++			return fmt.Errorf("%s produced no fMP4 segments", outCodec)
++		}
++		if st, e := os.Stat(init); e != nil || st.Size() == 0 {
++			return fmt.Errorf("%s missing/empty fMP4 init: %v", outCodec, e)
++		}
++		// Decode the muxed playlist strictly; success proves init+segments
++		// are consumable, not just that FFmpeg exited with status 0.
++		c, cancel = context.WithTimeout(ctx, time.Minute)
++		check := exec.CommandContext(c, ffbin, "-hide_banner", "-v", "error",
++			"-xerror", "-i", playlist, "-map", "0:v:0", "-map", "0:a:0?",
++			"-f", "null", "-")
++		verifyOutput, e := check.CombinedOutput()
++		cancel()
++		if e != nil {
++			return fmt.Errorf("%s fMP4 decode validation failed: %w\n%s", outCodec, e, verifyOutput)
++		}
++		fmt.Printf("PASS: %s hardware encoder completed, %d fMP4 segments; playlist decoded\n", outCodec, len(entries))
++	}
++	fmt.Println("Offline smoke successful. This does NOT test the Nextcloud 11 player or real HLS switching.")
++	return nil
++}
++
++func finalPlaylist(output []byte) ([]byte, error) {
++	i := bytes.LastIndex(output, []byte("#EXTM3U"))
++	if i < 0 || !bytes.Contains(output[i:], []byte("#EXT-X-ENDLIST")) {
++		return nil, errors.New("FFmpeg did not finish a VOD playlist")
++	}
++	return output[i:], nil
++}
++
++func main() {
++	input := flag.String("input", "", "absolute path to a local sample video, mounted read-only")
++	output := flag.String("output", "/cache/rkmpp-smoke", "absolute output directory for test-only segments")
++	codec := flag.String("codec", "both", "h264, hevc, or both")
++	seconds := flag.Float64("seconds", 9, "seconds of material to test")
++	start := flag.Float64("start", 0, "start position in seconds (set 6 for a cold seek)")
++	opencl := flag.Bool("opencl", false, "try Mali OpenCL HDR conversion (experimental)")
++	flag.Parse()
++	if *codec != "h264" && *codec != "hevc" && *codec != "both" {
++		fmt.Fprintln(os.Stderr, "invalid -codec; choose h264, hevc or both")
++		os.Exit(2)
++	}
++	if *seconds <= 0 || *start < 0 || math.IsNaN(*seconds) || math.IsInf(*seconds, 0) || math.IsNaN(*start) || math.IsInf(*start, 0) {
++		fmt.Fprintln(os.Stderr, "invalid -seconds or -start")
++		os.Exit(2)
++	}
++	if err := run(context.Background(), *input, *output, *codec, *start, *seconds, *opencl); err != nil {
++		fmt.Fprintln(os.Stderr, "FAIL:", err)
++		os.Exit(1)
++	}
++}
+diff --git a/go-vod/cmd/rkmpp-smoke/main_test.go b/go-vod/cmd/rkmpp-smoke/main_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..849212b2233fe1489192b75e9dfd27ce7b8546b5
+--- /dev/null
++++ b/go-vod/cmd/rkmpp-smoke/main_test.go
+@@ -0,0 +1,42 @@
++package main
++
++import (
++	"strings"
++	"testing"
++)
++
++func TestFinalPlaylist(t *testing.T) {
++	final := "#EXTM3U\n#EXT-X-MAP:URI=\"test-init.mp4\"\n#EXTINF:3,\ntest-000000.m4s\n#EXT-X-ENDLIST\n"
++	got, err := finalPlaylist([]byte("#EXTM3U\npartial\n" + final))
++	if err != nil || string(got) != final || strings.Count(string(got), "#EXTM3U") != 1 {
++		t.Fatalf("incorrect final playlist: %q, %v", got, err)
++	}
++	for _, incomplete := range []string{"", "#EXTM3U\npartial\n", "#EXT-X-ENDLIST\n"} {
++		if _, err := finalPlaylist([]byte(incomplete)); err == nil {
++			t.Fatalf("accepted incomplete playlist %q", incomplete)
++		}
++	}
++}
++
++func TestTargetDimensions(t *testing.T) {
++	for _, tc := range []struct{ w, h, wantW, wantH int }{
++		{3840, 2160, 1280, 720},
++		{2160, 3840, 720, 1280},
++		{1280, 720, 1280, 720},
++		{1000, 1920, 666, 1280},
++		{641, 359, 640, 358},
++		{1, 1, 0, 0},
++	} {
++		w, h := targetDimensions(tc.w, tc.h)
++		if w != tc.wantW || h != tc.wantH {
++			t.Errorf("%dx%d -> %dx%d; want %dx%d", tc.w, tc.h, w, h, tc.wantW, tc.wantH)
++		}
++	}
++}
++
++func TestHasFlagValue(t *testing.T) {
++	args := []string{"-codec", "h264_rkmpp", "-c:v", "hevc_rkmpp"}
++	if !hasFlagValue(args, "-c:v", "hevc_rkmpp") || hasFlagValue(args, "-c:v", "h264_rkmpp") {
++		t.Fatal("did not compare exact command argument pairs")
++	}
++}
+diff --git a/go-vod/config/config.go b/go-vod/config/config.go
+index 8d900ac040a7166ad360a0d708d2a9b5cc2688e4..777739c599484094b49f040b1ac286ba334db031 100644
+--- a/go-vod/config/config.go
++++ b/go-vod/config/config.go
+@@ -35,8 +35,12 @@ type Config struct {
+ 	StreamIdleTime  int `json:"streamIdleTime" validate:"gte=0"`
+ 	ManagerIdleTime int `json:"managerIdleTime" validate:"gte=0"`
+ 
+-	Version        string `json:"-"`
+-	VersionMonitor bool   `json:"-"`
++	Version          string `json:"-"`
++	VersionMonitor   bool   `json:"-"`
++	RKMPP            bool   `json:"-"`
++	RKMPPStrict      bool   `json:"rkmppStrict"`
++	RKMPPOpenCL      bool   `json:"rkmppOpenCL"`
++	RKMPPOutputCodec string `json:"rkmppOutputCodec" validate:"omitempty,oneof=auto h264 hevc"`
+ }
+ 
+ // Bridge configures persistent PHP workers serving file reads.
+@@ -54,14 +58,18 @@ type Bridge struct {
+ }
+ 
+ func Defaults(version string) *Config {
+-	return &Config{
+-		Version:         version,
+-		Bind:            ":47788",
+-		LookBehind:      3,
+-		GoalBufferMin:   1,
+-		GoalBufferMax:   4,
+-		StreamIdleTime:  60,
+-		ManagerIdleTime: 60,
++	c := &Config{
++		Version:          version,
++		Bind:             ":47788",
++		LookBehind:       3,
++		GoalBufferMin:    1,
++		GoalBufferMax:    4,
++		StreamIdleTime:   60,
++		ManagerIdleTime:  60,
++		RKMPP:            os.Getenv("MEMORIES_RKMPP") == "1",
++		RKMPPOpenCL:      true,
++		RKMPPStrict:      true,
++		RKMPPOutputCodec: "auto",
+ 		Bridge: Bridge{
+ 			Enabled:    true,
+ 			MaxWorkers: 4,
+@@ -70,6 +78,11 @@ func Defaults(version string) *Config {
+ 			IdleTime:   5,
+ 		},
+ 	}
++	if c.RKMPP {
++		c.GoalBufferMax = 2
++		c.StreamIdleTime = 15
++	}
++	return c
+ }
+ 
+ func (c *Config) LoadFile(path string) error {
+@@ -138,8 +151,20 @@ func (c *Config) DescribeURL() string {
+ }
+ 
+ func (c *Config) AutoDetect() error {
++	if value := os.Getenv("MEMORIES_RKMPP_OPENCL"); value != "" {
++		enabled, err := strconv.ParseBool(value)
++		if err != nil {
++			return fmt.Errorf("invalid MEMORIES_RKMPP_OPENCL: %w", err)
++		}
++		c.RKMPPOpenCL = enabled
++	}
++	if v := os.Getenv("MEMORIES_RKMPP_CODEC"); v != "" {
++		c.RKMPPOutputCodec = v
++	}
++
+ 	// Detect general configuration
+ 	if err := c.loadEnv(map[string]any{
++		"MEMORIES_RKMPP_STRICT":    &c.RKMPPStrict,
+ 		"NEXTCLOUD_HOST":           &c.NextcloudURL,
+ 		"NEXTCLOUD_ALLOW_INSECURE": &c.AllowInsecure,
+ 		"GO_VOD_FFMPEG_PATH":       &c.FFmpeg,
+diff --git a/go-vod/config/config_test.go b/go-vod/config/config_test.go
+index 88c9f7bf1595b09903f1c3c1e4b928dff39780f6..e657b838ad2de9b93cc0a017d387129ebd97411f 100644
+--- a/go-vod/config/config_test.go
++++ b/go-vod/config/config_test.go
+@@ -156,3 +156,28 @@ func TestAutoDetect(t *testing.T) {
+ 	require.NoError(t, preset.AutoDetect())
+ 	require.Equal(t, "/custom/ffmpeg", preset.FFmpeg)
+ }
++
++func TestRKMPPEnvironmentResolvedAtStartup(t *testing.T) {
++	t.Setenv("MEMORIES_RKMPP", "1")
++	c := Defaults("test")
++	t.Setenv("MEMORIES_RKMPP", "0")
++	require.True(t, c.RKMPP)
++	require.Equal(t, "auto", c.RKMPPOutputCodec)
++	require.Equal(t, 2, c.GoalBufferMax)
++	require.Equal(t, 15, c.StreamIdleTime)
++	require.False(t, Defaults("test").RKMPP)
++}
++
++func TestRKMPPOpenCLEnvironment(t *testing.T) {
++	for value, expected := range map[string]bool{"true": true, "1": true, "false": false, "0": false} {
++		t.Run(value, func(t *testing.T) {
++			t.Setenv("MEMORIES_RKMPP_OPENCL", value)
++			c := Defaults("test")
++			c.FFmpeg, c.FFprobe = "/bin/ffmpeg", "/bin/ffprobe"
++			require.NoError(t, c.AutoDetect())
++			require.Equal(t, expected, c.RKMPPOpenCL)
++		})
++	}
++	t.Setenv("MEMORIES_RKMPP_OPENCL", "invalid")
++	require.ErrorContains(t, Defaults("test").AutoDetect(), "MEMORIES_RKMPP_OPENCL")
++}
+diff --git a/go-vod/core/aligned_grid_hardware_test.go b/go-vod/core/aligned_grid_hardware_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..a66efb6dc203481be3455c53c0f4afb95ab6fccd
+--- /dev/null
++++ b/go-vod/core/aligned_grid_hardware_test.go
+@@ -0,0 +1,83 @@
++package core
++
++import (
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"strconv"
++	"strings"
++	"testing"
++
++	"github.com/pulsejet/memories/go-vod/config"
++	"github.com/stretchr/testify/require"
++)
++
++// Exercise serving IDs beyond the fixed-grid limit and a cold encoder restart
++// through the actual stream supervisor, rather than just constructing CLI args.
++func TestRKMPPHardwareAlignedServing(t *testing.T) {
++	if os.Getenv("MEMORIES_RKMPP_HW_TEST") != "1" {
++		t.Skip("set MEMORIES_RKMPP_HW_TEST=1 on RK3588 with MPP/RGA devices")
++	}
++	bin, err := exec.LookPath("ffmpeg")
++	require.NoError(t, err)
++	probe, err := exec.LookPath("ffprobe")
++	require.NoError(t, err)
++	dir := t.TempDir()
++	src := filepath.Join(dir, "irregular.mp4")
++	out, err := exec.Command(bin, "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=1280x720:r=30000/1001",
++		"-f", "lavfi", "-i", "sine=sample_rate=48000", "-t", "11.011", "-c:v", "libx264", "-threads", "2",
++		"-bf", "0", "-g", "1000", "-sc_threshold", "0", "-force_key_frames", "0,0.93,2.93,6.93,9.40", "-c:a", "aac", src).CombinedOutput()
++	require.NoError(t, err, string(out))
++	cfg := config.Defaults("0.7.0")
++	cfg.RKMPP, cfg.RKMPPOutputCodec = true, "h264"
++	cfg.TempDir, cfg.CacheDir_ = t.TempDir(), t.TempDir()
++	cfg.FFmpeg, cfg.FFprobe = bin, probe
++	m, err := NewManager(NewManagerArgs{C: cfg, ManagerParams: ManagerParams{
++		URL: src, StreamID: "aligned-hardware", PlayableCodecs: []string{"h264"},
++		TConfig: config.TCfg{ChunkSize: 3, QF: 24}}, Idle: make(chan IdleEvent, 1)})
++	require.NoError(t, err)
++	t.Cleanup(m.Destroy)
++	_, ok := m.EnsureCopySegments()
++	require.True(t, ok)
++	g := m.AlignedGrid("480p")
++	require.NotNil(t, g)
++	require.Len(t, g.Segments, 5)
++	serve := func(quality string, id int) []byte {
++		w := httptest.NewRecorder()
++		require.True(t, m.ServeChunk(w, quality, id))
++		require.Equal(t, http.StatusOK, w.Code)
++		return append([]byte{}, w.Body.Bytes()...)
++	}
++	serve(QUALITY_AUDIO, 0)
++	m.streams[QUALITY_AUDIO].mutex.Lock()
++	audioRun := m.streams[QUALITY_AUDIO].run
++	m.streams[QUALITY_AUDIO].mutex.Unlock()
++	for _, quality := range []string{"480p", QUALITY_MAX} {
++		serve(quality, 0)
++		w := httptest.NewRecorder()
++		require.True(t, m.ServeInit(w, quality))
++		require.Equal(t, http.StatusOK, w.Code)
++		init := append([]byte{}, w.Body.Bytes()...)
++		s := m.streams[quality]
++		s.mutex.Lock()
++		s.clear()
++		s.mutex.Unlock()
++		// ID 4 is valid on the source grid despite being past 11 s on a 3 s grid.
++		segment := serve(quality, 4)
++		joined := filepath.Join(dir, quality+".mp4")
++		require.NoError(t, os.WriteFile(joined, append(init, segment...), 0644))
++		out, err := exec.Command(bin, "-v", "error", "-xerror", "-i", joined, "-f", "null", "-").CombinedOutput()
++		require.NoError(t, err, string(out))
++		out, err = exec.Command(probe, "-v", "error", "-select_streams", "v:0", "-show_entries", "packet=pts_time", "-of", "csv=p=0", joined).Output()
++		require.NoError(t, err)
++		pts, err := strconv.ParseFloat(strings.TrimRight(strings.SplitN(strings.TrimSpace(string(out)), "\n", 2)[0], ","), 64)
++		require.NoError(t, err)
++		require.InDelta(t, g.Segments[4].Start, pts, 0.0001)
++	}
++	m.streams[QUALITY_AUDIO].mutex.Lock()
++	finalAudioRun := m.streams[QUALITY_AUDIO].run
++	m.streams[QUALITY_AUDIO].mutex.Unlock()
++	require.Equal(t, audioRun, finalAudioRun, "video switches must not restart shared audio")
++}
+diff --git a/go-vod/core/aligned_grid_test.go b/go-vod/core/aligned_grid_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..ea8c59b199ae7cfe979f5255623984589e72d262
+--- /dev/null
++++ b/go-vod/core/aligned_grid_test.go
+@@ -0,0 +1,48 @@
++package core
++
++import (
++	"net/http/httptest"
++	"testing"
++	"time"
++
++	"github.com/pulsejet/memories/go-vod/config"
++	"github.com/stretchr/testify/require"
++)
++
++func gridManager(t *testing.T, cache string) *Manager {
++	t.Helper()
++	c := config.Defaults("test")
++	c.RKMPP, c.CacheDir_ = true, cache
++	m := &Manager{c: c, tc: config.TCfg{ChunkSize: 3}, fileid: 7, etag: "same", copyEligible: true,
++		probe: &ProbeVideoData{Duration: 10 * time.Second, FrameRate: 30, FrameRateExact: 30,
++			Width: 1280, Height: 720, CodecName: "h264", PixelFormat: "yuv420p"},
++		streams: make(map[string]*Stream)}
++	for _, q := range []string{"480p", QUALITY_AUDIO, QUALITY_DIRECT} {
++		m.streams[q] = &Stream{c: c, m: m, quality: q, width: 854, height: 480}
++	}
++	return m
++}
++
++func TestAlignedGridUsesOneCachedChoiceForAllVideo(t *testing.T) {
++	cache := t.TempDir()
++	m := gridManager(t, cache)
++	require.Nil(t, m.AlignedGrid(QUALITY_AUDIO), "audio must not settle the video decision")
++	require.NoError(t, StoreCachedKeyframes(cache, 7, "same", []float64{0, .94, 3.94, 6.94, 9.94}))
++	g := m.AlignedGrid("480p")
++	require.NotNil(t, g)
++	require.Equal(t, .94, g.Segments[1].Start)
++	require.Same(t, g, m.streams["480p"].spec(.94, true).KeyframeGrid)
++	require.Nil(t, m.streams["480p"].spec(0, false).KeyframeGrid, "progressive output is unchanged")
++	require.Nil(t, m.streams[QUALITY_AUDIO].spec(0, true).KeyframeGrid)
++	require.Nil(t, m.AlignedGrid(QUALITY_DIRECT), "Original keeps its established copy path")
++	require.False(t, m.ServeChunk(httptest.NewRecorder(), "480p", len(g.Segments)))
++}
++
++func TestAlignedGridCacheMissCannotChangeAnActivePlaylist(t *testing.T) {
++	cache := t.TempDir()
++	m := gridManager(t, cache)
++	require.Nil(t, m.AlignedGrid("480p"))
++	require.NoError(t, StoreCachedKeyframes(cache, 7, "same", []float64{0, 1, 4, 7}))
++	require.Nil(t, m.AlignedGrid("480p"), "a running ladder must never change its numbering")
++	require.NotNil(t, gridManager(t, cache).AlignedGrid("480p"), "the next session can use the warmed cache")
++}
+diff --git a/go-vod/core/cache.go b/go-vod/core/cache.go
+index 33fccbc5df0f99eaaf3065a363b202173dc4463e..4fcd5ca72295994af4d7c0e60e6b953f2a17797b 100644
+--- a/go-vod/core/cache.go
++++ b/go-vod/core/cache.go
+@@ -7,13 +7,15 @@ import (
+ 	"hash/fnv"
+ 	"os"
+ 	"path/filepath"
++
++	"github.com/pulsejet/memories/go-vod/ffmpeg"
+ )
+ 
+ const KeyframeCacheFile = "keyframes.json"
+ 
+ const ProbeCacheFile = "probe.json"
+ 
+-const probeCacheVersion = 2
++const probeCacheVersion = 5
+ 
+ // FileCacheDir is the file's cache home, sharded by hashed fileid.
+ // Empty when caching is unavailable (no cache dir or fileid).
+@@ -45,11 +47,12 @@ func KeyframeCachePath(cacheDir string, fileid int64) string {
+ 
+ // keyframesPlan is the stored keyframe payload, validated by Etag.
+ type keyframesPlan struct {
+-	Etag string    `json:"etag"`
+-	Keys []float64 `json:"keys"`
++	V      int               `json:"v"`
++	Etag   string            `json:"etag"`
++	Frames []ffmpeg.Keyframe `json:"frames"`
+ }
+ 
+-func LoadCachedKeyframes(cacheDir string, fileid int64, etag string) ([]float64, bool) {
++func LoadCachedTimeline(cacheDir string, fileid int64, etag string) ([]ffmpeg.Keyframe, bool) {
+ 	path := KeyframeCachePath(cacheDir, fileid)
+ 	if path == "" {
+ 		return nil, false
+@@ -67,10 +70,15 @@ func LoadCachedKeyframes(cacheDir string, fileid int64, etag string) ([]float64,
+ 		EvictFileCache(cacheDir, fileid)
+ 		return nil, false
+ 	}
+-	return plan.Keys, true
++	// Old indexes have decoder timestamps only. Refresh this one payload;
++	// an unchanged source's other cached artifacts remain valid.
++	if plan.V != 1 || len(plan.Frames) == 0 {
++		return nil, false
++	}
++	return plan.Frames, true
+ }
+ 
+-func StoreCachedKeyframes(cacheDir string, fileid int64, etag string, keys []float64) error {
++func StoreCachedTimeline(cacheDir string, fileid int64, etag string, frames []ffmpeg.Keyframe) error {
+ 	path := KeyframeCachePath(cacheDir, fileid)
+ 	if path == "" {
+ 		return nil
+@@ -78,7 +86,7 @@ func StoreCachedKeyframes(cacheDir string, fileid int64, etag string, keys []flo
+ 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+ 		return err
+ 	}
+-	data, err := json.Marshal(keyframesPlan{Etag: etag, Keys: keys})
++	data, err := json.Marshal(keyframesPlan{V: 1, Etag: etag, Frames: frames})
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -116,10 +124,16 @@ func LoadCachedProbe(cacheDir string, fileid int64, etag string) (*ProbeVideoDat
+ 		EvictFileCache(cacheDir, fileid)
+ 		return nil, false
+ 	}
+-	if plan.V != probeCacheVersion || plan.Etag != etag {
++	if plan.Etag != etag {
+ 		EvictFileCache(cacheDir, fileid)
+ 		return nil, false
+ 	}
++	if plan.V != probeCacheVersion {
++		// New probe semantics do not invalidate this unchanged file's
++		// expensive keyframe index or its storyboard.
++		os.Remove(path)
++		return nil, false
++	}
+ 	probe := plan.Probe
+ 	return &probe, true
+ }
+diff --git a/go-vod/core/cache_test.go b/go-vod/core/cache_test.go
+index c0d140b298cf92b07d71b841ce22e87fc16efadb..95e84d47b4bc2eda8b6544ca9c4c7fd668d6d9a6 100644
+--- a/go-vod/core/cache_test.go
++++ b/go-vod/core/cache_test.go
+@@ -12,6 +12,28 @@ import (
+ 	"github.com/stretchr/testify/require"
+ )
+ 
++// Key-only fixtures describe closed GOPs, where decode and presentation
++// boundaries coincide. Production caches the complete packet timeline.
++func StoreCachedKeyframes(dir string, id int64, etag string, keys []float64) error {
++	frames := make([]ffmpeg.Keyframe, len(keys))
++	for i, k := range keys {
++		frames[i] = ffmpeg.Keyframe{PTS: k, Start: k}
++	}
++	return StoreCachedTimeline(dir, id, etag, frames)
++}
++
++func LoadCachedKeyframes(dir string, id int64, etag string) ([]float64, bool) {
++	frames, ok := LoadCachedTimeline(dir, id, etag)
++	if !ok {
++		return nil, false
++	}
++	keys := make([]float64, len(frames))
++	for i, f := range frames {
++		keys[i] = f.PTS
++	}
++	return keys, true
++}
++
+ func newCopyManagerWithEtag(t *testing.T, probeJSON, keyframes string, keyFail bool, cacheDir, etag string) *Manager {
+ 	t.Helper()
+ 	t.Setenv("CACHE_DIR", cacheDir)
+@@ -59,6 +81,18 @@ func TestKeyframeCacheRoundtrip(t *testing.T) {
+ 	require.Equal(t, keys, got)
+ }
+ 
++func TestProbeMigrationPreservesUnchangedKeyframeIndex(t *testing.T) {
++	dir := t.TempDir()
++	keys := []float64{0, 3, 6}
++	require.NoError(t, StoreCachedKeyframes(dir, 7, "same", keys))
++	require.NoError(t, os.WriteFile(ProbeCachePath(dir, 7), []byte(`{"v":4,"etag":"same","probe":{"BitRate":5000000}}`), 0644))
++	_, ok := LoadCachedProbe(dir, 7, "same")
++	require.False(t, ok)
++	got, ok := LoadCachedKeyframes(dir, 7, "same")
++	require.True(t, ok)
++	require.Equal(t, keys, got)
++}
++
+ func TestKeyframeCacheEtagMismatchEvictsFile(t *testing.T) {
+ 	dir := t.TempDir()
+ 	keys := []float64{0, 4, 8}
+diff --git a/go-vod/core/fmp4_test.go b/go-vod/core/fmp4_test.go
+index 017ce7e66079cd2ce8f7d32f3e9b16c320f0168e..0dc42655539e1e1bd0c2b044becf8da3499bf471 100644
+--- a/go-vod/core/fmp4_test.go
++++ b/go-vod/core/fmp4_test.go
+@@ -33,6 +33,9 @@ func TestFMP4SeekRestart(t *testing.T) {
+ 		{"transcode", "libx265", QUALITY_MAX, 8, 24},
+ 	} {
+ 		t.Run(tc.name, func(t *testing.T) {
++			// A packaged runtime sets CACHE_DIR. These fixtures reuse file ID 1
++			// without an etag, so each source needs its own probe/keyframe cache.
++			t.Setenv("CACHE_DIR", t.TempDir())
+ 			dir := t.TempDir()
+ 			src := filepath.Join(dir, "src.mp4")
+ 			out, err := exec.Command(ffmpegBin, "-hide_banner", "-loglevel", "error",
+diff --git a/go-vod/core/manager.go b/go-vod/core/manager.go
+index eb629c6e53c429696d27eab22bb06903b49f0c4e..93fe94a01dd6ef9651a53d29ffe6b0d912f62aae 100644
+--- a/go-vod/core/manager.go
++++ b/go-vod/core/manager.go
+@@ -11,6 +11,7 @@ import (
+ 	"os"
+ 	"path/filepath"
+ 	"regexp"
++	"slices"
+ 	"sync"
+ 	"sync/atomic"
+ 	"time"
+@@ -21,14 +22,26 @@ import (
+ )
+ 
+ const (
+-	QUALITY_MAX    = "max"
+-	QUALITY_DIRECT = "direct"
++	QUALITY_MAX     = "max"
++	QUALITY_DIRECT  = "direct"
++	QUALITY_AUDIO   = "audio"
++	QUALITY_AUDIO96 = "audio96"
++	QUALITY_AUDIO64 = "audio64"
++	QUALITY_AUDIO32 = "audio32"
+ )
+ 
++func isAudioQuality(quality string) bool {
++	return quality == QUALITY_AUDIO || quality == QUALITY_AUDIO96 || quality == QUALITY_AUDIO64 || quality == QUALITY_AUDIO32
++}
++
+ // ErrCopyPending means the keyframe probe is still running; answer 409
+ // so the client fails over and retries later once the grid is warm.
+ var ErrCopyPending = errors.New("keyframe probe pending")
+ 
++// ErrCopyUnavailable prevents an Original-labelled playlist from silently
++// re-encoding when the source's stream-copy timeline cannot be established.
++var ErrCopyUnavailable = errors.New("original stream-copy timeline unavailable")
++
+ // isValidStreamRe matches 8-128 hex chars, safe for use in a temp dir name.
+ var isValidStreamRe = regexp.MustCompile(`^[0-9a-fA-F]{8,128}$`)
+ 
+@@ -94,30 +107,43 @@ type Manager struct {
+ 	copyProbed bool
+ 	// copySF dedupes concurrent keyframe probes so they share one ffprobe.
+ 	copySF singleflight.Group
++	// Decide the encoded grid once, before its first playlist/init/segment.
++	// A cache miss keeps startup nonblocking and the choice stable thereafter.
++	gridOnce  sync.Once
++	videoGrid *ffmpeg.RKMPPKeyframeGrid
+ 
+ 	// streams are the renditions by quality ("480p", "direct" / "max").
+ 	streams map[string]*Stream
+ }
+ 
+ type ProbeVideoData struct {
+-	Width     int
+-	Height    int
+-	Duration  time.Duration
+-	FrameRate int
+-	CodecName string
+-	BitRate   int
+-	Rotation  int
+-	HDR       bool
+-	BitDepth  int
+-	Audio     ffmpeg.AudioInfo
++	Width          int
++	Height         int
++	Duration       time.Duration
++	FrameRate      int
++	FrameRateExact float64
++	PixelFormat    string
++	CodecName      string
++	BitRate        int
++	Rotation       int
++	HDR            bool
++	DolbyVision    bool
++	ColorTransfer  string
++	ColorPrimaries string
++	ColorSpace     string
++	ColorRange     string
++	BitDepth       int
++	Audio          ffmpeg.AudioInfo
+ }
+ 
+ type Rendition struct {
+-	Quality string
+-	Width   int
+-	Height  int
+-	Bitrate int
+-	Order   int
++	Quality       string
++	Width         int
++	Height        int
++	Bitrate       int
++	Order         int
++	Codecs        string
++	SeparateAudio bool
+ }
+ 
+ // NewManagerArgs bundles NewManager construction args.
+@@ -188,11 +214,29 @@ func NewManager(a NewManagerArgs) (*Manager, error) {
+ 		refBitrate *= 2
+ 	}
+ 
++	rkmpp := m.c.RKMPP
++	minRKMPPBitrate := 0
++	if rkmpp {
++		minRKMPPBitrate = ffmpeg.RKMPPMinBitrate(m.probe.Audio)
++		refBitrate = m.probe.BitRate
++		if m.probe.CodecName != CODEC_H264 {
++			refBitrate *= 2
++		}
++	}
++
+ 	// If bitrate could not be read, use 10Mbps
+ 	if refBitrate == 0 {
+ 		refBitrate = 10000000
+ 	}
+ 
++	if rkmpp {
++		refBitrate = min(refBitrate, balancedRKMPPBitrate(m.probe.Width, m.probe.Height, m.FrameRate()))
++		if m.OutputCodec() == "hevc" {
++			refBitrate = max(256000, refBitrate*2/3)
++		}
++		refBitrate = max(refBitrate, minRKMPPBitrate)
++	}
++
+ 	// Get the multiplier for the reference bitrate.
+ 	// For this get the nearest stream size to the original.
+ 	origPixels := float64(m.probe.Height * m.probe.Width)
+@@ -223,10 +267,18 @@ func NewManager(a NewManagerArgs) (*Manager, error) {
+ 		// now store the width of the stream as the larger dimension
+ 		stream.width = int(math.Ceil(float64(lgDim) * float64(stream.height) / float64(smDim)))
+ 
++		if rkmpp {
++			// Round to the nearest even width instead of dropping the rendition
++			// whenever its aspect ratio happens to produce an odd pixel count.
++			stream.width = int(math.Round(float64(lgDim)*float64(stream.height)/float64(smDim)/2)) * 2
++			stream.bitrate = max(minRKMPPBitrate, min(stream.bitrate, balancedRKMPPBitrate(stream.width, stream.height, m.FrameRate())))
++		}
++
+ 		// remove invalid streams
+-		// Odd dimensions are fine: the scaler rounds to even (force_divisible_by).
+ 		if (stream.height > smDim || stream.width > lgDim) || // no upscaling; we're not AI
+-			(float64(stream.bitrate) > float64(m.probe.BitRate)*0.8) { // no more than 80% of original bitrate
++			(!rkmpp && float64(stream.bitrate) > float64(m.probe.BitRate)*0.8) ||
++			(rkmpp && stream.height == smDim/2*2 && stream.width == lgDim/2*2) || // avoid duplicating max
++			(rkmpp && (stream.height%2 != 0 || stream.width%2 != 0)) { // no odd dimensions for RGA
+ 
+ 			// remove stream
+ 			delete(m.streams, k)
+@@ -234,6 +286,23 @@ func NewManager(a NewManagerArgs) (*Manager, error) {
+ 		}
+ 	}
+ 
++	maxWidth, maxHeight := m.probe.Width, m.probe.Height
++	// Keep 480p as the minimum encoded resolution. Weak links get lower
++	// bitrate 480p variants instead of smaller pictures. Each job is lazy.
++	if rkmpp && smDim >= 480 {
++		width := int(math.Round(float64(lgDim)*480/float64(smDim)/2)) * 2
++		for quality, budget := range map[string]int{"480plow": 400000, "480pmobile": 700000} {
++			rate := max(minRKMPPBitrate, budget)
++			if base := m.streams["480p"]; base != nil && base.bitrate <= rate*11/10 {
++				continue
++			}
++			m.streams[quality] = &Stream{c: m.c, m: m, quality: quality, width: width, height: 480, bitrate: rate}
++		}
++	}
++	if rkmpp {
++		maxWidth, maxHeight = maxWidth/2*2, maxHeight/2*2
++	}
++
+ 	// Original: stream copy as direct when eligible. Keyframes are not
+ 	// extracted here; direct.m3u8 triggers EnsureCopySegments on demand,
+ 	// so index.m3u8 and 480p etc stay fast.
+@@ -250,13 +319,45 @@ func NewManager(a NewManagerArgs) (*Manager, error) {
+ 		m.streams[QUALITY_MAX] = &Stream{
+ 			c: m.c, m: m,
+ 			quality: QUALITY_MAX,
+-			height:  m.probe.Height,
+-			width:   m.probe.Width,
++			height:  maxHeight,
++			width:   maxWidth,
+ 			bitrate: refBitrate,
+ 			order:   1,
+ 		}
+ 	}
+ 
++	if rkmpp && m.IsCopyEligible() {
++		m.streams[QUALITY_MAX] = &Stream{c: m.c, m: m, quality: QUALITY_MAX, height: maxHeight, width: maxWidth, bitrate: refBitrate, order: 1}
++		// Keep the original as the highest same-codec quality. Re-encoding
++		// an already compatible HEVC source loses detail for no benefit.
++		direct := m.streams[QUALITY_DIRECT]
++		audioRate := 0
++		if m.probe.Audio.CodecName != "" {
++			audioRate = max(128000, m.probe.Audio.BitRate)
++		}
++		direct.bitrate = (m.probe.BitRate + audioRate) * 11 / 10
++		for _, stream := range m.streams {
++			if stream != direct {
++				stream.bitrate = min(stream.bitrate, direct.bitrate*85/100)
++			}
++		}
++	}
++
++	// Add a shared audio-only stream so all video renditions can mute their
++	// own audio and the player switches quality without audio gaps.
++	// Alternate bitrates are lazy: only the selected track starts a job.
++	if rkmpp && m.probe.Audio.CodecName != "" {
++		m.streams[QUALITY_AUDIO] = &Stream{
++			c:       m.c,
++			m:       m,
++			quality: QUALITY_AUDIO,
++			bitrate: 192000,
++		}
++		for quality, rate := range map[string]int{QUALITY_AUDIO96: 96000, QUALITY_AUDIO64: 64000, QUALITY_AUDIO32: 32000} {
++			m.streams[quality] = &Stream{c: m.c, m: m, quality: quality, bitrate: rate}
++		}
++	}
++
+ 	// Start all streams
+ 	for _, stream := range m.streams {
+ 		stream.init()
+@@ -321,14 +422,50 @@ func (m *Manager) Destroy() {
+ }
+ 
+ func (m *Manager) Renditions() []Rendition {
++	hasAudio := m.HasStream(QUALITY_AUDIO)
++	hasLowerVideo := false
++	for quality := range m.streams {
++		if quality != QUALITY_MAX && quality != QUALITY_DIRECT && !isAudioQuality(quality) {
++			hasLowerVideo = true
++			break
++		}
++	}
+ 	out := make([]Rendition, 0, len(m.streams))
+ 	for _, s := range m.streams {
++		// The audio stream appears in the master playlist as an EXT-X-MEDIA
++		// group referenced by video variants; it is not itself a variant.
++		if isAudioQuality(s.quality) {
++			continue
++		}
++		if m.c.RKMPP && m.IsCopyEligible() && s.quality == QUALITY_MAX && hasLowerVideo {
++			continue
++		}
++		width, height := s.width, s.height
++		rotated := m.probe != nil && ffmpeg.SwapsAxes(m.probe.Rotation)
++		if s.quality == QUALITY_MAX || s.quality == QUALITY_DIRECT {
++			if rotated {
++				width, height = height, width
++			}
++		} else if m.probe != nil && ((m.probe.Width < m.probe.Height) != rotated) {
++			width, height = height, width
++		}
++		codecs := ""
++		if m.OutputCodec() == "hevc" {
++			codecs = ffmpeg.HEVCCodecs(width, height, m.FrameRate(), m.probe.Audio.CodecName != "")
++			if s.quality == QUALITY_DIRECT && m.probe.BitDepth == 10 {
++				codecs = ffmpeg.HEVCMain10Codecs(width, height, m.FrameRate(), m.probe.Audio.CodecName != "")
++			}
++		}
++		// Video renditions link to the shared audio group when present.
++		separateAudio := hasAudio
+ 		out = append(out, Rendition{
+-			Quality: s.quality,
+-			Width:   s.width,
+-			Height:  s.height,
+-			Bitrate: s.bitrate,
+-			Order:   s.order,
++			Quality:       s.quality,
++			Width:         width,
++			Height:        height,
++			Bitrate:       s.bitrate,
++			Order:         s.order,
++			Codecs:        codecs,
++			SeparateAudio: separateAudio,
+ 		})
+ 	}
+ 	return out
+@@ -379,6 +516,20 @@ func (m *Manager) CopySegments() ([]ffmpeg.Segment, bool) {
+ 	return m.srcSegments, true
+ }
+ 
++// AlignedGrid returns an immutable cached grid for encoded RKMPP HLS video.
++// Audio remains on its independent AAC clock. No request runs a keyframe scan.
++func (m *Manager) AlignedGrid(quality string) *ffmpeg.RKMPPKeyframeGrid {
++	if m.c == nil || !m.c.RKMPP || !m.copyEligible || quality == QUALITY_DIRECT || isAudioQuality(quality) || !m.HasStream(quality) {
++		return nil
++	}
++	m.gridOnce.Do(func() {
++		if segs, ok := m.TryCacheCopySegments(); ok {
++			m.videoGrid = ffmpeg.NewRKMPPKeyframeGrid(segs, m.FrameRate())
++		}
++	})
++	return m.videoGrid
++}
++
+ // CopyProbed reports whether a keyframe attempt has finished.
+ func (m *Manager) CopyProbed() bool {
+ 	m.copyMu.Lock()
+@@ -395,11 +546,11 @@ func (m *Manager) TryCacheCopySegments() ([]ffmpeg.Segment, bool) {
+ 	if segs, ok := m.CopySegments(); ok {
+ 		return segs, true
+ 	}
+-	keys, ok := LoadCachedKeyframes(m.c.CacheDir(), m.fileid, m.etag)
++	frames, ok := LoadCachedTimeline(m.c.CacheDir(), m.fileid, m.etag)
+ 	if !ok {
+ 		return nil, false
+ 	}
+-	segs := ffmpeg.CopySegments(keys, m.probe.Duration)
++	segs := ffmpeg.SourceSegments(frames, m.probe.Duration)
+ 	if len(segs) == 0 {
+ 		return nil, false
+ 	}
+@@ -464,6 +615,9 @@ func (m *Manager) EnsureCopySegments() ([]ffmpeg.Segment, bool) {
+ }
+ 
+ func (m *Manager) FrameRate() int {
++	if m.c.RKMPP {
++		return ffmpeg.RKMPPFrameRate(ffmpeg.Spec{FrameRate: m.probe.FrameRate, FrameRateExact: m.probe.FrameRateExact})
++	}
+ 	return m.probe.FrameRate
+ }
+ 
+@@ -473,18 +627,44 @@ func (m *Manager) HasStream(quality string) bool {
+ }
+ 
+ func (m *Manager) ServeChunk(w http.ResponseWriter, quality string, id int) bool {
++	// Reject impossible segment requests before they can start an encoder.
++	// In particular, a negative id must never be passed to Stream.ServeChunk.
++	if id < 0 {
++		return false
++	}
+ 	stream, ok := m.streams[quality]
+ 	if !ok {
+ 		return false
+ 	}
+ 	if quality == QUALITY_DIRECT {
+-		// Trigger the probe; on empty grid the stream re-encodes.
++		// Stream-copy direct uses its own keyframe grid, which may contain
++		// more segments than the fixed-duration transcode ladder.
+ 		m.EnsureCopySegments()
++		if segs, copied := m.CopySegments(); copied {
++			if id >= len(segs) {
++				return false
++			}
++		} else if m.chunkOutsideDuration(id) {
++			return false
++		}
++	} else if grid := m.AlignedGrid(quality); grid != nil {
++		if id >= len(grid.Segments) {
++			return false
++		}
++	} else if m.chunkOutsideDuration(id) {
++		return false
+ 	}
+ 	stream.ServeChunk(w, id)
+ 	return true
+ }
+ 
++// chunkOutsideDuration bounds fixed-length rendition requests; unlike
++// stream-copy direct, these segments follow the configured ChunkSize grid.
++func (m *Manager) chunkOutsideDuration(id int) bool {
++	return m.probe != nil && m.tc.ChunkSize > 0 && m.probe.Duration > 0 &&
++		float64(id)*float64(m.tc.ChunkSize) >= m.probe.Duration.Seconds()
++}
++
+ func (m *Manager) ServeInit(w http.ResponseWriter, quality string) bool {
+ 	stream, ok := m.streams[quality]
+ 	if !ok {
+@@ -529,26 +709,58 @@ func (m *Manager) ffprobe() error {
+ 		}
+ 
+ 		m.probe = &ProbeVideoData{
+-			Width:     info.Width,
+-			Height:    info.Height,
+-			Duration:  info.Duration,
+-			FrameRate: info.FrameRate,
+-			CodecName: info.CodecName,
+-			BitRate:   info.BitRate,
+-			Rotation:  info.Rotation,
+-			HDR:       info.HDR,
+-			BitDepth:  info.BitDepth,
+-			Audio:     info.Audio,
++			Width:          info.Width,
++			Height:         info.Height,
++			Duration:       info.Duration,
++			FrameRate:      info.FrameRate,
++			FrameRateExact: info.FrameRateExact,
++			PixelFormat:    info.PixelFormat,
++			CodecName:      info.CodecName,
++			BitRate:        info.BitRate,
++			Rotation:       info.Rotation,
++			HDR:            info.HDR,
++			DolbyVision:    info.DolbyVision,
++			ColorTransfer:  info.ColorTransfer,
++			ColorPrimaries: info.ColorPrimaries,
++			ColorSpace:     info.ColorSpace,
++			ColorRange:     info.ColorRange,
++			BitDepth:       info.BitDepth,
++			Audio:          info.Audio,
+ 		}
+ 
+ 		StoreCachedProbe(m.c.CacheDir(), m.fileid, m.etag, m.probe)
+ 	}
+ 
++	if m.c.RKMPP && m.probe.DolbyVision {
++		return fmt.Errorf("Dolby Vision is not supported by the v11 RKMPP pipeline")
++	}
++	if m.c.RKMPP && m.c.RKMPPStrict {
++		if !ffmpeg.SupportsRKMPPDecode(ffmpeg.Spec{CodecName: m.probe.CodecName, PixelFormat: m.probe.PixelFormat, BitDepth: m.probe.BitDepth}) {
++			return fmt.Errorf("source %s/%s cannot use RKMPP hardware decoding; software video fallback is disabled", m.probe.CodecName, m.probe.PixelFormat)
++		}
++		if m.probe.HDR && !m.c.RKMPPOpenCL {
++			return fmt.Errorf("HDR requires Mali OpenCL; CPU video fallback is disabled")
++		}
++	}
++	if m.probe.Width <= 0 || m.probe.Height <= 0 || m.probe.Duration <= 0 ||
++		(m.c.RKMPP && (m.probe.Width < 2 || m.probe.Height < 2)) {
++		return fmt.Errorf("invalid video dimensions or duration for file %d", m.fileid)
++	}
++
+ 	// Copy eligibility is cheap (codec + rotation); keyframes come later
+ 	// via EnsureCopySegments on direct.m3u8, so creation stays fast.
+ 	m.copyEligible = m.probe.Rotation == 0 && IsCodecPlayable(m.probe.CodecName, m.playableCodecs) &&
+ 		IsCodecFMP4(m.probe.CodecName)
+ 
++	if m.c.RKMPP {
++		// Main10 requires an explicit MediaSource capability from the browser;
++		// the upstream "hevc" probe only establishes 8-bit Main support.
++		copyDepth := m.probe.BitDepth <= 8 || (m.probe.CodecName == "hevc" &&
++			m.probe.BitDepth == 10 && slices.Contains(m.playableCodecs, "hevc10"))
++		m.copyEligible = m.copyEligible && m.probe.CodecName == m.OutputCodec() &&
++			!m.probe.HDR && copyDepth
++	}
++
+ 	return nil
+ }
+ 
+@@ -556,9 +768,9 @@ func (m *Manager) ffprobe() error {
+ // Lock-free; EnsureCopySegments publishes the result under copyMu.
+ func (m *Manager) probeCopy() ([]ffmpeg.Segment, error) {
+ 	cachePath := KeyframeCachePath(m.c.CacheDir(), m.fileid)
+-	if keys, ok := LoadCachedKeyframes(m.c.CacheDir(), m.fileid, m.etag); ok {
++	if frames, ok := LoadCachedTimeline(m.c.CacheDir(), m.fileid, m.etag); ok {
+ 		log.Printf("%s: keyframe cache hit %s", m.id, cachePath)
+-		segs := ffmpeg.CopySegments(keys, m.probe.Duration)
++		segs := ffmpeg.SourceSegments(frames, m.probe.Duration)
+ 		if len(segs) == 0 {
+ 			return nil, fmt.Errorf("no keyframe grid for file %d", m.fileid)
+ 		}
+@@ -566,14 +778,14 @@ func (m *Manager) probeCopy() ([]ffmpeg.Segment, error) {
+ 	}
+ 	log.Printf("%s: keyframe cache miss %s", m.id, cachePath)
+ 
+-	keys, err := ffmpeg.Keyframes(context.Background(), m.c.FFprobe, m.ffmpegInput(), m.inputHeaders())
++	frames, err := ffmpeg.ProbeTimeline(context.Background(), m.c.FFprobe, m.ffmpegInput(), m.inputHeaders())
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	if err := StoreCachedKeyframes(m.c.CacheDir(), m.fileid, m.etag, keys); err != nil {
++	if err := StoreCachedTimeline(m.c.CacheDir(), m.fileid, m.etag, frames); err != nil {
+ 		log.Printf("%s: keyframe cache store failed: %v", m.id, err)
+ 	}
+-	segs := ffmpeg.CopySegments(keys, m.probe.Duration)
++	segs := ffmpeg.SourceSegments(frames, m.probe.Duration)
+ 	if len(segs) == 0 {
+ 		return nil, fmt.Errorf("no keyframe grid for file %d", m.fileid)
+ 	}
+@@ -649,3 +861,22 @@ func (m *Manager) ffmpegInput() string {
+ 	}
+ 	return m.url
+ }
++
++// OutputCodec keeps the entire adaptive ladder on one codec. Missing or
++// negative client capability reports always select the H.264 fallback.
++func (m *Manager) OutputCodec() string {
++	// Keep a compatible AVC original and its fallback ladder on AVC rather
++	// than re-encoding it only because the browser also supports HEVC.
++	if m.c.RKMPP && m.c.RKMPPOutputCodec == "auto" && m.probe != nil &&
++		m.probe.CodecName == "h264" && !m.probe.HDR && m.probe.BitDepth <= 8 {
++		return "h264"
++	}
++	if m.c.RKMPP && m.c.RKMPPOutputCodec != "h264" && slices.Contains(m.playableCodecs, "hevc") {
++		return "hevc"
++	}
++	return "h264"
++}
++
++func balancedRKMPPBitrate(width, height, fps int) int {
++	return max(256000, int(float64(width)*float64(height)*2.4*math.Sqrt(float64(max(1, fps))/30)))
++}
+diff --git a/go-vod/core/manager_probe_test.go b/go-vod/core/manager_probe_test.go
+index 2b81ec658827372bfb80e4b2d23129973dff5ab8..df3736f020e21facccb10ca5bfba15b66b40b6c9 100644
+--- a/go-vod/core/manager_probe_test.go
++++ b/go-vod/core/manager_probe_test.go
+@@ -4,6 +4,7 @@ import (
+ 	"os"
+ 	"path/filepath"
+ 	"testing"
++	"time"
+ 
+ 	"github.com/pulsejet/memories/go-vod/config"
+ 	"github.com/stretchr/testify/require"
+@@ -18,3 +19,14 @@ func TestManagerFFprobeFailure(t *testing.T) {
+ 	require.Error(t, err)
+ 	require.Contains(t, err.Error(), "boom")
+ }
++
++func TestRKMPPRejectsCachedDolbyVision(t *testing.T) {
++	cfg := config.Defaults("0.7.0")
++	cfg.RKMPP = true
++	cfg.CacheDir_ = t.TempDir()
++	StoreCachedProbe(cfg.CacheDir(), 1, "dv", &ProbeVideoData{
++		Width: 1920, Height: 1080, Duration: time.Second, CodecName: "hevc", DolbyVision: true,
++	})
++	m := &Manager{c: cfg, fileid: 1, etag: "dv", playableCodecs: []string{"hevc"}}
++	require.ErrorContains(t, m.ffprobe(), "Dolby Vision is not supported")
++}
+diff --git a/go-vod/core/rkmpp_bitrate_test.go b/go-vod/core/rkmpp_bitrate_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..8517dff95ab489548fe9072687e004350c99b00d
+--- /dev/null
++++ b/go-vod/core/rkmpp_bitrate_test.go
+@@ -0,0 +1,25 @@
++package core
++
++import "testing"
++
++// Bitrate allocation is a manager policy, not an FFmpeg argument-builder API.
++func TestBalancedRKMPPBitrateScalesWithResolution(t *testing.T) {
++	b480 := balancedRKMPPBitrate(854, 480, 30)
++	b720 := balancedRKMPPBitrate(1280, 720, 30)
++	b1080 := balancedRKMPPBitrate(1920, 1080, 30)
++	b4k := balancedRKMPPBitrate(3840, 2160, 30)
++	if !(b480 < b720 && b720 < b1080 && b1080 < b4k) {
++		t.Errorf("bitrate should increase with resolution: 480p=%d 720p=%d 1080p=%d 4K=%d", b480, b720, b1080, b4k)
++	}
++	if got := balancedRKMPPBitrate(2, 2, 30); got < 256000 {
++		t.Errorf("bitrate floor = %d, want >= 256000", got)
++	}
++}
++
++func TestBalancedRKMPPBitrateScalesWithFPS(t *testing.T) {
++	b30 := balancedRKMPPBitrate(1920, 1080, 30)
++	b60 := balancedRKMPPBitrate(1920, 1080, 60)
++	if b60 <= b30 {
++		t.Errorf("1080p at 60fps (%d) should exceed 30fps (%d)", b60, b30)
++	}
++}
+diff --git a/go-vod/core/rkmpp_codec_test.go b/go-vod/core/rkmpp_codec_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..849300e21ed6b76977a4c55641922c23f3c39469
+--- /dev/null
++++ b/go-vod/core/rkmpp_codec_test.go
+@@ -0,0 +1,133 @@
++package core
++
++import (
++	"strings"
++	"testing"
++
++	"github.com/pulsejet/memories/go-vod/config"
++	"github.com/stretchr/testify/require"
++)
++
++func TestRKMPPCodecNegotiation(t *testing.T) {
++	for _, tc := range []struct {
++		name     string
++		enabled  bool
++		forced   string
++		playable []string
++		want     string
++	}{
++		{"unknown client", true, "hevc", nil, "h264"},
++		{"AVC client", true, "hevc", []string{"h264"}, "h264"},
++		{"HEVC client", true, "hevc", []string{"h264", "hevc"}, "hevc"},
++		{"forced AVC", true, "h264", []string{"hevc"}, "h264"},
++		{"other backend", false, "hevc", []string{"hevc"}, "h264"},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			m := &Manager{c: &config.Config{RKMPP: tc.enabled, RKMPPOutputCodec: tc.forced}, playableCodecs: tc.playable}
++			require.Equal(t, tc.want, m.OutputCodec())
++		})
++	}
++}
++
++func TestRKMPPAutoKeepsCompatibleAVCOriginal(t *testing.T) {
++	m := &Manager{c: &config.Config{RKMPP: true, RKMPPOutputCodec: "auto"},
++		probe: &ProbeVideoData{CodecName: "h264", BitDepth: 8}, playableCodecs: []string{"h264", "hevc"}}
++	require.Equal(t, "h264", m.OutputCodec())
++	m.probe.HDR = true
++	require.Equal(t, "hevc", m.OutputCodec(), "HDR is mapped to an SDR ladder")
++	m.c.RKMPPOutputCodec = "h264"
++	require.Equal(t, "h264", m.OutputCodec())
++}
++
++func TestRKMPPPreservesCompatibleHEVCOriginalInMaster(t *testing.T) {
++	c := config.Defaults("0.7.0")
++	c.RKMPP, c.RKMPPOutputCodec = true, "hevc"
++	c.TempDir, c.CacheDir_ = t.TempDir(), t.TempDir()
++	t.Setenv("CACHE_DIR", c.CacheDir_)
++	c.FFprobe = stubCopyProbe(t, `{"streams":[{"codec_type":"video","codec_name":"hevc","width":3200,"height":1800,"duration":"12","avg_frame_rate":"50/1","pix_fmt":"yuv420p","bit_rate":"7755786"},{"codec_type":"audio","codec_name":"aac","profile":"LC","channels":2,"sample_rate":"48000","bit_rate":"160915"}]}`, "", false)
++	m, err := NewManager(NewManagerArgs{C: c, ManagerParams: ManagerParams{URL: "http://localhost/original.mp4", StreamID: "original", PlayableCodecs: []string{"hevc"}, TConfig: config.TCfg{ChunkSize: 3}}, Idle: make(chan IdleEvent, 1)})
++	require.NoError(t, err)
++	defer m.Destroy()
++	require.True(t, m.IsCopyEligible())
++	require.True(t, m.HasStream(QUALITY_DIRECT))
++	require.True(t, m.HasStream(QUALITY_MAX), "retain an internal transcode fallback")
++	found := false
++	for _, r := range m.Renditions() {
++		require.GreaterOrEqual(t, min(r.Width, r.Height), 480, "480p is the minimum video ladder resolution")
++		require.NotEqual(t, QUALITY_MAX, r.Quality, "do not advertise a lossy duplicate of the original")
++		require.True(t, r.SeparateAudio, "all video qualities must use the same audio stream")
++		if r.Quality == QUALITY_DIRECT {
++			found = true
++			require.True(t, strings.HasPrefix(r.Codecs, "hvc1."))
++		}
++	}
++	require.True(t, found, "original must be visible in the master playlist")
++	require.True(t, m.HasStream("480plow"), "weak links need a lower bitrate at the same minimum resolution")
++	require.Less(t, m.streams["480plow"].bitrate, m.streams["480p"].bitrate)
++	require.Equal(t, m.streams["480p"].height, m.streams["480plow"].height)
++}
++
++func TestRenditionsPreservePortraitDimensions(t *testing.T) {
++	for _, source := range []struct{ width, height, rotation int }{
++		{1920, 1080, 0}, {1080, 1920, 0}, {1920, 1080, -90},
++		{1920, 1080, 270}, {1920, 1080, 90}, {1920, 1080, -270},
++	} {
++		m := &Manager{c: &config.Config{RKMPP: true}, probe: &ProbeVideoData{Width: source.width, Height: source.height, Rotation: source.rotation}, streams: map[string]*Stream{"720p": {quality: "720p", width: 1280, height: 720}}}
++		r := m.Renditions()[0]
++		if source.width < source.height || source.rotation != 0 {
++			require.Equal(t, 720, r.Width)
++			require.Equal(t, 1280, r.Height)
++		} else {
++			require.Equal(t, 1280, r.Width)
++			require.Equal(t, 720, r.Height)
++		}
++	}
++}
++
++func TestRKMPPMain10OriginalRequiresExplicitCapability(t *testing.T) {
++	for _, tc := range []struct {
++		name     string
++		codecs   []string
++		transfer string
++		depth    int
++		want     bool
++	}{
++		{"Main only", []string{"hevc"}, "bt709", 10, false},
++		{"Main10 SDR", []string{"hevc", "hevc10"}, "bt709", 10, true},
++		{"HDR still maps to SDR", []string{"hevc", "hevc10"}, "smpte2084", 10, false},
++		{"unsupported depth", []string{"hevc", "hevc10"}, "bt709", 12, false},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			c := config.Defaults("0.7.0")
++			c.RKMPP, c.RKMPPOutputCodec = true, "hevc"
++			c.TempDir, c.CacheDir_ = t.TempDir(), t.TempDir()
++			c.RKMPPOpenCL = true
++			pix := "yuv420p10le"
++			if tc.depth == 12 {
++				pix = "yuv420p12le"
++			}
++			probe := `{"streams":[{"codec_type":"video","codec_name":"hevc","width":3840,"height":2160,"duration":"20","avg_frame_rate":"60/1","pix_fmt":"` + pix + `","color_transfer":"` + tc.transfer + `","bit_rate":"3200000"}]}`
++			c.FFprobe = stubCopyProbe(t, probe, "0,K__\n3,K__\n6,K__\n", false)
++			m, err := NewManager(NewManagerArgs{C: c, ManagerParams: ManagerParams{URL: "http://localhost/source.mp4", StreamID: "main10", PlayableCodecs: tc.codecs, TConfig: config.TCfg{ChunkSize: 3}}, Idle: make(chan IdleEvent, 1)})
++			if tc.depth == 12 {
++				require.Error(t, err)
++				return
++			}
++			require.NoError(t, err)
++			defer m.Destroy()
++			require.Equal(t, tc.want, m.HasStream(QUALITY_DIRECT))
++			if tc.want {
++				_, copied := m.EnsureCopySegments()
++				require.True(t, copied)
++				require.True(t, m.streams[QUALITY_DIRECT].spec(0, true).Copy)
++				for _, r := range m.Renditions() {
++					if r.Quality == QUALITY_DIRECT {
++						require.Equal(t, "hvc1.2.4.L153.B0", r.Codecs)
++					} else {
++						require.Contains(t, r.Codecs, "hvc1.1.6.")
++					}
++				}
++			}
++		})
++	}
++}
+diff --git a/go-vod/core/rkmpp_dimensions_test.go b/go-vod/core/rkmpp_dimensions_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..0d520d0ca05aa28bf0d8f5b2a8c85d143ee05076
+--- /dev/null
++++ b/go-vod/core/rkmpp_dimensions_test.go
+@@ -0,0 +1,68 @@
++package core
++
++import (
++	"fmt"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/pulsejet/memories/go-vod/config"
++	"github.com/pulsejet/memories/go-vod/ffmpeg"
++	"github.com/stretchr/testify/require"
++)
++
++func TestRKMPPUnusualAspectRatiosKeepLowerRenditions(t *testing.T) {
++	for _, source := range []struct{ width, height, rotation int }{{1920, 1000, 0}, {1000, 1920, 0}, {1438, 1424, 90}, {1424, 1438, -90}} {
++		t.Run(fmt.Sprint(source), func(t *testing.T) {
++			cfg := config.Defaults("test")
++			cfg.RKMPP = true
++			cfg.TempDir = t.TempDir()
++			cfg.CacheDir_ = t.TempDir()
++			probe := fmt.Sprintf("{\"streams\":[{\"codec_type\":\"video\",\"codec_name\":\"hevc\",\"width\":%d,\"height\":%d,\"duration\":\"12\",\"avg_frame_rate\":\"30/1\",\"bit_rate\":\"7000000\",\"side_data_list\":[{\"side_data_type\":\"Display Matrix\",\"rotation\":%d}]}]}", source.width, source.height, source.rotation)
++			cfg.FFprobe = stubCopyProbe(t, probe, "", false)
++			m, err := NewManager(NewManagerArgs{C: cfg, ManagerParams: ManagerParams{StreamID: "aspect", URL: "http://localhost/video", PlayableCodecs: []string{"hevc"}, TConfig: config.TCfg{ChunkSize: 3}}, Idle: make(chan IdleEvent, 1)})
++			require.NoError(t, err)
++			t.Cleanup(m.Destroy)
++			require.True(t, m.HasStream("720p"))
++			for _, rendition := range m.Renditions() {
++				require.Zero(t, rendition.Width%2)
++				require.Zero(t, rendition.Height%2)
++				spec := m.streams[rendition.Quality].spec(0, true)
++				width, height := rendition.Width, rendition.Height
++				if ffmpeg.SwapsAxes(source.rotation) {
++					width, height = height, width
++				}
++				args := strings.Join(ffmpeg.BuildArgs(spec), " ")
++				if spec.Copy {
++					require.Contains(t, args, "-c:v copy")
++					continue
++				}
++				require.Contains(t, args, fmt.Sprintf("w=%d:h=%d", width, height))
++			}
++		})
++	}
++}
++
++func TestRKMPPMaxDimensionsAreEven(t *testing.T) {
++	cfg := config.Defaults("test")
++	cfg.RKMPP = true
++	cfg.TempDir = t.TempDir()
++	cfg.CacheDir_ = t.TempDir()
++	cfg.FFprobe = stubCopyProbe(t, "{\"streams\":[{\"codec_type\":\"video\",\"codec_name\":\"hevc\",\"width\":1281,\"height\":721,\"duration\":\"2\",\"bit_rate\":\"1000000\"}]}", "", false)
++	m, err := NewManager(NewManagerArgs{C: cfg, ManagerParams: ManagerParams{StreamID: "odd", URL: "http://localhost/video", TConfig: config.TCfg{ChunkSize: 3}}, Idle: make(chan IdleEvent, 1)})
++	require.NoError(t, err)
++	t.Cleanup(m.Destroy)
++	for _, rendition := range m.Renditions() {
++		require.Zero(t, rendition.Width%2)
++		require.Zero(t, rendition.Height%2)
++		require.LessOrEqual(t, rendition.Width, 1281)
++		require.LessOrEqual(t, rendition.Height, 721)
++	}
++}
++
++func TestOutOfRangeChunksDoNotStartAnEncoder(t *testing.T) {
++	m := &Manager{c: &config.Config{RKMPP: true}, tc: config.TCfg{ChunkSize: 3}, probe: &ProbeVideoData{Duration: 10 * time.Second}, streams: map[string]*Stream{"720p": {quality: "720p"}, "max": {quality: "max"}}}
++	for _, id := range []int{-1, 4, 999999} {
++		require.False(t, m.ServeChunk(nil, "720p", id))
++	}
++}
+diff --git a/go-vod/core/rkmpp_hardware_test.go b/go-vod/core/rkmpp_hardware_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..72eb4a8aedfda712b2cb040093143c5c1a576670
+--- /dev/null
++++ b/go-vod/core/rkmpp_hardware_test.go
+@@ -0,0 +1,111 @@
++package core
++
++import (
++	"math"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"strconv"
++	"strings"
++	"testing"
++
++	"github.com/pulsejet/memories/go-vod/config"
++	"github.com/stretchr/testify/require"
++)
++
++// Exercise the actual manager/stream supervisor, including its stdout
++// publication, cached init, pause/resume and shared-audio paths. No Nextcloud
++// or production containers are involved.
++func TestRKMPPHardwareServing(t *testing.T) {
++	if os.Getenv("MEMORIES_RKMPP_HW_TEST") != "1" {
++		t.Skip("set MEMORIES_RKMPP_HW_TEST=1 on RK3588 with MPP/RGA devices")
++	}
++	bin, err := exec.LookPath("ffmpeg")
++	require.NoError(t, err)
++	probe, err := exec.LookPath("ffprobe")
++	require.NoError(t, err)
++	dir := t.TempDir()
++	src := filepath.Join(dir, "audio.mkv")
++	out, err := exec.Command(bin, "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=1280x720:r=30",
++		"-f", "lavfi", "-i", "sine=sample_rate=48000", "-t", "15", "-c:v", "libx264", "-threads", "2",
++		"-g", "120", "-c:a", "pcm_s16le", src).CombinedOutput()
++	require.NoError(t, err, string(out))
++	for _, codec := range []string{"h264", "hevc"} {
++		t.Run(codec, func(t *testing.T) {
++			cfg := config.Defaults("0.7.0")
++			cfg.RKMPP, cfg.RKMPPOutputCodec = true, codec
++			cfg.TempDir, cfg.CacheDir_ = t.TempDir(), t.TempDir()
++			cfg.FFmpeg, cfg.FFprobe = bin, probe
++			cfg.GoalBufferMin, cfg.GoalBufferMax = 1, 2
++			m, err := NewManager(NewManagerArgs{C: cfg, ManagerParams: ManagerParams{
++				URL: src, StreamID: "hardware", PlayableCodecs: []string{"h264", "hevc"},
++				TConfig: config.TCfg{ChunkSize: 3, QF: 24}}, Idle: make(chan IdleEvent, 1)})
++			require.NoError(t, err)
++			t.Cleanup(m.Destroy)
++			require.True(t, m.HasStream(QUALITY_AUDIO))
++			var audioPTS float64
++			for _, quality := range []string{"480p", QUALITY_MAX, QUALITY_AUDIO, QUALITY_AUDIO96, QUALITY_AUDIO64, QUALITY_AUDIO32} {
++				require.True(t, m.HasStream(quality))
++				serve := func(id int) []byte {
++					w := httptest.NewRecorder()
++					require.True(t, m.ServeChunk(w, quality, id))
++					require.Equal(t, http.StatusOK, w.Code, "%s chunk %d", quality, id)
++					require.NotEmpty(t, w.Body.Bytes())
++					return w.Body.Bytes()
++				}
++				serve(0)
++				w := httptest.NewRecorder()
++				require.True(t, m.ServeInit(w, quality))
++				require.Equal(t, http.StatusOK, w.Code)
++				init := append([]byte{}, w.Body.Bytes()...)
++				// Force an actual cold restart, then decode against the old init.
++				s := m.streams[quality]
++				s.mutex.Lock()
++				s.clear()
++				s.mutex.Unlock()
++				segment := serve(3)
++				joined := filepath.Join(dir, codec+"-"+quality+".mp4")
++				require.NoError(t, os.WriteFile(joined, append(init, segment...), 0644))
++				out, err := exec.Command(bin, "-v", "error", "-xerror", "-i", joined, "-map", "0", "-f", "null", "-").CombinedOutput()
++				require.NoError(t, err, string(out))
++				track := "v:0"
++				if isAudioQuality(quality) {
++					track = "a:0"
++				}
++				out, err = exec.Command(probe, "-v", "error", "-select_streams", track,
++					"-show_entries", "packet=pts_time", "-of", "csv=p=0", joined).Output()
++				require.NoError(t, err)
++				first := strings.SplitN(strings.TrimSpace(string(out)), "\n", 2)[0]
++				pts, err := strconv.ParseFloat(strings.TrimRight(first, ","), 64)
++				require.NoError(t, err)
++				require.InDelta(t, 9, pts, 0.05, "%s absolute timestamp", quality)
++				if isAudioQuality(quality) {
++					want := math.Ceil(9*48000.0/1024) * 1024 / 48000
++					require.InDelta(t, want, pts, 1.0/48000, "AAC seek starts on global frame clock")
++					if audioPTS != 0 {
++						require.InDelta(t, audioPTS, pts, 1.0/48000, "audio profiles share the sample clock")
++					}
++					audioPTS = pts
++				}
++			}
++			// Switching video quality must never restart the shared AAC encoder.
++			audio := m.streams[QUALITY_AUDIO]
++			audio.mutex.Lock()
++			runs := audio.run
++			audio.mutex.Unlock()
++			for range 5 {
++				for _, quality := range []string{"480p", QUALITY_MAX} {
++					w := httptest.NewRecorder()
++					require.True(t, m.ServeChunk(w, quality, 3))
++					require.Equal(t, http.StatusOK, w.Code)
++				}
++			}
++			audio.mutex.Lock()
++			finalRuns := audio.run
++			audio.mutex.Unlock()
++			require.Equal(t, runs, finalRuns)
++		})
++	}
++}
+diff --git a/go-vod/core/stream.go b/go-vod/core/stream.go
+index 4fbbd09384b9172f2b9060894bf897a0296a0159..2ff9a5c359dc6b4b1645b1a5be83c65ef61c3f71 100644
+--- a/go-vod/core/stream.go
++++ b/go-vod/core/stream.go
+@@ -47,6 +47,8 @@ type Stream struct {
+ 	// keeps the Manager alive until the stream idles out; exited marks that.
+ 	coder  *exec.Cmd
+ 	exited bool
++	// Hardware input pacing replaces process suspension for this run.
++	paced bool
+ 	// closed is set by Stop; a stopped stream never starts another coder.
+ 	closed bool
+ 
+@@ -57,9 +59,11 @@ type Stream struct {
+ 	// initChunk signals the current run's init, like a segment chunk.
+ 	initChunk *Chunk
+ 
+-	tonemapOnce sync.Once
+-	vaapiOpenCL bool
+-	nvencCUDA   bool
++	tonemapOnce   sync.Once
++	vaapiOpenCL   bool
++	nvencCUDA     bool
++	rkmppOpenCL   bool
++	hardwareError error
+ 
+ 	inactive int
+ 	stop     chan bool
+@@ -104,6 +108,8 @@ func (s *Stream) clear() {
+ 	log.Printf("%s-%s: stopping stream", s.m.id, s.quality)
+ 
+ 	for _, chunk := range s.chunks {
++		// Requests waiting for these segments must not sleep until chunkWait
++		// after a seek, rendition restart, or stream teardown.
+ 		if !chunk.done {
+ 			chunk.signal(false)
+ 		}
+@@ -229,7 +235,12 @@ func (s *Stream) ServeFullVideo(w http.ResponseWriter, r *http.Request) error {
+ 		w.WriteHeader(http.StatusNoContent)
+ 		return nil
+ 	}
+-	args := ffmpeg.MP4Args(s.transcodeSpec(0, false))
++	spec := s.transcodeSpec(0, false)
++	if s.hardwareError != nil {
++		w.WriteHeader(http.StatusUnsupportedMediaType)
++		return s.hardwareError
++	}
++	args := ffmpeg.MP4Args(spec)
+ 
+ 	coder := ffmpeg.Command(context.Background(), s.c.FFmpeg, args...)
+ 	log.Printf("%s-%s: %s", s.m.id, s.quality, strings.Join(ffmpeg.RedactArgs(coder.Args), " "))
+@@ -292,6 +303,9 @@ func (s *Stream) createChunk(id int) *Chunk {
+ }
+ 
+ func (s *Stream) pruneChunk(id int) {
++	// Called under s.mutex. Removing a pending segment must wake the HTTP
++	// request waiting on it; otherwise it sleeps until chunkWait even though
++	// this chunk can no longer be completed by the active stream.
+ 	if chunk, ok := s.chunks[id]; ok && !chunk.done {
+ 		chunk.signal(false)
+ 	}
+@@ -340,6 +354,8 @@ func (s *Stream) waitForChunk(w http.ResponseWriter, chunk *Chunk) {
+ 	s.mutex.Lock()
+ 	current, ok := s.chunks[chunk.id]
+ 	finished := ok && current.done
++	// A stopped stream is also a replaced producer: return immediately
++	// instead of reporting a slow segment on the obsolete run.
+ 	restarted := coder != s.coder
+ 	s.mutex.Unlock()
+ 
+@@ -386,6 +402,34 @@ func (s *Stream) spec(startAt float64, isHls bool) ffmpeg.Spec {
+ 	// direct falls back to re-encoding (like max); progressive MP4 copies
+ 	// fine without keyframes, so it always copies.
+ 	_, grid := s.m.CopySegments()
++	width, height := s.width, s.height
++	// The ladder stores low qualities as long-edge x short-edge, but FFmpeg
++	// scales *before* applying display-matrix rotation. Feed RGA dimensions
++	// in the source's raw orientation. Max/direct already use raw dimensions.
++	if s.c.RKMPP && s.quality != QUALITY_MAX && s.quality != QUALITY_DIRECT &&
++		!isAudioQuality(s.quality) && s.m.probe.Width < s.m.probe.Height {
++		width, height = height, width
++	}
++
++	// The shared audio stream is audio-only; video renditions mute their own
++	// audio so the player uses the single shared AAC track instead.
++	audioOnly := s.c.RKMPP && isAudioQuality(s.quality)
++	separateAudio := s.c.RKMPP && isHls && !audioOnly && s.m.HasStream(QUALITY_AUDIO)
++	var keyframeGrid *ffmpeg.RKMPPKeyframeGrid
++	if isHls {
++		keyframeGrid = s.m.AlignedGrid(s.quality)
++	}
++
++	// EndAt bounds the audio padding so the stream doesn't outlast the video.
++	endAt := 0.0
++	if audioOnly {
++		endAt = s.m.probe.Duration.Seconds()
++	}
++	forceSwTranspose := s.m.tc.ForceSwTranspose
++	if s.c.RKMPP && s.c.RKMPPStrict {
++		forceSwTranspose = false
++	}
++
+ 	return ffmpeg.Spec{
+ 		Bin:     s.c.FFmpeg,
+ 		Input:   s.m.ffmpegInput(),
+@@ -393,18 +437,33 @@ func (s *Stream) spec(startAt float64, isHls bool) ffmpeg.Spec {
+ 		StartAt: startAt,
+ 		HLS:     isHls,
+ 
+-		Quality:   s.quality,
+-		Width:     s.width,
+-		Height:    s.height,
+-		QF:        s.m.tc.QF,
+-		FrameRate: s.m.probe.FrameRate,
+-		Rotation:  s.m.probe.Rotation,
+-		HDR:       s.m.probe.HDR,
+-		BitDepth:  s.m.probe.BitDepth,
+-		Audio:     s.m.probe.Audio,
+-		ChunkSize: s.m.tc.ChunkSize,
+-		Copy:      s.quality == QUALITY_DIRECT && (!isHls || grid),
+-		CodecName: s.m.probe.CodecName,
++		RKMPP:            s.c.RKMPP,
++		RKMPPOutputCodec: s.m.OutputCodec(),
++		Bitrate:          s.bitrate,
++		PixelFormat:      s.m.probe.PixelFormat,
++		FrameRateExact:   s.m.probe.FrameRateExact,
++
++		Quality:        s.quality,
++		Width:          width,
++		Height:         height,
++		QF:             s.m.tc.QF,
++		FrameRate:      s.m.probe.FrameRate,
++		Rotation:       s.m.probe.Rotation,
++		HDR:            s.m.probe.HDR,
++		ColorTransfer:  s.m.probe.ColorTransfer,
++		ColorPrimaries: s.m.probe.ColorPrimaries,
++		ColorSpace:     s.m.probe.ColorSpace,
++		ColorRange:     s.m.probe.ColorRange,
++		BitDepth:       s.m.probe.BitDepth,
++		Audio:          s.m.probe.Audio,
++		AudioOnly:      audioOnly,
++		AudioBitrate:   s.bitrate,
++		SeparateAudio:  separateAudio,
++		EndAt:          endAt,
++		ChunkSize:      s.m.tc.ChunkSize,
++		KeyframeGrid:   keyframeGrid,
++		Copy:           s.quality == QUALITY_DIRECT && (!isHls || grid),
++		CodecName:      s.m.probe.CodecName,
+ 
+ 		VAAPI:           s.m.tc.VAAPI,
+ 		VAAPILowPower:   s.m.tc.VAAPILowPower,
+@@ -414,7 +473,7 @@ func (s *Stream) spec(startAt float64, isHls bool) ffmpeg.Spec {
+ 		NVENCScale:      s.m.tc.NVENCScale,
+ 
+ 		UseTranspose:     s.m.tc.UseTranspose,
+-		ForceSwTranspose: s.m.tc.ForceSwTranspose,
++		ForceSwTranspose: forceSwTranspose,
+ 		UseGopSize:       s.m.tc.UseGopSize,
+ 	}
+ }
+@@ -430,12 +489,22 @@ func (s *Stream) transcode(startId int) {
+ 		startNumber = startId
+ 		startAt = 0
+ 		if startId > 0 {
+-			startAt = segs[startId].Start + copySeekEpsilon
++			startAt = segs[startId].Start
++			if segs[startId].KeyframeAt != 0 {
++				startAt = segs[startId].KeyframeAt
++			}
++			startAt += copySeekEpsilon
+ 		}
++	} else if grid := s.m.AlignedGrid(s.quality); grid != nil {
++		startNumber = startId
++		startAt = grid.Segments[startId].Start
+ 	} else if startId > 0 {
+ 		// Start one frame before.
+ 		// This ensures that the keyframes are aligned.
+ 		startNumber = startId - 1
++		if s.c.RKMPP {
++			startNumber = startId
++		}
+ 		startAt = float64(startNumber * s.m.tc.ChunkSize)
+ 	}
+ 
+@@ -443,7 +512,15 @@ func (s *Stream) transcode(startId int) {
+ 	initPath := ffmpeg.InitPath(s.m.tempDir, s.quality, s.run)
+ 	s.initChunk = NewChunk(-1)
+ 
+-	args := ffmpeg.SegmentArgs(s.transcodeSpec(startAt, true), startNumber, s.getSegmentPath(-1), initPath)
++	spec := s.transcodeSpec(startAt, true)
++	if s.hardwareError != nil {
++		log.Printf("%s-%s: hardware video required: %v", s.m.id, s.quality, s.hardwareError)
++		s.exited = true
++		s.failChunks()
++		return
++	}
++	args := ffmpeg.SegmentArgs(spec, startNumber, s.getSegmentPath(-1), initPath)
++	s.paced = ffmpeg.RKMPPInputPaced(spec)
+ 	coder := ffmpeg.Command(context.Background(), s.c.FFmpeg, args...)
+ 
+ 	// Log command, quoting the args as needed
+@@ -493,7 +570,7 @@ func (s *Stream) checkGoal(id int) {
+ 		s.goal = id + s.c.GoalBufferMax
+ 
+ 		// resume encoding
+-		if s.coder != nil && !s.exited {
++		if s.coder != nil && !s.exited && !s.paced {
+ 			log.Printf("%s-%s: resuming transcoding", s.m.id, s.quality)
+ 			s.coder.Process.Signal(syscall.SIGCONT)
+ 		}
+@@ -564,7 +641,7 @@ func (s *Stream) monitorTranscodeOutput(coder *exec.Cmd, initPath string, cmdStd
+ 				s.createChunk(id).signal(true)
+ 
+ 				// Check goal satisfied
+-				if id >= s.goal {
++				if id >= s.goal && !s.paced {
+ 					log.Printf("%s-%s: goal satisfied: %d", s.m.id, s.quality, s.goal)
+ 					s.coder.Process.Signal(syscall.SIGSTOP)
+ 				}
+diff --git a/go-vod/core/stream_test.go b/go-vod/core/stream_test.go
+index 4284c7295f78eacdd51e0a2f5f7e3ccabc09eb4b..486a3a841d69c524fc1821229a82044929148bdd 100644
+--- a/go-vod/core/stream_test.go
++++ b/go-vod/core/stream_test.go
+@@ -28,6 +28,27 @@ func countRuns(t *testing.T, runs string) int {
+ 	return strings.Count(string(data), "\n")
+ }
+ 
++func TestPacedHardwareProducerIsNotSuspendedAtItsGoal(t *testing.T) {
++	m := newCopyManager(t, hevcProbeJSON, "", false, nil)
++	bin, _ := stubFFmpeg(t, `while [ $# -gt 0 ]; do [ "$1" = -hls_segment_filename ] && p="$2"; shift; done
++for n in 0 1 2 3; do
++ f=$(printf "$p" "$n"); echo data > "$f"; basename "$f"; sleep 0.05
++done`)
++	m.c.FFmpeg, m.c.RKMPP = bin, true
++	m.c.GoalBufferMax = 2
++	w := httptest.NewRecorder()
++	require.True(t, m.ServeChunk(w, QUALITY_MAX, 0))
++	require.Equal(t, http.StatusOK, w.Code)
++	s := m.streams[QUALITY_MAX]
++	// The producer must reach its natural end without another request
++	// resuming it. Stopping hardware workers here loses pending frames.
++	require.Eventually(t, func() bool {
++		s.mutex.Lock()
++		defer s.mutex.Unlock()
++		return s.exited && s.chunks[3] != nil && s.chunks[3].done
++	}, 2*time.Second, 10*time.Millisecond)
++}
++
+ func TestStreamFailureRestartsOnRetry(t *testing.T) {
+ 	m := newCopyManager(t, hevcProbeJSON, "", false, nil)
+ 	bin, runs := stubFFmpeg(t, "exit 1")
+@@ -40,7 +61,7 @@ func TestStreamFailureRestartsOnRetry(t *testing.T) {
+ 	for i := 1; i <= 3; i++ {
+ 		w := httptest.NewRecorder()
+ 		start := time.Now()
+-		require.True(t, m.ServeChunk(w, QUALITY_MAX, 5))
++		require.True(t, m.ServeChunk(w, QUALITY_MAX, 2))
+ 		require.Equal(t, http.StatusRequestTimeout, w.Code)
+ 		require.Less(t, time.Since(start), chunkWait)
+ 
+@@ -100,7 +121,7 @@ func TestStreamStartFailure(t *testing.T) {
+ 	defer func() { chunkWait = old }()
+ 
+ 	// Advancing the goal used to signal a nil Process with the mutex held.
+-	for _, id := range []int{0, 1, 4} {
++	for _, id := range []int{0, 1, 2} {
+ 		w := httptest.NewRecorder()
+ 		require.True(t, m.ServeChunk(w, QUALITY_MAX, id))
+ 		require.Equal(t, http.StatusRequestTimeout, w.Code)
+@@ -148,7 +169,7 @@ func TestStreamStopKillsCoder(t *testing.T) {
+ 
+ 	// A request racing teardown can't start an unsupervised ffmpeg.
+ 	w = httptest.NewRecorder()
+-	require.True(t, m.ServeChunk(w, QUALITY_MAX, 5))
++	require.True(t, m.ServeChunk(w, QUALITY_MAX, 2))
+ 	require.Equal(t, http.StatusConflict, w.Code)
+ 	require.Equal(t, 1, countRuns(t, runs))
+ }
+diff --git a/go-vod/core/tonemap.go b/go-vod/core/tonemap.go
+index 9ef833f4ece9bbd1cf923db0701a39d0458e12f7..98b10fb20717f0bd84fb897306ee43564ba1c651 100644
+--- a/go-vod/core/tonemap.go
++++ b/go-vod/core/tonemap.go
+@@ -27,6 +27,24 @@ func probeTonemap(spec ffmpeg.Spec, probe func(context.Context, ffmpeg.Spec) err
+ func (s *Stream) transcodeSpec(startAt float64, isHLS bool) ffmpeg.Spec {
+ 	spec := s.spec(startAt, isHLS)
+ 
++	if ffmpeg.IsRKMPPEncoder(ffmpeg.Encoder(spec)) && spec.HDR && s.c.RKMPPOpenCL {
++		s.tonemapOnce.Do(func() {
++			// MPP/OpenCL import depends on the actual source surfaces and HDR
++			// metadata. A different file's success cannot validate this source.
++			if err := ffmpeg.ProbeRKMPPOpenCL(context.Background(), spec); err != nil {
++				if s.c.RKMPPStrict {
++					s.hardwareError = err
++					return
++				}
++				log.Printf("%s-%s: Mali HDR probe failed; using CPU tone mapping: %v", s.m.id, s.quality, err)
++				return
++			}
++			s.rkmppOpenCL = true
++			log.Printf("%s-%s: HDR tone mapping uses Mali OpenCL", s.m.id, s.quality)
++		})
++		spec.RKMPPOpenCL = s.rkmppOpenCL
++	}
++
+ 	// The OpenCL graph uses an OpenCL filter device, whereas software
+ 	// transpose uploads through the VA-API filter device. Keep that workaround.
+ 	if ffmpeg.Encoder(spec) == ffmpeg.EncoderVAAPI && spec.HDR && !spec.ForceSwTranspose {
+diff --git a/go-vod/core/tonemap_test.go b/go-vod/core/tonemap_test.go
+index e0f8ab78c2b9e4d6e61ba47831cfc780df639a12..159e759b3ce4e05cadd8557acfd9f456e484931e 100644
+--- a/go-vod/core/tonemap_test.go
++++ b/go-vod/core/tonemap_test.go
+@@ -168,3 +168,41 @@ func TestTonemapProbeShared(t *testing.T) {
+ 		}
+ 	}
+ }
++
++func TestRKMPPTonemapSelection(t *testing.T) {
++	for _, fail := range []bool{false, true} {
++		dir := t.TempDir()
++		count := filepath.Join(dir, "calls")
++		t.Setenv("PROBE_CALLS", count)
++		bin := filepath.Join(dir, "ffmpeg")
++		script := "#!/bin/sh\necho call >> \"$PROBE_CALLS\"\n"
++		if fail {
++			script += "echo 'Mali OpenCL unavailable' >&2\nexit 1\n"
++		}
++		require.NoError(t, os.WriteFile(bin, []byte(script), 0755))
++		c := &config.Config{FFmpeg: bin, RKMPP: true, RKMPPOpenCL: true}
++		m := &Manager{
++			c: c, url: "http://localhost/hdr.mp4",
++			probe: &ProbeVideoData{HDR: true, CodecName: "hevc", PixelFormat: "p010le", BitDepth: 10, Width: 1920, Height: 1080},
++		}
++		s := &Stream{c: c, m: m, quality: "720p", width: 1280, height: 720}
++		spec := s.transcodeSpec(0, true)
++		require.Equal(t, !fail, spec.RKMPPOpenCL)
++		args := strings.Join(ffmpeg.BuildArgs(spec), " ")
++		if fail {
++			require.Contains(t, args, "tonemap=hable")
++			require.NotContains(t, args, "tonemap_opencl")
++		} else {
++			require.Contains(t, args, "tonemap_opencl=")
++		}
++		// Reuse on seeks within this stream, but never share a successful
++		// MPP surface import with a different source file of the same shape.
++		require.Equal(t, !fail, s.transcodeSpec(6, true).RKMPPOpenCL)
++		otherManager := Manager{c: c, url: "http://localhost/another-hdr.mp4", probe: m.probe}
++		other := &Stream{c: c, m: &otherManager, quality: "720p", width: 1280, height: 720}
++		require.Equal(t, !fail, other.transcodeSpec(0, true).RKMPPOpenCL)
++		calls, err := os.ReadFile(count)
++		require.NoError(t, err)
++		require.Equal(t, "call\ncall\n", string(calls))
++	}
++}
+diff --git a/go-vod/ffmpeg/aac_copy_hardware_test.go b/go-vod/ffmpeg/aac_copy_hardware_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..bc63e9cb17d7a5330ad8be408bd5227604cc093f
+--- /dev/null
++++ b/go-vod/ffmpeg/aac_copy_hardware_test.go
+@@ -0,0 +1,72 @@
++package ffmpeg
++
++import (
++	"bytes"
++	"context"
++	"encoding/binary"
++	"encoding/json"
++	"fmt"
++	"math"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"strconv"
++	"testing"
++
++	"github.com/stretchr/testify/require"
++)
++
++// The AAC encoder writes negative priming packets in MP4. Copying them into
++// unsigned fMP4 tfdt used to wrap hls.js audio by almost 25 hours, freezing
++// playback after its first segment. ffprobe alone interprets that as signed
++// and therefore misses the browser failure: check the raw box as well.
++func TestRKMPPHardwareAACCopyClock(t *testing.T) {
++	if os.Getenv("MEMORIES_RKMPP_HW_TEST") != "1" {
++		t.Skip("run with the packaged multimedia image and hardware matrix")
++	}
++	bin, err := exec.LookPath("ffmpeg")
++	require.NoError(t, err)
++	probe, err := exec.LookPath("ffprobe")
++	require.NoError(t, err)
++	dir := t.TempDir()
++	src := filepath.Join(dir, "primed.m4a")
++	out, err := exec.Command(bin, "-v", "error", "-f", "lavfi", "-i", "sine=sample_rate=48000",
++		"-t", "12", "-c:a", "aac", "-ac", "2", "-b:a", "160k", src).CombinedOutput()
++	require.NoError(t, err, string(out))
++	for _, start := range []int{0, 6} {
++		run := t.TempDir()
++		s := Spec{RKMPP: true, HLS: true, AudioOnly: true, Input: src,
++			StartAt: float64(start), EndAt: float64(start + 6), ChunkSize: 3,
++			Audio: AudioInfo{CodecName: "aac", Profile: "LC", Channels: 2,
++				SampleRate: 48000, BitRate: 160000, DurationSeconds: 12}}
++		init := filepath.Join(run, "init.mp4")
++		out, err := exec.Command(bin, SegmentArgs(s, start/3, filepath.Join(run, "audio-%06d.m4s"), init)...).CombinedOutput()
++		require.NoError(t, err, string(out))
++		header, err := os.ReadFile(init)
++		require.NoError(t, err)
++		for id := start / 3; id < start/3+2; id++ {
++			segment, err := os.ReadFile(filepath.Join(run, fmt.Sprintf("audio-%06d.m4s", id)))
++			require.NoError(t, err)
++			tfdt := bytes.Index(segment, []byte("tfdt"))
++			require.GreaterOrEqual(t, tfdt, 0)
++			require.Equal(t, byte(1), segment[tfdt+4])
++			timestamp := binary.BigEndian.Uint64(segment[tfdt+8 : tfdt+16])
++			want := (math.Ceil(float64(start)*48000/1024) + math.Ceil(float64((id-start/3)*3)*48000/1024)) * 1024
++			require.InDelta(t, want, timestamp, 1, "unsigned decode time must stay on the source sample clock")
++			joined := filepath.Join(run, "joined.mp4")
++			require.NoError(t, os.WriteFile(joined, append(append([]byte{}, header...), segment...), 0644))
++			out, _, err = runFFprobe(context.Background(), probe, "-v", "error", "-show_entries", "packet=pts_time", "-of", "json", joined)
++			require.NoError(t, err)
++			var data struct {
++				Packets []struct {
++					PTS string `json:"pts_time"`
++				} `json:"packets"`
++			}
++			require.NoError(t, json.Unmarshal(out, &data))
++			require.NotEmpty(t, data.Packets)
++			first, err := strconv.ParseFloat(data.Packets[0].PTS, 64)
++			require.NoError(t, err)
++			require.InDelta(t, want/48000, first, 1.0/48000)
++		}
++	}
++}
+diff --git a/go-vod/ffmpeg/args.go b/go-vod/ffmpeg/args.go
+index 5d543807a6c76b45ab5a9b3f4403e65f0decd70d..ba7ce080347f0a33f3d786324bda6fd8f0b43514 100644
+--- a/go-vod/ffmpeg/args.go
++++ b/go-vod/ffmpeg/args.go
+@@ -47,15 +47,41 @@ type Spec struct {
+ 	// FrameRate is the probed source fps, truncated to int. Only sizes the
+ 	// GOP when UseGopSize is set.
+ 	FrameRate int
++	// FrameRateExact is the parsed fractional frame rate (e.g. 23.976, 29.97).
++	FrameRateExact float64
+ 	// Rotation is the probed source rotation (-90, 90, ±180, 0), applied as
+ 	// an explicit transpose filter when UseTranspose is set.
+ 	Rotation int `hwprobe:"key"`
+ 	// HDR marks sources needing SDR tonemapping.
+ 	HDR bool `hwprobe:"key"`
++	// Source colour tags may exist only on the container. Reapply them after
++	// RGA/OpenCL mapping, whose hardware frames can lose those properties.
++	ColorTransfer  string `hwprobe:"key"`
++	ColorPrimaries string `hwprobe:"key"`
++	ColorSpace     string `hwprobe:"key"`
++	ColorRange     string `hwprobe:"key"`
+ 	// BitDepth is the source sample depth, 8 when unknown.
+ 	BitDepth int `hwprobe:"key"`
++	// PixelFormat helps gate Rockchip hardware decoding to supported surfaces.
++	PixelFormat string `hwprobe:"key"`
++	// Bitrate is the target total rendition bitrate, including audio.
++	Bitrate int
++	// RKMPP enables Rockchip MPP/RGA encoding (experimental v11 port).
++	RKMPP bool `hwprobe:"key"`
++	// RKMPPOutputCodec selects h264 or hevc output.
++	RKMPPOutputCodec string `hwprobe:"key"`
++	// RKMPPOpenCL enables the Mali HDR graph only after a successful frame probe.
++	RKMPPOpenCL bool
+ 	// Audio is the first audio stream; empty when silent.
+ 	Audio AudioInfo
++	// AudioOnly builds a shared AAC audio stream for HLS without video.
++	AudioOnly bool
++	// AudioBitrate selects a shared AAC profile; zero uses 192 kbps.
++	AudioBitrate int
++	// SeparateAudio marks video renditions paired with a shared audio stream.
++	SeparateAudio bool
++	// EndAt is the duration upper bound for audio padding/trimming.
++	EndAt float64
+ 	// ChunkSize is the target segment length in whole seconds. Drives
+ 	// -hls_time and the forced-keyframe interval.
+ 	ChunkSize int
+@@ -86,6 +112,9 @@ type Spec struct {
+ 	// UseGopSize uses a fixed GOP (ChunkSize*FrameRate) instead of forced
+ 	// keyframes, for encoders whose forced keyframes drift (notably NVENC).
+ 	UseGopSize bool
++	// KeyframeGrid aligns hardware HLS renditions with a cached Original grid.
++	// Nil retains the fixed-duration encoding path.
++	KeyframeGrid *RKMPPKeyframeGrid
+ 	// Copy stream-copies the video (-c:v copy) instead of re-encoding it,
+ 	// for copy-eligible sources.
+ 	Copy bool
+@@ -111,8 +140,15 @@ func HWProbeKey(s Spec) Spec {
+ // served as-is for progressive download) bypasses argument building entirely.
+ func Encoder(s Spec) string {
+ 	switch {
++	case s.AudioOnly:
++		return "aac"
+ 	case s.Copy:
+ 		return EncoderCopy
++	case s.RKMPP:
++		if s.RKMPPOutputCodec == "hevc" {
++			return EncoderRKMPPHEVC
++		}
++		return EncoderRKMPP
+ 	case s.VAAPI:
+ 		return EncoderVAAPI
+ 	case s.NVENC:
+@@ -151,6 +187,12 @@ func Encoder(s Spec) string {
+ // Ladder bitrates appear only in playlists, never here. With Copy set, the
+ // offload, filter graph and rate control collapse to "-c:v copy".
+ func BuildArgs(s Spec) []string {
++	if s.AudioOnly {
++		return buildRKMPPAudioArgs(s)
++	}
++	if IsRKMPPEncoder(Encoder(s)) {
++		return buildRKMPPArgs(s)
++	}
+ 	args := []string{"-hide_banner", "-loglevel", "warning"}
+ 
+ 	if s.StartAt > 0 {
+@@ -291,7 +333,7 @@ func BuildArgs(s Spec) []string {
+ 		)
+ 	}
+ 
+-	if s.Audio.CodecName != "" {
++	if s.Audio.CodecName != "" && !s.SeparateAudio {
+ 		args = append(args, "-map", "0:a:0?")
+ 		if s.Audio.CodecName == "aac" && s.Audio.Channels >= 1 && s.Audio.Channels <= 2 {
+ 			args = append(args, "-c:a", "copy")
+@@ -305,6 +347,9 @@ func BuildArgs(s Spec) []string {
+ 		}
+ 	}
+ 
++	if s.SeparateAudio {
++		args = append(args, "-an")
++	}
+ 	return args
+ }
+ 
+@@ -339,10 +384,24 @@ const copyHLSTime = "0.001"
+ //   - The playlist goes to stdout ("-"), where the segment watcher reads
+ //     finished segment names from it.
+ func SegmentArgs(s Spec, startID int, pattern, init string) []string {
++	// Rockchip's hardware encoders obey GOP sizing more reliably than
++	// forced-keyframe expressions. Preserve v11's fMP4 muxer and timeline.
++	if s.RKMPP && !s.Copy && !s.AudioOnly && s.KeyframeGrid == nil {
++		s.UseGopSize = true
++		s.FrameRate = RKMPPFrameRate(s)
++	}
+ 	hlsTime := fmt.Sprintf("%d", s.ChunkSize)
+-	if s.Copy {
++	if s.Copy || s.KeyframeGrid != nil {
+ 		hlsTime = copyHLSTime
+ 	}
++	segmentOptions := "movflags=+frag_discont+negative_cts_offsets"
++	if s.Copy && !s.AudioOnly {
++		// MOV's DASH/sidx continuity correction rewrites the first PTS of
++		// later B-frame fragments. HLS uses its playlist index; preserve
++		// the source composition timestamps instead of generating sidx.
++		segmentOptions += "+skip_sidx"
++	}
++	segmentOptions += ":use_editlist=0"
+ 
+ 	args := BuildArgs(s)
+ 	args = append(args,
+@@ -352,11 +411,11 @@ func SegmentArgs(s Spec, startID int, pattern, init string) []string {
+ 		"-hls_time", hlsTime,
+ 		"-hls_segment_type", "fmp4",
+ 		"-hls_fmp4_init_filename", init,
+-		"-hls_segment_options", "movflags=+frag_discont+negative_cts_offsets:use_editlist=0",
++		"-hls_segment_options", segmentOptions,
+ 		"-hls_segment_filename", pattern,
+ 	)
+ 
+-	if !s.Copy {
++	if !s.Copy && !s.AudioOnly {
+ 		// HLS may otherwise duplicate VFR frames to match the probed r_frame_rate.
+ 		args = append(args, "-fps_mode", "passthrough")
+ 
+@@ -365,7 +424,12 @@ func SegmentArgs(s Spec, startID int, pattern, init string) []string {
+ 		// the same segment on every level switch.
+ 		args = append(args, "-bf", "0")
+ 
+-		if s.UseGopSize && s.FrameRate > 0 {
++		if s.RKMPP && s.KeyframeGrid != nil {
++			// Blocking packet retrieval prevents a forced-IDR command from
++			// taking effect on an earlier frame still queued in asynchronous MPP.
++			args = append(args, "-flags:v", "+low_delay", "-g", strconv.Itoa(s.KeyframeGrid.GOPSize),
++				"-force_key_frames", s.KeyframeGrid.forceTimes(s.StartAt))
++		} else if s.UseGopSize && s.FrameRate > 0 {
+ 			gop := fmt.Sprintf("%d", s.ChunkSize*s.FrameRate)
+ 			args = append(args, "-g", gop, "-keyint_min", gop)
+ 		} else {
+@@ -390,6 +454,8 @@ func MP4Args(s Spec) []string {
+ // Segment is one stream-copy HLS segment: absolute start and duration.
+ type Segment struct {
+ 	Start, Duration float64
++	// Nonzero when a copied open GOP is decoded from a later keyframe.
++	KeyframeAt float64
+ }
+ 
+ // CopySegments makes one segment per keyframe, mirroring the muxer's
+diff --git a/go-vod/ffmpeg/copy_bframes_hardware_test.go b/go-vod/ffmpeg/copy_bframes_hardware_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..81660928e73e5274bd20413d0357644bdf3a0bbb
+--- /dev/null
++++ b/go-vod/ffmpeg/copy_bframes_hardware_test.go
+@@ -0,0 +1,164 @@
++package ffmpeg
++
++import (
++	"bytes"
++	"context"
++	"encoding/binary"
++	"fmt"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"testing"
++
++	"github.com/stretchr/testify/require"
++)
++
++// FFmpeg's packet demuxer adds a B-frame reorder offset to standalone fMP4.
++// Check the raw presentation clock consumed by MSE, not that inferred offset.
++func samplePresentationTimes(t *testing.T, init, segment []byte) []float64 {
++	t.Helper()
++	box := func(data []byte, path ...string) []byte {
++		for _, kind := range path {
++			var found []byte
++			for len(data) >= 8 {
++				n := int(binary.BigEndian.Uint32(data))
++				require.GreaterOrEqual(t, n, 8)
++				require.LessOrEqual(t, n, len(data))
++				if string(data[4:8]) == kind {
++					found = data[8:n]
++					break
++				}
++				data = data[n:]
++			}
++			require.NotNil(t, found, "missing MP4 box %s", kind)
++			data = found
++		}
++		return data
++	}
++	mdhd := box(init, "moov", "trak", "mdia", "mdhd")
++	scaleAt := 12
++	if mdhd[0] == 1 {
++		scaleAt = 20
++	}
++	scale := binary.BigEndian.Uint32(mdhd[scaleAt:])
++	dt := box(segment, "moof", "traf", "tfdt")
++	var dts uint64
++	if dt[0] == 1 {
++		dts = binary.BigEndian.Uint64(dt[4:])
++	} else {
++		dts = uint64(binary.BigEndian.Uint32(dt[4:]))
++	}
++	trun := box(segment, "moof", "traf", "trun")
++	flags := binary.BigEndian.Uint32(trun) & 0xffffff
++	offset := 8
++	for _, flag := range []uint32{1, 4} {
++		if flags&flag != 0 {
++			offset += 4
++		}
++	}
++	tfhd := box(segment, "moof", "traf", "tfhd")
++	headerFlags := binary.BigEndian.Uint32(tfhd) & 0xffffff
++	headerOffset := 8
++	if headerFlags&1 != 0 {
++		headerOffset += 8
++	}
++	if headerFlags&2 != 0 {
++		headerOffset += 4
++	}
++	var defaultDuration uint32
++	if headerFlags&8 != 0 {
++		defaultDuration = binary.BigEndian.Uint32(tfhd[headerOffset:])
++	}
++	var times []float64
++	for range binary.BigEndian.Uint32(trun[4:]) {
++		duration := defaultDuration
++		if flags&0x100 != 0 {
++			duration = binary.BigEndian.Uint32(trun[offset:])
++			offset += 4
++		}
++		if flags&0x200 != 0 {
++			offset += 4
++		}
++		if flags&0x400 != 0 {
++			offset += 4
++		}
++		var cto int64
++		if flags&0x800 != 0 {
++			x := binary.BigEndian.Uint32(trun[offset:])
++			offset += 4
++			cto = int64(x)
++			if trun[0] == 1 {
++				cto = int64(int32(x))
++			}
++		}
++		times = append(times, (float64(dts)+float64(cto))/float64(scale))
++		dts += uint64(duration)
++	}
++	return times
++}
++
++func firstSamplePTS(t *testing.T, init, segment []byte) float64 {
++	return samplePresentationTimes(t, init, segment)[0]
++}
++
++func TestRKMPPHardwareCopyBFrameClock(t *testing.T) {
++	if os.Getenv("MEMORIES_RKMPP_HW_TEST") != "1" {
++		t.Skip("set MEMORIES_RKMPP_HW_TEST=1 in the RK3588 runtime image")
++	}
++	bin, err := exec.LookPath("ffmpeg")
++	require.NoError(t, err)
++	probe, err := exec.LookPath("ffprobe")
++	require.NoError(t, err)
++	for _, codec := range []string{"h264", "hevc"} {
++		t.Run(codec, func(t *testing.T) {
++			dir := t.TempDir()
++			src := filepath.Join(dir, "bframes.mp4")
++			args := []string{"-v", "error", "-f", "lavfi", "-i", "testsrc2=s=640x360:r=50", "-t", "5.76", "-threads", "2"}
++			if codec == "h264" {
++				args = append(args, "-c:v", "libx264", "-g", "48", "-bf", "3", "-sc_threshold", "0")
++			} else {
++				args = append(args, "-c:v", "libx265", "-preset", "ultrafast", "-x265-params",
++					"pools=2:frame-threads=1:keyint=48:min-keyint=48:scenecut=0:bframes=3:open-gop=0")
++			}
++			out, err := exec.Command(bin, append(args, src)...).CombinedOutput()
++			require.NoError(t, err, string(out))
++			info, err := Probe(context.Background(), probe, src, "")
++			require.NoError(t, err)
++			keys, err := Keyframes(context.Background(), probe, src, "")
++			require.NoError(t, err)
++			segments := CopySegments(keys, info.Duration)
++			require.Len(t, segments, 6)
++			var initial []byte
++			for _, first := range []int{0, 3} {
++				run := t.TempDir()
++				s := Spec{Input: src, Copy: true, HLS: true, CodecName: codec, ChunkSize: 3}
++				if first > 0 {
++					s.StartAt = segments[first].Start + .001
++				}
++				init := filepath.Join(run, "init.mp4")
++				out, err := exec.Command(bin, SegmentArgs(s, first, filepath.Join(run, "copy-%06d.m4s"), init)...).CombinedOutput()
++				require.NoError(t, err, string(out))
++				header, err := os.ReadFile(init)
++				require.NoError(t, err)
++				if first == 0 {
++					initial = header
++				} else {
++					require.Equal(t, initial, header, "cached init must work after a cold seek")
++				}
++				parts, err := filepath.Glob(filepath.Join(run, "copy-*.m4s"))
++				require.NoError(t, err)
++				require.Len(t, parts, len(segments)-first)
++				for id := first; id < len(segments); id++ {
++					part, err := os.ReadFile(filepath.Join(run, fmt.Sprintf("copy-%06d.m4s", id)))
++					require.NoError(t, err)
++					require.False(t, bytes.Contains(part[:min(len(part), 160)], []byte("sidx")))
++					require.InDelta(t, segments[id].Start, firstSamplePTS(t, initial, part), .000001, "segment %d source PTS", id)
++					joined := filepath.Join(run, "joined.mp4")
++					require.NoError(t, os.WriteFile(joined, append(append([]byte{}, initial...), part...), 0644))
++					out, err := exec.Command(bin, "-v", "error", "-xerror", "-i", joined, "-f", "null", "-").CombinedOutput()
++					require.NoError(t, err, string(out))
++				}
++			}
++		})
++	}
++}
+diff --git a/go-vod/ffmpeg/hevc.go b/go-vod/ffmpeg/hevc.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..1f5938c144b103b71ddcee4ee4d4ce22377a090c
+--- /dev/null
++++ b/go-vod/ffmpeg/hevc.go
+@@ -0,0 +1,57 @@
++package ffmpeg
++
++import "fmt"
++
++// HEVCLevelInfo describes a Main-tier level. Explicit encoder levels keep
++// the RFC 6381 playlist declaration consistent with the generated bitstream.
++type HEVCLevelInfo struct {
++	Name string
++	IDC  int
++}
++
++// HEVCLevel selects the lowest level covering the output picture and sample
++// rate (ITU-T H.265, Table A.8). Bitrate is already capped by the RKMPP ladder.
++func HEVCLevel(width, height, fps int) HEVCLevelInfo {
++	picture := int64(width) * int64(height)
++	rate := picture * int64(max(1, fps))
++	for _, level := range []struct {
++		name          string
++		idc           int
++		picture, rate int64
++	}{
++		{"3.1", 93, 983040, 33177600},
++		{"4", 120, 2228224, 66846720},
++		{"4.1", 123, 2228224, 133693440},
++		{"5", 150, 8912896, 267386880},
++		{"5.1", 153, 8912896, 534773760},
++		{"5.2", 156, 8912896, 1069547520},
++		{"6", 180, 35651584, 1069547520},
++		{"6.1", 183, 35651584, 2139095040},
++		{"6.2", 186, 35651584, 4278190080},
++	} {
++		if picture <= level.picture && rate <= level.rate {
++			return HEVCLevelInfo{level.name, level.idc}
++		}
++	}
++	return HEVCLevelInfo{"6.2", 186}
++}
++
++// HEVCCodecs matches RKMPP's 8-bit Main profile, compatibility flags 6,
++// progressive constraint flag 80, and the explicit level used by the encoder.
++func HEVCCodecs(width, height, fps int, audio bool) string {
++	codecs := fmt.Sprintf("hvc1.1.6.L%d.80", HEVCLevel(width, height, fps).IDC)
++	if audio {
++		codecs += ",mp4a.40.2"
++	}
++	return codecs
++}
++
++// HEVCMain10Codecs describes SDR Main10 stream-copy output. Encoded fallback
++// renditions still use Main; claiming Main for a copied Main10 stream is wrong.
++func HEVCMain10Codecs(width, height, fps int, audio bool) string {
++	codecs := fmt.Sprintf("hvc1.2.4.L%d.B0", HEVCLevel(width, height, fps).IDC)
++	if audio {
++		codecs += ",mp4a.40.2"
++	}
++	return codecs
++}
+diff --git a/go-vod/ffmpeg/hevc_test.go b/go-vod/ffmpeg/hevc_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..818cc3e819bf74a637d6d4812120e30bb52df980
+--- /dev/null
++++ b/go-vod/ffmpeg/hevc_test.go
+@@ -0,0 +1,44 @@
++package ffmpeg
++
++import (
++	"strings"
++	"testing"
++
++	"github.com/stretchr/testify/require"
++)
++
++func TestRKMPPOutputCodec(t *testing.T) {
++	for _, codec := range []string{"", "h264", "hevc"} {
++		s := Spec{RKMPP: true, RKMPPOutputCodec: codec, Width: 1920, Height: 1080, FrameRate: 60, Quality: QualityMax, HLS: true, ChunkSize: 3}
++		encoder := EncoderRKMPP
++		if codec == "hevc" {
++			encoder = EncoderRKMPPHEVC
++		}
++		t.Run(codec, func(t *testing.T) {
++			require.Equal(t, encoder, Encoder(s))
++			args := strings.Join(SegmentArgs(s, 2, "/tmp/max-%06d.m4s", "/tmp/max-init.m4s"), " ")
++			require.Contains(t, args, "-c:v "+encoder)
++			require.Contains(t, args, "-g 180 -keyint_min 180")
++			require.Contains(t, args, "-an")
++			if codec == "hevc" {
++				require.Contains(t, args, "-profile:v main -tier main -level:v 4.1 -tag:v hvc1")
++			}
++			s.Copy = true
++			require.Equal(t, EncoderCopy, Encoder(s))
++		})
++	}
++}
++
++func TestHEVCLevel(t *testing.T) {
++	for _, tc := range []struct{ width, height, fps, level int }{
++		{1280, 720, 30, 93}, {720, 1280, 30, 93},
++		{1920, 1080, 30, 120}, {1080, 1920, 60, 123},
++		{2560, 1440, 60, 150}, {3840, 2160, 60, 153},
++		{7680, 4320, 60, 183},
++	} {
++		require.Equal(t, tc.level, HEVCLevel(tc.width, tc.height, tc.fps).IDC)
++	}
++	require.Equal(t, "hvc1.1.6.L123.80,mp4a.40.2", HEVCCodecs(1080, 1920, 60, true))
++	require.Equal(t, "hvc1.1.6.L120.80", HEVCCodecs(1920, 1080, 30, false))
++	require.Equal(t, "hvc1.2.4.L153.B0,mp4a.40.2", HEVCMain10Codecs(3840, 2160, 60, true))
++}
+diff --git a/go-vod/ffmpeg/input_formats_hardware_test.go b/go-vod/ffmpeg/input_formats_hardware_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..55f4d93fd977a73f7dfce022b1c756dc8e87629b
+--- /dev/null
++++ b/go-vod/ffmpeg/input_formats_hardware_test.go
+@@ -0,0 +1,73 @@
++package ffmpeg
++
++import (
++	"context"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"testing"
++
++	"github.com/stretchr/testify/require"
++)
++
++// Input codec/container and output codec are independent. Exercise every codec
++// claimed by SupportsRKMPPDecode against both hardware encoders, not just AVC
++// or HEVC files. This is a decode/encode capability test, not player acceptance.
++func TestRKMPPHardwareInputFormats(t *testing.T) {
++	if os.Getenv("MEMORIES_RKMPP_HW_TEST") != "1" {
++		t.Skip("RK3588 hardware opt-in")
++	}
++	bin, err := exec.LookPath("ffmpeg")
++	require.NoError(t, err)
++	probe, err := exec.LookPath("ffprobe")
++	require.NoError(t, err)
++	for _, tc := range []struct {
++		codec, ext string
++		args       []string
++	}{
++		{"h264", "mov", []string{"-c:v", "libx264", "-preset", "ultrafast"}},
++		{"hevc", "mp4", []string{"-c:v", "libx265", "-preset", "ultrafast", "-x265-params", "pools=2:frame-threads=1"}},
++		{"vp8", "webm", []string{"-c:v", "libvpx", "-deadline", "realtime", "-cpu-used", "8"}},
++		{"vp9", "webm", []string{"-c:v", "libvpx-vp9", "-deadline", "realtime", "-cpu-used", "8"}},
++		{"av1", "mkv", []string{"-c:v", "libsvtav1", "-preset", "12", "-svtav1-params", "lp=2"}},
++		{"h263", "avi", []string{"-c:v", "h263"}},
++		{"mpeg1video", "mkv", []string{"-c:v", "mpeg1video"}},
++		{"mpeg2video", "mkv", []string{"-c:v", "mpeg2video"}},
++		{"mpeg4", "avi", []string{"-c:v", "mpeg4"}},
++		{"mjpeg", "mkv", []string{"-c:v", "mjpeg", "-pix_fmt", "yuvj420p"}},
++	} {
++		t.Run(tc.codec, func(t *testing.T) {
++			src := filepath.Join(t.TempDir(), "input."+tc.ext)
++			args := []string{"-v", "error", "-f", "lavfi", "-i", "testsrc2=s=176x144:r=25", "-t", "3", "-threads", "2"}
++			args = append(args, tc.args...)
++			args = append(args, src)
++			out, err := exec.Command(bin, args...).CombinedOutput()
++			require.NoError(t, err, string(out))
++			info, err := Probe(context.Background(), probe, src, "")
++			require.NoError(t, err)
++			require.Equal(t, tc.codec, info.CodecName)
++			for _, codec := range []string{"h264", "hevc"} {
++				run := t.TempDir()
++				init := filepath.Join(run, "init.mp4")
++				s := Spec{Input: src, RKMPP: true, RKMPPOutputCodec: codec, CodecName: info.CodecName, PixelFormat: info.PixelFormat, BitDepth: info.BitDepth,
++					FrameRate: info.FrameRate, FrameRateExact: info.FrameRateExact, Width: 160, Height: 128, Bitrate: 200000, QF: 24, HLS: true, ChunkSize: 3}
++				require.True(t, usesRKMPPFrames(s))
++				out, err := exec.Command(bin, SegmentArgs(s, 0, filepath.Join(run, "part-%06d.m4s"), init)...).CombinedOutput()
++				require.NoError(t, err, "%s to %s: %s", tc.codec, codec, out)
++				header, err := os.ReadFile(init)
++				require.NoError(t, err)
++				parts, err := filepath.Glob(filepath.Join(run, "part-*.m4s"))
++				require.NoError(t, err)
++				require.NotEmpty(t, parts)
++				for _, p := range parts {
++					part, err := os.ReadFile(p)
++					require.NoError(t, err)
++					joined := filepath.Join(run, "joined.mp4")
++					require.NoError(t, os.WriteFile(joined, append(append([]byte{}, header...), part...), 0644))
++					out, err := exec.Command(bin, "-v", "error", "-xerror", "-i", joined, "-f", "null", "-").CombinedOutput()
++					require.NoError(t, err, string(out))
++				}
++			}
++		})
++	}
++}
+diff --git a/go-vod/ffmpeg/open_gop_hardware_test.go b/go-vod/ffmpeg/open_gop_hardware_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..6efe5bec6a72893ceb7a5c757866f07dfc2dfcfc
+--- /dev/null
++++ b/go-vod/ffmpeg/open_gop_hardware_test.go
+@@ -0,0 +1,85 @@
++package ffmpeg
++
++import (
++	"context"
++	"fmt"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"slices"
++	"testing"
++
++	"github.com/stretchr/testify/require"
++)
++
++func TestRKMPPHardwareOpenGOPPresentation(t *testing.T) {
++	if os.Getenv("MEMORIES_RKMPP_HW_TEST") != "1" {
++		t.Skip("RK3588 hardware opt-in")
++	}
++	bin, err := exec.LookPath("ffmpeg")
++	require.NoError(t, err)
++	probe, err := exec.LookPath("ffprobe")
++	require.NoError(t, err)
++	for _, inputCodec := range []string{"h264", "hevc"} {
++		t.Run(inputCodec, func(t *testing.T) {
++			src := filepath.Join(t.TempDir(), "open.mp4")
++			args := []string{"-v", "error", "-f", "lavfi", "-i", "testsrc2=s=640x360:r=50", "-t", "5.76", "-threads", "2"}
++			if inputCodec == "h264" {
++				args = append(args, "-c:v", "libx264", "-x264-params", "keyint=48:min-keyint=48:scenecut=0:bframes=3:open-gop=1")
++			} else {
++				args = append(args, "-c:v", "libx265", "-preset", "ultrafast", "-x265-params", "pools=2:frame-threads=1:keyint=48:min-keyint=48:scenecut=0:bframes=3:open-gop=1")
++			}
++			out, err := exec.Command(bin, append(args, src)...).CombinedOutput()
++			require.NoError(t, err, string(out))
++			info, err := Probe(context.Background(), probe, src, "")
++			require.NoError(t, err)
++			frames, err := ProbeTimeline(context.Background(), probe, src, "")
++			require.NoError(t, err)
++			segments := SourceSegments(frames, info.Duration)
++			require.Len(t, segments, 6)
++			require.Less(t, segments[1].Start, frames[1].PTS, "fixture must contain leading pictures")
++			copyDir := t.TempDir()
++			init := filepath.Join(copyDir, "init.mp4")
++			out, err = exec.Command(bin, SegmentArgs(Spec{Input: src, CodecName: inputCodec, Copy: true, HLS: true, ChunkSize: 3}, 0, filepath.Join(copyDir, "copy-%06d.m4s"), init)...).CombinedOutput()
++			require.NoError(t, err, string(out))
++			header, err := os.ReadFile(init)
++			require.NoError(t, err)
++			for i, seg := range segments {
++				part, err := os.ReadFile(filepath.Join(copyDir, fmt.Sprintf("copy-%06d.m4s", i)))
++				require.NoError(t, err)
++				require.InDelta(t, seg.Start, slices.Min(samplePresentationTimes(t, header, part)), .000001, "copied GOP %d", i)
++			}
++			grid := NewRKMPPKeyframeGrid(segments, info.FrameRate)
++			require.NotNil(t, grid)
++			for _, outputCodec := range []string{"h264", "hevc"} {
++				var initial []byte
++				for _, first := range []int{0, 2} {
++					run := t.TempDir()
++					init := filepath.Join(run, "init.mp4")
++					s := Spec{Input: src, CodecName: inputCodec, PixelFormat: info.PixelFormat, BitDepth: info.BitDepth, RKMPP: true, RKMPPOutputCodec: outputCodec,
++						FrameRate: info.FrameRate, FrameRateExact: info.FrameRateExact, Width: 320, Height: 180, Bitrate: 700000, QF: 24, HLS: true, ChunkSize: 3, StartAt: segments[first].Start, KeyframeGrid: grid}
++					out, err := exec.Command(bin, SegmentArgs(s, first, filepath.Join(run, "video-%06d.m4s"), init)...).CombinedOutput()
++					require.NoError(t, err, string(out))
++					header, err := os.ReadFile(init)
++					require.NoError(t, err)
++					if first == 0 {
++						initial = header
++					} else {
++						require.Equal(t, initial, header, "cold init: %s to %s", inputCodec, outputCodec)
++					}
++					for id := first; id < len(segments); id++ {
++						part, err := os.ReadFile(filepath.Join(run, fmt.Sprintf("video-%06d.m4s", id)))
++						require.NoError(t, err)
++						pts := samplePresentationTimes(t, initial, part)
++						require.InDelta(t, segments[id].Start, pts[0], .000001, "encoded GOP %d: %s to %s", id, inputCodec, outputCodec)
++						joined := filepath.Join(run, "joined.mp4")
++						require.NoError(t, os.WriteFile(joined, append(append([]byte{}, initial...), part...), 0644))
++						out, err = exec.Command(bin, "-v", "error", "-xerror", "-i", joined, "-f", "null", "-").CombinedOutput()
++						require.NoError(t, err, string(out))
++						assertPacketGrid(t, probe, joined, segments[id].Start, segments[id].Duration)
++					}
++				}
++			}
++		})
++	}
++}
+diff --git a/go-vod/ffmpeg/probe.go b/go-vod/ffmpeg/probe.go
+index 1e8324b3ef5730f2c87ab83d6233a65a531d816d..1e14422a9a13ee6876a7cd2c72929c09038665bc 100644
+--- a/go-vod/ffmpeg/probe.go
++++ b/go-vod/ffmpeg/probe.go
+@@ -32,24 +32,33 @@ const (
+ )
+ 
+ type VideoInfo struct {
+-	Width     int
+-	Height    int
+-	Duration  time.Duration
+-	FrameRate int
+-	CodecName string
+-	BitRate   int
+-	Rotation  int
+-	HDR       bool
+-	BitDepth  int
+-	Audio     AudioInfo
++	Width          int
++	Height         int
++	Duration       time.Duration
++	FrameRate      int
++	FrameRateExact float64
++	PixelFormat    string
++	CodecName      string
++	BitRate        int
++	Rotation       int
++	HDR            bool
++	DolbyVision    bool
++	ColorTransfer  string
++	ColorPrimaries string
++	ColorSpace     string
++	ColorRange     string
++	BitDepth       int
++	Audio          AudioInfo
+ }
+ 
+ // AudioInfo describes the first audio stream; empty when silent.
+ type AudioInfo struct {
+-	CodecName  string
+-	Channels   int
+-	SampleRate int
+-	BitRate    int
++	DurationSeconds float64
++	CodecName       string
++	Profile         string
++	Channels        int
++	SampleRate      int
++	BitRate         int
+ }
+ 
+ type sideData struct {
+@@ -60,9 +69,11 @@ type sideData struct {
+ 
+ type videoStream struct {
+ 	ffprobe.Stream
+-	SideDataList   []sideData `json:"side_data_list"`
+-	ColorTransfer  string     `json:"color_transfer"`
+-	ColorPrimaries string     `json:"color_primaries"`
++	NominalFrameRate string     `json:"r_frame_rate"`
++	SideDataList     []sideData `json:"side_data_list"`
++	ColorTransfer    string     `json:"color_transfer"`
++	ColorPrimaries   string     `json:"color_primaries"`
++	ColorRange       string     `json:"color_range"`
+ }
+ 
+ type probeOutput struct {
+@@ -128,24 +139,45 @@ func ParseProbeJSON(data []byte) (VideoInfo, error) {
+ 	}
+ 
+ 	bitRate, err := strconv.Atoi(s.BitRate)
+-	if err != nil {
++	if (err != nil || bitRate <= 0) && out.Format != nil {
++		// Matroska often omits per-stream bitrate. Its measured container
++		// rate is a conservative budget, unlike an arbitrary 5 Mbps default.
++		bitRate, err = strconv.Atoi(out.Format.BitRate)
++	}
++	if err != nil || bitRate <= 0 {
+ 		bitRate = defaultBitRate
+ 	}
+ 
+ 	return VideoInfo{
+-		Width:     s.Width,
+-		Height:    s.Height,
+-		Duration:  duration,
+-		FrameRate: parseFrameRate(s.AvgFrameRate),
+-		CodecName: s.CodecName,
+-		BitRate:   bitRate,
+-		Rotation:  probeRotation(*s),
+-		HDR:       probeHDR(*s),
+-		BitDepth:  probeBitDepth(s.PixFmt),
+-		Audio:     probeAudio(out.Streams),
++		Width:          s.Width,
++		Height:         s.Height,
++		Duration:       duration,
++		FrameRate:      parseFrameRate(s.AvgFrameRate),
++		FrameRateExact: exactFrameRate(s.NominalFrameRate, s.AvgFrameRate),
++		PixelFormat:    s.PixFmt,
++		CodecName:      s.CodecName,
++		BitRate:        bitRate,
++		Rotation:       probeRotation(*s),
++		HDR:            probeHDR(*s),
++		DolbyVision:    probeDolbyVision(*s),
++		ColorTransfer:  s.ColorTransfer,
++		ColorPrimaries: s.ColorPrimaries,
++		ColorSpace:     s.ColorSpace,
++		ColorRange:     s.ColorRange,
++		BitDepth:       probeBitDepth(s.PixFmt),
++		Audio:          probeAudio(out.Streams),
+ 	}, nil
+ }
+ 
++func probeDolbyVision(s videoStream) bool {
++	for _, sd := range s.SideDataList {
++		if sd.SideDataType == "DOVI configuration record" {
++			return true
++		}
++	}
++	return false
++}
++
+ // probeAudio describes the first audio stream; empty when silent.
+ func probeAudio(streams []videoStream) AudioInfo {
+ 	for i := range streams {
+@@ -155,11 +187,14 @@ func probeAudio(streams []videoStream) AudioInfo {
+ 		}
+ 		rate, _ := strconv.Atoi(st.SampleRate)
+ 		br, _ := strconv.Atoi(st.BitRate)
++		duration, _ := strconv.ParseFloat(st.Duration, 64)
+ 		return AudioInfo{
+-			CodecName:  st.CodecName,
+-			Channels:   st.Channels,
+-			SampleRate: rate,
+-			BitRate:    br,
++			DurationSeconds: duration,
++			CodecName:       st.CodecName,
++			Profile:         st.Profile,
++			Channels:        st.Channels,
++			SampleRate:      rate,
++			BitRate:         br,
+ 		}
+ 	}
+ 	return AudioInfo{}
+@@ -179,20 +214,42 @@ func parseFrameRate(frac string) int {
+ 	return int(float64(num) / float64(den))
+ }
+ 
++// exactFrameRate parses nominal or average frame rate to a float64.
++func exactFrameRate(values ...string) float64 {
++	for _, value := range values {
++		value = strings.TrimSpace(value)
++		num, den, ok := strings.Cut(value, "/")
++		if !ok {
++			num, den = value, "1"
++		}
++		n, e1 := strconv.ParseFloat(num, 64)
++		d, e2 := strconv.ParseFloat(den, 64)
++		if e1 == nil && e2 == nil && d > 0 && n/d >= 1 && n/d <= 240 {
++			return n / d
++		}
++	}
++	return 30
++}
++
+ // probeRotation reads rotation from display-matrix side data, else tags.
+ func probeRotation(s videoStream) int {
+ 	for _, sd := range s.SideDataList {
+-		if sd.SideDataType == "Display Matrix" {
+-			return sd.Rotation
++		if strings.EqualFold(sd.SideDataType, "Display Matrix") {
++			return NormalizeRotation(sd.Rotation)
+ 		}
+ 	}
+-	return s.Tags.Rotate
++	// Legacy rotate tags are clockwise; display matrices are counterclockwise.
++	return NormalizeRotation(-s.Tags.Rotate)
+ }
+ 
+ // probeBitDepth reads sample depth from the pix_fmt name, 8 when unknown.
+ // Matched on explicit suffixes since Contains "12" would match nv12.
+ func probeBitDepth(pixFmt string) int {
+-	for _, depth := range []int{10, 12, 14, 16} {
++	switch pixFmt {
++	case "nv15", "p010", "p010le", "p010be":
++		return 10
++	}
++	for _, depth := range []int{9, 10, 12, 14, 16} {
+ 		d := strconv.Itoa(depth)
+ 		if strings.HasSuffix(pixFmt, d+"le") || strings.HasSuffix(pixFmt, d+"be") {
+ 			return depth
+@@ -222,6 +279,22 @@ func probeHDR(s videoStream) bool {
+ 
+ // Keyframes runs ffprobe and parses keyframe timestamps in seconds.
+ func Keyframes(ctx context.Context, bin, fileURL, headers string) ([]float64, error) {
++	out, err := probePacketTimeline(ctx, bin, fileURL, headers)
++	if err != nil {
++		return nil, err
++	}
++	return ParseKeyframes(out), nil
++}
++
++func ProbeTimeline(ctx context.Context, bin, fileURL, headers string) ([]Keyframe, error) {
++	out, err := probePacketTimeline(ctx, bin, fileURL, headers)
++	if err != nil {
++		return nil, err
++	}
++	return ParseTimeline(out), nil
++}
++
++func probePacketTimeline(ctx context.Context, bin, fileURL, headers string) ([]byte, error) {
+ 	ctx, cancel := context.WithTimeout(ctx, keyframeTimeout)
+ 	defer cancel()
+ 
+@@ -239,7 +312,7 @@ func Keyframes(ctx context.Context, bin, fileURL, headers string) ([]float64, er
+ 	if err != nil {
+ 		return nil, fmt.Errorf("ffprobe keyframes %s: %w: %s", fileURL, err, serr)
+ 	}
+-	return ParseKeyframes(out), nil
++	return out, nil
+ }
+ 
+ // ParseKeyframes parses Keyframes output, keeping keyframe (K) packets,
+diff --git a/go-vod/ffmpeg/probe_test.go b/go-vod/ffmpeg/probe_test.go
+index 5fa6b877a6c2643792425989ea945cf9df9d7d51..2f6ccae9dfc196b8fe7bb0420dbd2aac3295eb30 100644
+--- a/go-vod/ffmpeg/probe_test.go
++++ b/go-vod/ffmpeg/probe_test.go
+@@ -14,6 +14,18 @@ func TestParseFrameRate(t *testing.T) {
+ 	require.Equal(t, 30, parseFrameRate(""))
+ }
+ 
++func TestProbeUsesContainerBitrateWhenVideoRateIsMissing(t *testing.T) {
++	for _, streamRate := range []string{"", "0", "N/A"} {
++		data := `{"streams":[{"codec_type":"video","codec_name":"hevc","bit_rate":"` + streamRate + `"}],"format":{"bit_rate":"25527654"}}`
++		info, err := ParseProbeJSON([]byte(data))
++		require.NoError(t, err)
++		require.Equal(t, 25527654, info.BitRate)
++	}
++	info, err := ParseProbeJSON([]byte(`{"streams":[{"codec_type":"video","bit_rate":"8000000"}],"format":{"bit_rate":"8200000"}}`))
++	require.NoError(t, err)
++	require.Equal(t, 8000000, info.BitRate, "prefer a known video rate")
++}
++
+ func TestParseProbeJSONHDR(t *testing.T) {
+ 	probe := func(stream string) bool {
+ 		info, err := ParseProbeJSON([]byte(`{"streams":[` + stream + `]}`))
+@@ -42,6 +54,9 @@ func TestParseProbeJSONHDR(t *testing.T) {
+ 			`"side_data_list":[{"side_data_type":"DOVI configuration record","dv_profile":5` + compat + `}]}`
+ 	}
+ 	require.True(t, probe(dovi(`,"dv_bl_signal_compatibility_id":0`)))
++	info, err := ParseProbeJSON([]byte(`{"streams":[` + dovi(`,"dv_bl_signal_compatibility_id":0`) + `]}`))
++	require.NoError(t, err)
++	require.True(t, info.DolbyVision)
+ 	require.True(t, probe(dovi(``)))
+ 	require.False(t, probe(dovi(`,"dv_bl_signal_compatibility_id":2`)))
+ 	require.False(t, probe(`{"codec_type":"video","codec_name":"dvvideo","pix_fmt":"yuv411p"}`))
+@@ -55,7 +70,7 @@ func TestParseProbeJSONBitDepth(t *testing.T) {
+ 	}
+ 
+ 	for pix, depth := range map[string]int{
+-		"yuv420p10le": 10, "p010le": 10, "p010be": 10,
++		"yuv420p10le": 10, "p010le": 10, "p010be": 10, "nv15": 10, "yuv420p9le": 9,
+ 		"yuv420p12be": 12, "p012le": 12, "gray16le": 16, "p016le": 16,
+ 	} {
+ 		require.Equal(t, depth, probe(pix), pix)
+diff --git a/go-vod/ffmpeg/rkmpp.go b/go-vod/ffmpeg/rkmpp.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..e93a132d1f4119e1942cfc7eca2881286c7fd555
+--- /dev/null
++++ b/go-vod/ffmpeg/rkmpp.go
+@@ -0,0 +1,314 @@
++package ffmpeg
++
++import (
++	"fmt"
++	"math"
++	"slices"
++	"strconv"
++	"strings"
++)
++
++const (
++	EncoderRKMPP     = "h264_rkmpp"
++	EncoderRKMPPHEVC = "hevc_rkmpp"
++)
++
++func IsRKMPPEncoder(encoder string) bool {
++	return encoder == EncoderRKMPP || encoder == EncoderRKMPPHEVC
++}
++
++// Keep one source packet clock across adaptive renditions when the original
++// audio already matches the supported AAC-LC configuration. Unknown profiles
++// and bitrates retain normalization rather than guessing compatibility/budget.
++func copyRKMPPAudio(audio AudioInfo) bool {
++	return strings.EqualFold(audio.CodecName, "aac") && strings.EqualFold(audio.Profile, "LC") &&
++		(audio.Channels == 1 || audio.Channels == 2) && (audio.SampleRate == 44100 || audio.SampleRate == 48000) &&
++		audio.BitRate > 0 && audio.BitRate <= 320000
++}
++
++func NormalizeRKMPPAudio(audio AudioInfo) bool {
++	return audio.CodecName != "" && !copyRKMPPAudio(audio)
++}
++
++// One audio encoder is shared by the HLS video qualities. It never opens a
++// hardware video decoder or encoder, and uses the same source timestamp clock.
++func buildRKMPPAudioArgs(s Spec) []string {
++	args := []string{"-hide_banner", "-loglevel", "warning"}
++	rate := s.AudioBitrate
++	if rate <= 0 {
++		rate = 192000
++	}
++	// A complete compatible AAC source can keep its original packets. It
++	// still has one separate audio playlist shared by every video quality.
++	if rate >= 192000 && copyRKMPPAudio(s.Audio) && s.Audio.SampleRate == 48000 && s.Audio.Channels == 2 &&
++		s.Audio.DurationSeconds > 0 && s.Audio.DurationSeconds >= s.EndAt-0.03 {
++		if s.StartAt > 0 {
++			args = append(args, "-ss", fmt.Sprintf("%.9f", s.StartAt))
++		}
++		args = append(args, remoteInputArgs(s.Headers)...)
++		args = append(args, "-i", s.Input, "-copyts", "-fflags", "+genpts", "-vn", "-map", "0:a:0", "-c:a", "copy")
++		if s.HLS {
++			// AAC priming can have negative DTS/PTS even when the MP4's
++			// presentation starts at zero. tfdt is unsigned: retaining that
++			// packet wraps browser audio timing and stalls after segment 0.
++			// Drop preroll packets without decoding/re-encoding source audio.
++			args = append(args, "-bsf:a", "noise=amount=0:drop='lt(pts,0)'")
++		}
++		if s.StartAt > 0 {
++			args = append(args, "-copypriorss:a", "0")
++		}
++		if s.EndAt > s.StartAt {
++			args = append(args, "-to", fmt.Sprintf("%.6f", s.EndAt))
++		}
++		return args
++	}
++	// AAC encodes 1024 samples per frame. Restart every profile on the same
++	// global frame grid with one warm-up frame for the encoder delay, rather
++	// than rebasing each cold seek on an arbitrary sample.
++	start := 0.0
++	if s.StartAt > 0 {
++		start = max(0, (math.Floor(s.StartAt*48000/1024)-1)*1024/48000)
++		args = append(args, "-ss", fmt.Sprintf("%.9f", start))
++	}
++	args = append(args, remoteInputArgs(s.Headers)...)
++	filter := fmt.Sprintf("aresample=async=1:first_pts=%d", int64(math.Round(start*48000)))
++	if remaining := s.EndAt - start; remaining > 0 {
++		// A shorter audio source must not make HLS wait for nonexistent tail
++		// fragments. Silence is cheap to encode and keeps the video playable.
++		filter += fmt.Sprintf(",apad=whole_dur=%.6f", remaining)
++	}
++	filter += fmt.Sprintf(",asetpts=N/SR/TB+%.9f/TB", start)
++	args = append(args, "-i", s.Input, "-copyts", "-fflags", "+genpts", "-vn", "-map", "0:a:0",
++		"-c:a", "aac", "-ac", "2", "-ar", "48000", "-b:a", strconv.Itoa(rate), "-af", filter)
++	if s.HLS {
++		// Encode the preroll for a settled AAC window, but do not publish its
++		// packets as the requested segment. Keep the first packet on the same
++		// global 1024-sample clock as a run that started at zero.
++		cut := int64(math.Ceil(s.StartAt*48000/1024)) * 1024
++		args = append(args, "-bsf:a", fmt.Sprintf("noise=amount=0:drop='lt(pts,%d)'", cut))
++	}
++	if s.EndAt > s.StartAt {
++		// copyts preserves absolute source timestamps, including on cold seeks.
++		args = append(args, "-to", fmt.Sprintf("%.6f", s.EndAt))
++	}
++	return args
++}
++
++func rkmppAudioBitrate(audio AudioInfo) int {
++	if audio.CodecName == "" {
++		return 0
++	}
++	if copyRKMPPAudio(audio) {
++		return max(192000, audio.BitRate)
++	}
++	return 192000
++}
++
++// RKMPPMinBitrate is the minimum advertised bandwidth for a hardware encode:
++// the encoder's 128kbps video floor, the chosen audio, and muxing headroom.
++// Stream-copy video does not use this allocation.
++func RKMPPMinBitrate(audio AudioInfo) int {
++	return ((128000+rkmppAudioBitrate(audio))*10 + 8) / 9
++}
++
++// RKMPPFrameRate returns a stable integer GOP cadence without guessing
++// an unsupported high frame rate.
++func RKMPPFrameRate(s Spec) int {
++	fps := s.FrameRateExact
++	if fps <= 0 || math.IsNaN(fps) || math.IsInf(fps, 0) {
++		fps = float64(s.FrameRate)
++	}
++	if fps <= 0 || fps > 240 {
++		return 30
++	}
++	return max(1, int(math.Round(fps)))
++}
++
++func usesRKMPPFrames(s Spec) bool {
++	if !s.RKMPP || (s.HDR && !s.RKMPPOpenCL) || s.BitDepth > 10 ||
++		(s.ForceSwTranspose && s.Rotation != 0) {
++		return false
++	}
++	if s.CodecName != "mjpeg" && s.PixelFormat != "" &&
++		!slices.Contains([]string{"yuv420p", "yuv420p10le", "yuvj420p", "nv12", "nv15", "p010le"}, s.PixelFormat) {
++		return false
++	}
++	return slices.Contains([]string{
++		"h264", "hevc", "vp8", "vp9", "av1", "h263", "mpeg1video",
++		"mpeg2video", "mpeg4", "mjpeg",
++	}, s.CodecName)
++}
++
++// SupportsRKMPPDecode checks source support independently of HDR mapping.
++func SupportsRKMPPDecode(s Spec) bool {
++	s.RKMPP, s.HDR = true, false
++	return usesRKMPPFrames(s)
++}
++
++// RKMPPInputPaced keeps asynchronous hardware workers running while FFmpeg
++// throttles input. Suspending the whole process can lose an in-flight frame.
++func RKMPPInputPaced(s Spec) bool {
++	return s.RKMPP && s.HLS && !s.Copy && !s.AudioOnly
++}
++
++// Build the v11 encoder prefix only; SegmentArgs remains the official
++// go-vod 0.7.0 fMP4 muxer, so init and timeline semantics are unchanged.
++// The v11 server enables it only when MEMORIES_RKMPP=1.
++func buildRKMPPArgs(s Spec) []string {
++	args := []string{"-hide_banner", "-loglevel", "warning"}
++	decodeStart := s.StartAt
++	if s.HLS && s.KeyframeGrid != nil {
++		decodeStart = s.KeyframeGrid.decodeStart(s.StartAt)
++	}
++	if decodeStart > 0 {
++		seek := fmt.Sprintf("%.6f", decodeStart)
++		if s.HLS && s.KeyframeGrid != nil {
++			// Seek just past rounded keyframe metadata, but retain that frame
++			// with noaccurate_seek and the trim threshold below.
++			seek = fmt.Sprintf("%.9f", decodeStart+10*rkmppKeyframeEpsilon)
++		}
++		args = append(args, "-ss", seek)
++		if s.HLS {
++			args = append(args, "-noaccurate_seek")
++		}
++	}
++	hardwareFrames := usesRKMPPFrames(s)
++	maliHDR := hardwareFrames && s.HDR && s.RKMPPOpenCL
++	if maliHDR {
++		args = append(args, "-init_hw_device", "rkmpp=memories",
++			"-init_hw_device", "opencl=memories_opencl@memories",
++			"-filter_hw_device", "memories_opencl")
++	}
++	if hardwareFrames {
++		args = append(args, "-hwaccel", "rkmpp", "-hwaccel_output_format", "drm_prime")
++	}
++	rotation := NormalizeRotation(s.Rotation)
++	if rotation != 0 {
++		args = append(args, "-noautorotate")
++	}
++	args = append(args, remoteInputArgs(s.Headers)...)
++	if RKMPPInputPaced(s) {
++		// Fill the player's buffer quickly on startup/seek, then follow its
++		// clock. Idle streams are still killed by the normal stream timeout.
++		args = append(args, "-readrate", "1", "-readrate_initial_burst", "18", "-readrate_catchup", "3.5")
++	}
++	args = append(args, "-i", s.Input, "-copyts", "-fflags", "+genpts")
++
++	filters := []string{}
++	if s.KeyframeGrid == nil {
++		filters = append(filters, fmt.Sprintf("fps=fps=%d:round=near", RKMPPFrameRate(s)))
++	}
++	if s.HLS && s.StartAt > 0 {
++		trim := fmt.Sprintf("trim=start=%.6f", s.StartAt)
++		if s.KeyframeGrid != nil {
++			trim = fmt.Sprintf("trim=start=%.9f", max(0, s.StartAt-rkmppKeyframeEpsilon))
++		}
++		filters = append(filters, trim)
++	}
++	dims := ""
++	if s.Width > 0 && s.Height > 0 {
++		dims = fmt.Sprintf(":w=%d:h=%d", s.Width, s.Height)
++	}
++	if hardwareFrames {
++		format := "nv12"
++		if maliHDR {
++			format = "p010"
++		}
++		filters = append(filters, "scale_rkrga=force_divisible_by=2:format="+format+dims)
++		if maliHDR {
++			filters = append(filters, "hwmap=derive_device=opencl:mode=read")
++			filters = append(filters, rkmppSourceColor(s)...)
++			filters = append(filters,
++				"tonemap_opencl=tonemap=hable:desat=0:format=nv12:primaries=bt709:transfer=bt709:matrix=bt709:range=tv",
++				"hwmap=derive_device=rkmpp:mode=write:reverse=1",
++				"format=drm_prime",
++			)
++		}
++	} else {
++		filters = append(filters, "scale=force_divisible_by=2"+dims)
++		if s.HDR {
++			filters = append(filters, rkmppSourceColor(s)...)
++			filters = append(filters,
++				"zscale=t=linear:npl=100", "format=gbrpf32le", "zscale=p=bt709",
++				"tonemap=hable:desat=0", "zscale=t=bt709:m=bt709:range=tv")
++		}
++		filters = append(filters, "format=nv12")
++	}
++	transpose := ""
++	switch rotation {
++	case 90:
++		transpose = "2"
++	case -90, 270:
++		transpose = "1"
++	case 180, -180:
++		transpose = "4"
++	}
++	if transpose != "" {
++		if hardwareFrames {
++			filters = append(filters, "vpp_rkrga=transpose="+transpose)
++		} else if transpose == "4" {
++			filters = append(filters, "transpose=1", "transpose=1")
++		} else {
++			filters = append(filters, "transpose="+transpose)
++		}
++	}
++	filters = append(filters, "setsar=1")
++	args = append(args, "-vf", strings.Join(filters, ","), "-map", "0:v:0", "-c:v", Encoder(s))
++	if s.RKMPPOutputCodec == "hevc" {
++		level := HEVCLevel(s.Width, s.Height, RKMPPFrameRate(s))
++		args = append(args, "-profile:v", "main", "-tier", "main", "-level:v", level.Name, "-tag:v", "hvc1")
++	}
++	if s.HDR {
++		args = append(args, "-color_primaries", "bt709", "-color_trc", "bt709",
++			"-colorspace", "bt709", "-color_range", "tv")
++	}
++	qp := s.QF
++	if qp <= 0 || qp > 51 {
++		qp = 24
++	}
++	if s.HLS && s.Bitrate > 0 {
++		audioRate := rkmppAudioBitrate(s.Audio)
++		videoRate := max(128000, s.Bitrate*9/10-audioRate)
++		args = append(args, "-rc_mode", "VBR", "-b:v", strconv.Itoa(videoRate),
++			"-maxrate", strconv.Itoa(videoRate), "-bufsize", strconv.Itoa(videoRate*2),
++			"-qp_init", strconv.Itoa(qp))
++	} else {
++		args = append(args, "-rc_mode", "CQP", "-qp_init", strconv.Itoa(qp))
++	}
++	if s.Audio.CodecName != "" && !s.SeparateAudio {
++		args = append(args, "-map", "0:a:0?")
++		if copyRKMPPAudio(s.Audio) {
++			args = append(args, "-c:a", "copy")
++			if s.HLS && s.StartAt > 0 {
++				args = append(args, "-copypriorss:a", "0")
++			}
++		} else {
++			af := "aresample=async=1"
++			if s.HLS && s.StartAt > 0 {
++				af = fmt.Sprintf("atrim=start=%.6f,", s.StartAt) + af
++			}
++			args = append(args, "-c:a", "aac", "-ac", "2", "-ar", "48000", "-b:a", "128k", "-af", af)
++		}
++	} else {
++		args = append(args, "-an")
++	}
++	return args
++}
++
++// setparams changes metadata only; it keeps the imported OpenCL surfaces on
++// the GPU. Do not invent PQ/HLG tags when the source does not identify them.
++func rkmppSourceColor(s Spec) []string {
++	var tags []string
++	for _, field := range []struct{ key, value string }{
++		{"color_trc", s.ColorTransfer}, {"color_primaries", s.ColorPrimaries},
++		{"colorspace", s.ColorSpace}, {"range", s.ColorRange},
++	} {
++		if field.value != "" && field.value != "unknown" && field.value != "unspecified" {
++			tags = append(tags, field.key+"="+field.value)
++		}
++	}
++	if len(tags) == 0 {
++		return nil
++	}
++	return []string{"setparams=" + strings.Join(tags, ":")}
++}
+diff --git a/go-vod/ffmpeg/rkmpp_bandwidth_test.go b/go-vod/ffmpeg/rkmpp_bandwidth_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..18665bf13c0c045b0588b678de1832c525eba656
+--- /dev/null
++++ b/go-vod/ffmpeg/rkmpp_bandwidth_test.go
+@@ -0,0 +1,54 @@
++package ffmpeg
++
++import "testing"
++
++// TestRKMPPMinBitrateCoversAudio checks that RKMPPMinBitrate accounts for
++// the audio track overhead, so low-resolution renditions are still advertised
++// with enough bandwidth to include both the video floor and the audio.
++func TestRKMPPMinBitrateCoversAudio(t *testing.T) {
++	for _, tc := range []struct {
++		name    string
++		audio   AudioInfo
++		wantMin int // must be strictly above audio-only
++	}{
++		{
++			name:    "no audio",
++			audio:   AudioInfo{},
++			wantMin: 128000, // just video floor * headroom
++		},
++		{
++			name:    "copyable AAC-LC 128k",
++			audio:   AudioInfo{CodecName: "aac", Profile: "LC", Channels: 2, SampleRate: 48000, BitRate: 128000},
++			wantMin: 128000 + 128000, // video floor + audio
++		},
++		{
++			name:    "normalized multi-channel (128k encoded)",
++			audio:   AudioInfo{CodecName: "eac3", Channels: 6, SampleRate: 48000, BitRate: 384000},
++			wantMin: 128000 + 128000, // video floor + 128k normalized
++		},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			got := RKMPPMinBitrate(tc.audio)
++			// The formula is ((128k + audioBitrate) * 10 + 8) / 9.
++			// At minimum both terms must be represented.
++			audioPart := rkmppAudioBitrate(tc.audio)
++			plain := 128000 + audioPart
++			if got <= 0 {
++				t.Errorf("RKMPPMinBitrate(%+v) = %d, want > 0", tc.audio, got)
++			}
++			// The result must be >= the plain sum (10/9 mux headroom applied).
++			if got < plain {
++				t.Errorf("RKMPPMinBitrate(%+v) = %d, want >= %d", tc.audio, got, plain)
++			}
++		})
++	}
++}
++
++// TestRKMPPMinBitrateIsStableForSilent ensures silent videos don't panic
++// and return a sensible positive floor.
++func TestRKMPPMinBitrateIsStableForSilent(t *testing.T) {
++	got := RKMPPMinBitrate(AudioInfo{})
++	if got <= 0 {
++		t.Errorf("RKMPPMinBitrate(silent) = %d, want > 0", got)
++	}
++}
+diff --git a/go-vod/ffmpeg/rkmpp_grid_hardware_test.go b/go-vod/ffmpeg/rkmpp_grid_hardware_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..4bbd5051500bb962f329587a86aedf9ce99ea5e9
+--- /dev/null
++++ b/go-vod/ffmpeg/rkmpp_grid_hardware_test.go
+@@ -0,0 +1,76 @@
++package ffmpeg
++
++import (
++	"context"
++	"fmt"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"testing"
++
++	"github.com/stretchr/testify/require"
++)
++
++// Fractional, irregular Original GOPs must survive RGA resizing, VBR encoding
++// and cold restarts. Each fragment must decode using the original cached init.
++func TestRKMPPHardwareSourceGrid(t *testing.T) {
++	if os.Getenv("MEMORIES_RKMPP_HW_TEST") != "1" {
++		t.Skip("set MEMORIES_RKMPP_HW_TEST=1 on RK3588 with MPP/RGA devices")
++	}
++	bin, err := exec.LookPath("ffmpeg")
++	require.NoError(t, err)
++	probe, err := exec.LookPath("ffprobe")
++	require.NoError(t, err)
++	dir := t.TempDir()
++	src := filepath.Join(dir, "irregular.mp4")
++	out, err := exec.Command(bin, "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=640x360:r=30000/1001",
++		"-t", "11.011", "-c:v", "libx264", "-threads", "2", "-bf", "0", "-g", "1000", "-sc_threshold", "0",
++		"-force_key_frames", "0,0.93,2.93,6.93,9.40", src).CombinedOutput()
++	require.NoError(t, err, string(out))
++	info, err := Probe(context.Background(), probe, src, "")
++	require.NoError(t, err)
++	keys, err := Keyframes(context.Background(), probe, src, "")
++	require.NoError(t, err)
++	grid := NewRKMPPKeyframeGrid(CopySegments(keys, info.Duration), info.FrameRate)
++	require.NotNil(t, grid)
++	require.Len(t, grid.Segments, 5)
++	for _, codec := range []string{"h264", "hevc"} {
++		for _, size := range []struct{ w, h int }{{640, 360}, {320, 180}} {
++			t.Run(fmt.Sprintf("%s-%d", codec, size.w), func(t *testing.T) {
++				var initial []byte
++				for _, startID := range []int{0, 2} {
++					run := t.TempDir()
++					s := Spec{Bin: bin, Input: src, RKMPP: true, RKMPPOutputCodec: codec,
++						CodecName: info.CodecName, PixelFormat: info.PixelFormat, BitDepth: info.BitDepth,
++						FrameRate: info.FrameRate, FrameRateExact: info.FrameRateExact,
++						Width: size.w, Height: size.h, QF: 24, Bitrate: 1300000, HLS: true, ChunkSize: 3,
++						StartAt: grid.Segments[startID].Start, KeyframeGrid: grid}
++					require.True(t, usesRKMPPFrames(s))
++					init := filepath.Join(run, "init.mp4")
++					out, err := exec.Command(bin, SegmentArgs(s, startID, filepath.Join(run, "video-%06d.m4s"), init)...).CombinedOutput()
++					require.NoError(t, err, string(out))
++					header, err := os.ReadFile(init)
++					require.NoError(t, err)
++					if startID == 0 {
++						initial = header
++					} else {
++						require.Equal(t, initial, header, "cold start must preserve the cached init")
++					}
++					files, err := filepath.Glob(filepath.Join(run, "video-*.m4s"))
++					require.NoError(t, err)
++					require.Len(t, files, len(grid.Segments)-startID, "no extra periodic/scene IDRs")
++					for id := startID; id < len(grid.Segments); id++ {
++						segment, err := os.ReadFile(filepath.Join(run, fmt.Sprintf("video-%06d.m4s", id)))
++						require.NoError(t, err)
++						joined := filepath.Join(run, "joined.mp4")
++						require.NoError(t, os.WriteFile(joined, append(append([]byte{}, initial...), segment...), 0644))
++						out, err := exec.Command(bin, "-v", "error", "-xerror", "-i", joined, "-f", "null", "-").CombinedOutput()
++						require.NoError(t, err, string(out))
++						seg := grid.Segments[id]
++						assertPacketGrid(t, probe, joined, seg.Start, seg.Duration)
++					}
++				}
++			})
++		}
++	}
++}
+diff --git a/go-vod/ffmpeg/rkmpp_hardware_test.go b/go-vod/ffmpeg/rkmpp_hardware_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..5d17c12d44acfca6a0267da40988f6ddaaa43127
+--- /dev/null
++++ b/go-vod/ffmpeg/rkmpp_hardware_test.go
+@@ -0,0 +1,215 @@
++package ffmpeg
++
++import (
++	"context"
++	"encoding/json"
++	"fmt"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"strconv"
++	"strings"
++	"testing"
++
++	"github.com/stretchr/testify/require"
++)
++
++// Explicit opt-in: these tests must execute on a Rockchip device, never
++// silently pass on a CI runner because only encoder names were listed.
++func TestRKMPPHardwareTimeline(t *testing.T) {
++	if os.Getenv("MEMORIES_RKMPP_HW_TEST") != "1" {
++		t.Skip("set MEMORIES_RKMPP_HW_TEST=1 on RK3588 with MPP/RGA devices")
++	}
++	bin, err := exec.LookPath("ffmpeg")
++	require.NoError(t, err)
++	probe, err := exec.LookPath("ffprobe")
++	require.NoError(t, err)
++	dir := t.TempDir()
++	src := filepath.Join(dir, "fractional.mp4")
++	out, err := exec.Command(bin, "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=640x360:r=30000/1001",
++		"-f", "lavfi", "-i", "sine=sample_rate=44100", "-t", "12", "-c:v", "libx264", "-threads", "2",
++		"-g", "120", "-c:a", "aac", "-ac", "2", src).CombinedOutput()
++	require.NoError(t, err, string(out))
++	info, err := Probe(context.Background(), probe, src, "")
++	require.NoError(t, err)
++
++	for _, codec := range []string{"h264", "hevc"} {
++		t.Run(codec, func(t *testing.T) {
++			var initial []byte
++			for _, size := range []struct{ w, h int }{{640, 360}, {320, 180}} {
++				for _, start := range []int{0, 6} {
++					run := filepath.Join(dir, fmt.Sprintf("%s-%d-%d", codec, size.w, start))
++					require.NoError(t, os.Mkdir(run, 0755))
++					s := Spec{Bin: bin, Input: src, RKMPP: true, RKMPPOutputCodec: codec,
++						CodecName: info.CodecName, PixelFormat: info.PixelFormat, BitDepth: info.BitDepth,
++						FrameRate: info.FrameRate, FrameRateExact: info.FrameRateExact,
++						Width: size.w, Height: size.h, QF: 24, Bitrate: 1500000, HLS: true, ChunkSize: 3,
++						StartAt: float64(start), Audio: info.Audio}
++					require.True(t, usesRKMPPFrames(s))
++					init := filepath.Join(run, "init.mp4")
++					args := SegmentArgs(s, start/3, filepath.Join(run, "video-%06d.m4s"), init)
++					args = append(args[:len(args)-1], "-to", strconv.Itoa(start+6), "-")
++					out, err := exec.Command(bin, args...).CombinedOutput()
++					require.NoError(t, err, string(out))
++					initBytes, err := os.ReadFile(init)
++					require.NoError(t, err)
++					if start == 0 {
++						initial = initBytes
++					} else {
++						require.Equal(t, initial, initBytes, "cold seek must reuse cached init")
++					}
++					for id := start / 3; id < start/3+2; id++ {
++						segment, err := os.ReadFile(filepath.Join(run, fmt.Sprintf("video-%06d.m4s", id)))
++						require.NoError(t, err)
++						joined := filepath.Join(run, fmt.Sprintf("joined-%d.mp4", id))
++						require.NoError(t, os.WriteFile(joined, append(append([]byte{}, initial...), segment...), 0644))
++						out, err = exec.Command(bin, "-v", "error", "-xerror", "-i", joined, "-map", "0", "-f", "null", "-").CombinedOutput()
++						require.NoError(t, err, string(out))
++						assertPacketGrid(t, probe, joined, float64(id*3), 3)
++					}
++				}
++			}
++		})
++	}
++}
++
++func assertPacketGrid(t *testing.T, probe, file string, start, duration float64) {
++	t.Helper()
++	out, err := exec.Command(probe, "-v", "error", "-select_streams", "v:0", "-show_entries",
++		"packet=pts_time,duration_time,flags", "-of", "json", file).Output()
++	require.NoError(t, err)
++	var data struct {
++		Packets []struct {
++			PTS      string `json:"pts_time"`
++			Duration string `json:"duration_time"`
++			Flags    string `json:"flags"`
++		} `json:"packets"`
++	}
++	require.NoError(t, json.Unmarshal(out, &data))
++	require.NotEmpty(t, data.Packets)
++	first := data.Packets[0]
++	require.True(t, strings.Contains(first.Flags, "K"), "segment must start independently")
++	firstPTS, err := strconv.ParseFloat(first.PTS, 64)
++	require.NoError(t, err)
++	last := data.Packets[len(data.Packets)-1]
++	lastPTS, err := strconv.ParseFloat(last.PTS, 64)
++	require.NoError(t, err)
++	lastDuration, err := strconv.ParseFloat(last.Duration, 64)
++	require.NoError(t, err)
++	require.InDelta(t, start, firstPTS, 0.0001)
++	require.InDelta(t, start+duration, lastPTS+lastDuration, 0.0001)
++	firstDuration, err := strconv.ParseFloat(first.Duration, 64)
++	require.NoError(t, err)
++	require.Greater(t, firstDuration, 0.0)
++	for i, packet := range data.Packets {
++		pts, err := strconv.ParseFloat(packet.PTS, 64)
++		require.NoError(t, err)
++		dur, err := strconv.ParseFloat(packet.Duration, 64)
++		require.NoError(t, err)
++		require.InDelta(t, firstDuration, dur, 0.0001, "packet %d duration: missing frame", i)
++		require.InDelta(t, start+float64(i)*firstDuration, pts, 0.0001, "packet %d timestamp", i)
++	}
++}
++
++// Run beyond the fast initial burst: every 50 fps frame must survive normal
++// input pacing, and every segment must decode without earlier references.
++func TestRKMPPHardwarePacedCadence(t *testing.T) {
++	if os.Getenv("MEMORIES_RKMPP_HW_TEST") != "1" {
++		t.Skip("set MEMORIES_RKMPP_HW_TEST=1 on RK3588 with MPP/RGA devices")
++	}
++	bin, err := exec.LookPath("ffmpeg")
++	require.NoError(t, err)
++	probe, err := exec.LookPath("ffprobe")
++	require.NoError(t, err)
++	dir := t.TempDir()
++	src := filepath.Join(dir, "source50.mp4")
++	out, err := exec.Command(bin, "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=1280x720:r=50",
++		"-t", "30", "-c:v", "libx264", "-preset", "ultrafast", "-threads", "2", src).CombinedOutput()
++	require.NoError(t, err, string(out))
++	for _, codec := range []string{"h264", "hevc"} {
++		t.Run(codec, func(t *testing.T) {
++			run := t.TempDir()
++			s := Spec{RKMPP: true, RKMPPOutputCodec: codec, Input: src,
++				CodecName: "h264", PixelFormat: "yuv420p", BitDepth: 8,
++				FrameRate: 50, FrameRateExact: 50, Width: 854, Height: 480,
++				QF: 24, Bitrate: 1300000, HLS: true, ChunkSize: 3}
++			init := filepath.Join(run, "init.mp4")
++			out, err := exec.Command(bin, SegmentArgs(s, 0, filepath.Join(run, "video-%06d.m4s"), init)...).CombinedOutput()
++			require.NoError(t, err, string(out))
++			header, err := os.ReadFile(init)
++			require.NoError(t, err)
++			for id := 0; id < 10; id++ {
++				segment, err := os.ReadFile(filepath.Join(run, fmt.Sprintf("video-%06d.m4s", id)))
++				require.NoError(t, err)
++				joined := filepath.Join(run, "joined.mp4")
++				require.NoError(t, os.WriteFile(joined, append(append([]byte{}, header...), segment...), 0644))
++				out, err := exec.Command(bin, "-v", "error", "-xerror", "-i", joined, "-f", "null", "-").CombinedOutput()
++				require.NoError(t, err, string(out))
++				assertPacketGrid(t, probe, joined, float64(id*3), 3)
++			}
++		})
++	}
++}
++
++func TestRKMPPHardwareHDR(t *testing.T) {
++	if os.Getenv("MEMORIES_RKMPP_HW_TEST") != "1" {
++		t.Skip("set MEMORIES_RKMPP_HW_TEST=1 on RK3588 with Mali OpenCL")
++	}
++	bin, err := exec.LookPath("ffmpeg")
++	require.NoError(t, err)
++	probe, err := exec.LookPath("ffprobe")
++	require.NoError(t, err)
++	for _, tc := range []struct{ transfer, size string }{
++		{"smpte2084", "3840x2160"}, {"arib-std-b67", "640x360"},
++	} {
++		t.Run(tc.transfer, func(t *testing.T) {
++			dir := t.TempDir()
++			src := filepath.Join(dir, "hdr.mp4")
++			out, err := exec.Command(bin, "-v", "error", "-f", "lavfi", "-i", "testsrc2=s="+tc.size+":r=24",
++				"-t", "3", "-pix_fmt", "yuv420p10le", "-c:v", "libx265", "-preset", "ultrafast",
++				"-x265-params", "pools=2:frame-threads=1:colorprim=bt2020:transfer="+tc.transfer+":colormatrix=bt2020nc", "-color_primaries", "bt2020",
++				"-color_trc", tc.transfer, "-colorspace", "bt2020nc", src).CombinedOutput()
++			require.NoError(t, err, string(out))
++			info, err := Probe(context.Background(), probe, src, "")
++			require.NoError(t, err)
++			require.True(t, info.HDR)
++			require.Equal(t, 10, info.BitDepth)
++			require.Equal(t, tc.transfer, info.ColorTransfer, "fixture must identify PQ/HLG")
++			require.Equal(t, "bt2020", info.ColorPrimaries)
++			for _, codec := range []string{"h264", "hevc"} {
++				s := Spec{Bin: bin, Input: src, RKMPP: true, RKMPPOutputCodec: codec, RKMPPOpenCL: true,
++					CodecName: info.CodecName, PixelFormat: info.PixelFormat, BitDepth: info.BitDepth, HDR: info.HDR,
++					ColorTransfer: info.ColorTransfer, ColorPrimaries: info.ColorPrimaries,
++					ColorSpace: info.ColorSpace, ColorRange: info.ColorRange,
++					FrameRate: info.FrameRate, FrameRateExact: info.FrameRateExact,
++					Width: 640, Height: 360, QF: 24, Bitrate: 1500000, HLS: true, ChunkSize: 3}
++				require.NoError(t, ProbeRKMPPOpenCL(context.Background(), s), "real source OpenCL frame probe")
++				init := filepath.Join(dir, codec+"-init.mp4")
++				pattern := filepath.Join(dir, codec+"-%06d.m4s")
++				out, err := exec.Command(bin, SegmentArgs(s, 0, pattern, init)...).CombinedOutput()
++				require.NoError(t, err, string(out))
++				initBytes, err := os.ReadFile(init)
++				require.NoError(t, err)
++				seg, err := os.ReadFile(filepath.Join(dir, codec+"-000000.m4s"))
++				require.NoError(t, err)
++				joined := filepath.Join(dir, codec+".mp4")
++				require.NoError(t, os.WriteFile(joined, append(initBytes, seg...), 0644))
++				out, err = exec.Command(bin, "-v", "error", "-xerror", "-i", joined, "-f", "null", "-").CombinedOutput()
++				require.NoError(t, err, string(out))
++				out, err = exec.Command(probe, "-v", "error", "-show_streams", "-of", "json", joined).Output()
++				require.NoError(t, err)
++				var data probeOutput
++				require.NoError(t, json.Unmarshal(out, &data))
++				require.Len(t, data.Streams, 1)
++				stream := data.Streams[0]
++				require.Equal(t, codec, stream.CodecName)
++				require.Equal(t, "bt709", stream.ColorTransfer)
++				require.Equal(t, "bt709", stream.ColorPrimaries)
++				require.Equal(t, "bt709", stream.ColorSpace)
++				require.Equal(t, 8, probeBitDepth(stream.PixFmt))
++				require.Equal(t, 640, stream.Width)
++				require.Equal(t, 360, stream.Height)
++			}
++		})
++	}
++}
+diff --git a/go-vod/ffmpeg/rkmpp_keyframes.go b/go-vod/ffmpeg/rkmpp_keyframes.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..1928110528155079122f9bc4f3494d046613e81b
+--- /dev/null
++++ b/go-vod/ffmpeg/rkmpp_keyframes.go
+@@ -0,0 +1,69 @@
++package ffmpeg
++
++import (
++	"math"
++	"slices"
++	"strconv"
++	"strings"
++)
++
++const rkmppKeyframeEpsilon = 0.000001
++
++// RKMPPKeyframeGrid is an immutable plan shared by a file's video renditions.
++// A pointer keeps Spec comparable for the hardware-probe cache.
++type RKMPPKeyframeGrid struct {
++	Segments []Segment
++	GOPSize  int
++}
++
++// NewRKMPPKeyframeGrid accepts only bounded grids suitable for adaptive HLS.
++// Dense, very long, or incomplete grids keep the existing fixed-GOP path.
++func NewRKMPPKeyframeGrid(segments []Segment, fps int) *RKMPPKeyframeGrid {
++	if len(segments) < 2 || fps < 1 || fps > 240 {
++		return nil
++	}
++	end, bytes := 0.0, 0
++	for _, s := range segments {
++		if math.IsNaN(s.Start) || math.IsInf(s.Start, 0) || math.IsNaN(s.Duration) || math.IsInf(s.Duration, 0) ||
++			math.Abs(s.Start-end) > 0.0001 || s.Duration <= 0 || s.Duration > 6.0001 {
++			return nil
++		}
++		end = s.Start + s.Duration
++		bytes += len(strconv.FormatFloat(math.Max(0, s.Start-rkmppKeyframeEpsilon), 'f', 9, 64)) + 1
++		if bytes > 64*1024 {
++			return nil
++		}
++	}
++	if float64(len(segments)-2) > end*4 {
++		return nil
++	}
++	return &RKMPPKeyframeGrid{Segments: slices.Clone(segments), GOPSize: int(math.Ceil(end*float64(fps))) + fps}
++}
++
++func (g *RKMPPKeyframeGrid) forceTimes(start float64) string {
++	times := make([]string, 0, len(g.Segments))
++	for _, s := range g.Segments {
++		if s.Start >= start-rkmppKeyframeEpsilon {
++			// ffprobe rounds to microseconds. Rounding upward must not move
++			// an IDR to the following frame or create a one-frame head segment.
++			times = append(times, strconv.FormatFloat(math.Max(0, s.Start-rkmppKeyframeEpsilon), 'f', 9, 64))
++		}
++	}
++	return strings.Join(times, ",")
++}
++
++// Open-GOP leading pictures need the preceding random-access point. Seeking
++// to their presentation time can land on the following CRA by decode time and
++// silently discard those pictures. Trim still uses the requested StartAt.
++func (g *RKMPPKeyframeGrid) decodeStart(start float64) float64 {
++	for i, s := range g.Segments {
++		if math.Abs(s.Start-start) < rkmppKeyframeEpsilon && s.KeyframeAt != 0 && i > 0 {
++			previous := g.Segments[i-1]
++			if previous.KeyframeAt != 0 {
++				return previous.KeyframeAt
++			}
++			return previous.Start
++		}
++	}
++	return start
++}
+diff --git a/go-vod/ffmpeg/rkmpp_keyframes_test.go b/go-vod/ffmpeg/rkmpp_keyframes_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..9617b1df2f4c75d61cf2847cd15d887bff2e1356
+--- /dev/null
++++ b/go-vod/ffmpeg/rkmpp_keyframes_test.go
+@@ -0,0 +1,57 @@
++package ffmpeg
++
++import (
++	"math"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/stretchr/testify/require"
++)
++
++func TestRKMPPKeyframeGrid(t *testing.T) {
++	segs := CopySegments([]float64{0, .934267, 2.936267, 6.940267, 9.4094}, 11*time.Second+11*time.Millisecond)
++	g := NewRKMPPKeyframeGrid(segs, 30)
++	require.NotNil(t, g)
++	require.Greater(t, g.GOPSize, 330)
++	require.Equal(t, "2.936266000,6.940266000,9.409399000", g.forceTimes(2.936267))
++	segs[0].Start = 42
++	require.Zero(t, g.Segments[0].Start, "the shared plan owns an immutable copy")
++
++	s := Spec{RKMPP: true, RKMPPOutputCodec: "hevc", HLS: true, Input: "/source.mp4",
++		CodecName: "h264", PixelFormat: "yuv420p", FrameRate: 30, FrameRateExact: 30000.0 / 1001,
++		Width: 854, Height: 480, ChunkSize: 3, StartAt: 2.936267, KeyframeGrid: g}
++	args := SegmentArgs(s, 2, "/cache/video-%06d.m4s", "/cache/init.mp4")
++	assertHasPair(t, args, "-ss", "2.936277000")
++	assertHasPair(t, args, "-flags:v", "+low_delay")
++	assertHasPair(t, args, "-hls_time", copyHLSTime)
++	assertHasPair(t, args, "-force_key_frames", g.forceTimes(s.StartAt))
++	require.Contains(t, strings.Join(args, " "), "trim=start=2.936266000")
++	require.NotContains(t, strings.Join(args, " "), "fps=fps=", "fractional/VFR source PTS must survive")
++
++	key := HWProbeKey(s)
++	require.Nil(t, key.KeyframeGrid)
++	cache := map[Spec]bool{key: true}
++	require.True(t, cache[HWProbeKey(s)], "Spec must remain a valid hardware cache key")
++}
++
++func TestRKMPPKeyframeGridRejectsUnsuitablePlans(t *testing.T) {
++	for _, segs := range [][]Segment{
++		nil, {{Start: 0, Duration: 1}},
++		{{Start: 0, Duration: 7}, {Start: 7, Duration: 1}},
++		{{Start: 0, Duration: 1}, {Start: 2, Duration: 1}},
++		{{Start: 0, Duration: 1}, {Start: 1, Duration: math.NaN()}},
++	} {
++		require.Nil(t, NewRKMPPKeyframeGrid(segs, 30))
++	}
++	dense := make([]Segment, 100)
++	for i := range dense {
++		dense[i] = Segment{Start: float64(i) / 60, Duration: 1.0 / 60}
++	}
++	require.Nil(t, NewRKMPPKeyframeGrid(dense, 60))
++	large := make([]Segment, 6000)
++	for i := range large {
++		large[i] = Segment{Start: float64(i), Duration: 1}
++	}
++	require.Nil(t, NewRKMPPKeyframeGrid(large, 30), "the timestamp argument must stay within exec limits")
++}
+diff --git a/go-vod/ffmpeg/rkmpp_test.go b/go-vod/ffmpeg/rkmpp_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..d7c17b3019c003c7c046ba816e15592174443341
+--- /dev/null
++++ b/go-vod/ffmpeg/rkmpp_test.go
+@@ -0,0 +1,123 @@
++package ffmpeg
++
++import (
++	"slices"
++	"strings"
++	"testing"
++
++	"github.com/stretchr/testify/require"
++)
++
++func assertHasPair(t *testing.T, args []string, key, value string) {
++	t.Helper()
++	for i := 0; i+1 < len(args); i++ {
++		if args[i] == key && args[i+1] == value {
++			return
++		}
++	}
++	t.Fatalf("expected %q %q in argv: %s", key, value, strings.Join(args, " "))
++}
++
++func TestRKMPPv11EncoderDispatch(t *testing.T) {
++	require.Equal(t, EncoderX264, Encoder(Spec{}))
++	require.Equal(t, EncoderRKMPP, Encoder(Spec{RKMPP: true}))
++	require.Equal(t, EncoderRKMPPHEVC, Encoder(Spec{RKMPP: true, RKMPPOutputCodec: "hevc"}))
++	require.Equal(t, EncoderCopy, Encoder(Spec{RKMPP: true, Copy: true}))
++	require.Equal(t, EncoderVAAPI, Encoder(Spec{VAAPI: true}))
++}
++
++func TestRKMPPInputPacingOnlyAppliesToEncodedHLSVideo(t *testing.T) {
++	s := Spec{RKMPP: true, HLS: true, Input: "/tmp/video.mp4"}
++	args := BuildArgs(s)
++	assertHasPair(t, args, "-readrate", "1")
++	assertHasPair(t, args, "-readrate_initial_burst", "18")
++	assertHasPair(t, args, "-readrate_catchup", "3.5")
++	require.Less(t, slices.Index(args, "-readrate"), slices.Index(args, "-i"))
++	for _, other := range []Spec{
++		{RKMPP: true, HLS: true, Copy: true},
++		{RKMPP: true, HLS: true, AudioOnly: true},
++		{RKMPP: true}, {HLS: true},
++	} {
++		require.False(t, RKMPPInputPaced(other))
++		require.NotContains(t, BuildArgs(other), "-readrate")
++	}
++}
++
++func TestRKMPPv11FMP4ColdSeekKeepsV11Muxer(t *testing.T) {
++	s := Spec{
++		RKMPP: true, HLS: true, StartAt: 12, Input: "/tmp/video.mp4",
++		CodecName: "hevc", PixelFormat: "yuv420p10le", BitDepth: 10,
++		FrameRate: 30, Width: 1280, Height: 720, ChunkSize: 3,
++		Bitrate: 6000000, Audio: AudioInfo{CodecName: "aac", Profile: "LC", SampleRate: 48000, Channels: 2, BitRate: 160000},
++	}
++	args := SegmentArgs(s, 3, "/tmp/720p-%06d.m4s", "/tmp/720p-init.m4s")
++	joined := strings.Join(args, " ")
++	assertHasPair(t, args, "-hwaccel", "rkmpp")
++	assertHasPair(t, args, "-hwaccel_output_format", "drm_prime")
++	assertHasPair(t, args, "-c:v", "h264_rkmpp")
++	assertHasPair(t, args, "-hls_segment_type", "fmp4")
++	assertHasPair(t, args, "-hls_fmp4_init_filename", "/tmp/720p-init.m4s")
++	assertHasPair(t, args, "-hls_segment_filename", "/tmp/720p-%06d.m4s")
++	assertHasPair(t, args, "-g", "90")
++	assertHasPair(t, args, "-keyint_min", "90")
++	assertHasPair(t, args, "-copyts", "-fflags")
++	require.Contains(t, joined, "scale_rkrga=")
++	require.Contains(t, joined, "movflags=+frag_discont+negative_cts_offsets:use_editlist=0")
++	require.NotContains(t, joined, "-force_key_frames")
++	require.Contains(t, joined, "-c:a copy")
++}
++
++func TestRKMPPv11HEVCHasHVC1Tag(t *testing.T) {
++	s := Spec{RKMPP: true, RKMPPOutputCodec: "hevc", Input: "/tmp/video.mp4", CodecName: "h264", Width: 1920, Height: 1080, FrameRate: 30}
++	args := MP4Args(s)
++	assertHasPair(t, args, "-c:v", "hevc_rkmpp")
++	assertHasPair(t, args, "-tag:v", "hvc1")
++	assertHasPair(t, args, "-f", "mp4")
++}
++
++func TestRKMPPv11HardwareDecodeFallsBackForUnsupportedFormats(t *testing.T) {
++	for _, tc := range []struct {
++		codec, pixel string
++		depth        int
++		hdr          bool
++	}{
++		{"prores", "yuv422p10le", 10, false},
++		{"hevc", "yuv444p10le", 10, false},
++		{"hevc", "yuv420p12le", 12, false},
++		{"hevc", "p010le", 10, true},
++		{"hevc", "yuv420p9le", 9, false},
++		{"hevc", "yuv420p10be", 10, false},
++	} {
++		s := Spec{RKMPP: true, Input: "/tmp/video.mp4", CodecName: tc.codec, PixelFormat: tc.pixel,
++			BitDepth: tc.depth, HDR: tc.hdr, Width: 1280, Height: 720}
++		args := BuildArgs(s)
++		joined := strings.Join(args, " ")
++		require.False(t, slices.Contains(args, "rkmpp"), joined)
++		require.NotContains(t, joined, "scale_rkrga", joined)
++		require.Contains(t, joined, "-c:v h264_rkmpp")
++	}
++}
++
++func TestRKMPPv11NeverAltersDirectStreamCopy(t *testing.T) {
++	s := Spec{RKMPP: true, Copy: true, CodecName: "hevc", Input: "/tmp/original.mp4", HLS: true, ChunkSize: 3}
++	args := SegmentArgs(s, 0, "/tmp/direct-%06d.m4s", "/tmp/direct-init.m4s")
++	joined := strings.Join(args, " ")
++	require.Contains(t, joined, "-c:v copy")
++	require.NotContains(t, joined, "scale_rkrga")
++	assertHasPair(t, args, "-hls_segment_type", "fmp4")
++}
++
++func TestRKMPPv11SdrAndMaliHDRSeparation(t *testing.T) {
++	s := Spec{RKMPP: true, Input: "/tmp/video.mp4", CodecName: "hevc", PixelFormat: "p010le",
++		BitDepth: 10, HDR: true, RKMPPOpenCL: true, Width: 1280, Height: 720}
++	args := BuildArgs(s)
++	joined := strings.Join(args, " ")
++	require.Contains(t, joined, "scale_rkrga=force_divisible_by=2:format=p010")
++	require.Contains(t, joined, "tonemap_opencl")
++	require.Contains(t, joined, "format=drm_prime")
++	s.RKMPPOpenCL = false
++	cpu := strings.Join(BuildArgs(s), " ")
++	require.NotContains(t, cpu, "scale_rkrga")
++	require.Contains(t, cpu, "tonemap=hable")
++	require.NotContains(t, cpu, "tonemap_opencl")
++}
+diff --git a/go-vod/ffmpeg/rotation.go b/go-vod/ffmpeg/rotation.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..0f9e8af65b579b58e759645e82f4c050d43bf06c
+--- /dev/null
++++ b/go-vod/ffmpeg/rotation.go
+@@ -0,0 +1,18 @@
++package ffmpeg
++
++// NormalizeRotation uses the display-matrix convention: positive angles rotate
++// counterclockwise. Equivalent turns must produce the same filter and metadata.
++func NormalizeRotation(rotation int) int {
++	rotation %= 360
++	if rotation > 180 {
++		rotation -= 360
++	} else if rotation <= -180 {
++		rotation += 360
++	}
++	return rotation
++}
++
++func SwapsAxes(rotation int) bool {
++	r := NormalizeRotation(rotation)
++	return r == 90 || r == -90
++}
+diff --git a/go-vod/ffmpeg/rotation_test.go b/go-vod/ffmpeg/rotation_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..8ca0a382c2942aaf8d35a7b8dff34bc83bd81697
+--- /dev/null
++++ b/go-vod/ffmpeg/rotation_test.go
+@@ -0,0 +1,54 @@
++package ffmpeg
++
++import (
++	"fmt"
++	"strings"
++	"testing"
++
++	"github.com/stretchr/testify/require"
++)
++
++func TestRotationConventions(t *testing.T) {
++	for input, want := range map[int]int{0: 0, 360: 0, -360: 0, 90: 90, -270: 90, -90: -90, 270: -90, 180: 180, -180: 180, 450: 90} {
++		t.Run(fmt.Sprint(input), func(t *testing.T) {
++			require.Equal(t, want, NormalizeRotation(input))
++			require.Equal(t, want == 90 || want == -90, SwapsAxes(input))
++			info, err := ParseProbeJSON([]byte(fmt.Sprintf(`{"streams":[{"codec_type":"video","side_data_list":[{"side_data_type":"Display Matrix","rotation":%d}]}]}`, input)))
++			require.NoError(t, err)
++			require.Equal(t, want, info.Rotation)
++		})
++	}
++	info, err := ParseProbeJSON([]byte(`{"streams":[{"codec_type":"video","tags":{"rotate":"90"}}]}`))
++	require.NoError(t, err)
++	require.Equal(t, -90, info.Rotation)
++}
++
++func TestRKMPPRotationAliases(t *testing.T) {
++	for _, hw := range []bool{true, false} {
++		for rotation, transpose := range map[int]string{90: "2", -270: "2", -90: "1", 270: "1", 180: "4", -180: "4"} {
++			t.Run(fmt.Sprintf("hardware=%v/rotation=%d", hw, rotation), func(t *testing.T) {
++				s := Spec{RKMPP: true, CodecName: "hevc", Rotation: rotation, ForceSwTranspose: !hw, Quality: QualityMax}
++				args := strings.Join(BuildArgs(s), " ")
++				require.Contains(t, args, "-noautorotate")
++				if hw {
++					require.Contains(t, args, "vpp_rkrga=transpose="+transpose)
++				} else if transpose == "4" {
++					require.Contains(t, args, "transpose=1,transpose=1")
++				} else {
++					require.Contains(t, args, "transpose="+transpose)
++				}
++				require.Contains(t, args, "setsar=1")
++			})
++		}
++	}
++}
++
++func TestRKMPPFrameRateUsesSameClockAsGOP(t *testing.T) {
++	for _, fps := range []float64{23.976, 29.97, 59.94, 60} {
++		s := Spec{RKMPP: true, FrameRateExact: fps, HLS: true, ChunkSize: 3}
++		args := strings.Join(SegmentArgs(s, 0, "/tmp/%06d.m4s", "/tmp/init.m4s"), " ")
++		rate := RKMPPFrameRate(s)
++		require.Contains(t, args, fmt.Sprintf("fps=fps=%d:round=near", rate))
++		require.Contains(t, args, fmt.Sprintf("-g %d -keyint_min %d", 3*rate, 3*rate))
++	}
++}
+diff --git a/go-vod/ffmpeg/shared_audio_test.go b/go-vod/ffmpeg/shared_audio_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..97c1d9af19cc1a6ef7f897268f70529051900a2d
+--- /dev/null
++++ b/go-vod/ffmpeg/shared_audio_test.go
+@@ -0,0 +1,172 @@
++package ffmpeg
++
++import (
++	"strings"
++	"testing"
++)
++
++// TestSharedAudioArgsAreAudioOnly checks that an AudioOnly spec produces an
++// audio-only ffmpeg command: no -c:v, no -vf, yes -c:a aac, yes -vn.
++func TestSharedAudioArgsAreAudioOnly(t *testing.T) {
++	s := Spec{
++		RKMPP:     true,
++		AudioOnly: true,
++		Audio:     AudioInfo{CodecName: "eac3", Channels: 6, SampleRate: 48000, BitRate: 384000},
++		StartAt:   0,
++		EndAt:     120,
++		Input:     "/tmp/test.mp4",
++		ChunkSize: 4,
++	}
++	args := BuildArgs(s)
++	joined := strings.Join(args, " ")
++
++	for _, want := range []string{"-vn", "-c:a", "aac", "-ac", "2", "-ar", "48000", "-b:a", "192000", "-af"} {
++		if !strings.Contains(joined, want) {
++			t.Errorf("missing %q in audio-only args: %s", want, joined)
++		}
++	}
++	for _, ban := range []string{"-c:v", "-vf", "h264_rkmpp", "hevc_rkmpp"} {
++		if strings.Contains(joined, ban) {
++			t.Errorf("unexpected %q in audio-only args: %s", ban, joined)
++		}
++	}
++}
++
++func TestSharedCopiedAACDoesNotPublishNegativePriming(t *testing.T) {
++	s := Spec{RKMPP: true, HLS: true, AudioOnly: true, EndAt: 12,
++		Audio: AudioInfo{CodecName: "aac", Profile: "LC", Channels: 2,
++			SampleRate: 48000, BitRate: 160000, DurationSeconds: 12}}
++	args := BuildArgs(s)
++	assertHasPair(t, args, "-c:a", "copy")
++	assertHasPair(t, args, "-bsf:a", "noise=amount=0:drop='lt(pts,0)'")
++}
++
++// TestSharedAudioArgsContainApad checks the apad filter is inserted when
++// EndAt > StartAt, keeping audio duration equal to video duration.
++func TestSharedAudioArgsContainApad(t *testing.T) {
++	s := Spec{
++		RKMPP:     true,
++		AudioOnly: true,
++		Audio:     AudioInfo{CodecName: "pcm_s16le", Channels: 2, SampleRate: 48000, BitRate: 1536000},
++		StartAt:   10,
++		EndAt:     120,
++		Input:     "/tmp/test.mp4",
++		ChunkSize: 4,
++	}
++	args := BuildArgs(s)
++	joined := strings.Join(args, " ")
++
++	if !strings.Contains(joined, "apad") {
++		t.Errorf("apad missing from shared audio args with EndAt>StartAt: %s", joined)
++	}
++	if !strings.Contains(joined, "asetpts") {
++		t.Errorf("asetpts missing from shared audio args: %s", joined)
++	}
++	if !strings.Contains(joined, "aresample") {
++		t.Errorf("aresample missing from shared audio args: %s", joined)
++	}
++}
++
++// TestSharedAudioVideoJobsMuteAudio confirms that a video-rendition spec with
++// SeparateAudio=true appends -an and no audio encoder flags.
++func TestSharedAudioVideoJobsMuteAudio(t *testing.T) {
++	s := Spec{
++		RKMPP:            true,
++		RKMPPOutputCodec: "h264",
++		SeparateAudio:    true,
++		Audio:            AudioInfo{CodecName: "eac3", Channels: 6, SampleRate: 48000, BitRate: 384000},
++		Quality:          "720p",
++		Width:            1280,
++		Height:           720,
++		Bitrate:          2000000,
++		ChunkSize:        4,
++		Input:            "/tmp/test.mp4",
++		CodecName:        "h264",
++	}
++	args := BuildArgs(s)
++	joined := strings.Join(args, " ")
++
++	if !strings.Contains(joined, "-an") {
++		t.Errorf("expected -an in video args with SeparateAudio=true: %s", joined)
++	}
++	for _, ban := range []string{"-c:a", "-b:a", "-ac", "-ar"} {
++		if strings.Contains(joined, ban) {
++			t.Errorf("unexpected audio flag %q when SeparateAudio=true: %s", ban, joined)
++		}
++	}
++}
++
++// Compatible AAC can keep its source packets in the shared high track.
++func TestSharedAudioCopyableAACDoesNotNeedNormalization(t *testing.T) {
++	lcAudio := AudioInfo{
++		CodecName:  "aac",
++		Profile:    "LC",
++		Channels:   2,
++		SampleRate: 48000,
++		BitRate:    128000,
++	}
++	if NormalizeRKMPPAudio(lcAudio) {
++		t.Error("compatible AAC-LC can retain source packets")
++	}
++}
++
++func TestSharedAudioProfilesUseTheSameSeekClock(t *testing.T) {
++	for _, rate := range []int{192000, 96000, 64000, 32000} {
++		s := Spec{AudioOnly: true, HLS: true, StartAt: 9, EndAt: 120, AudioBitrate: rate,
++			Audio: AudioInfo{CodecName: "pcm_s16le", Channels: 2, SampleRate: 48000}, Input: "/tmp/source.mkv"}
++		args := strings.Join(BuildArgs(s), " ")
++		if !strings.Contains(args, "noise=amount=0:drop='lt(pts,432128)'") {
++			t.Errorf("profile %d does not discard AAC preroll before the requested frame: %s", rate, args)
++		}
++	}
++}
++
++// TestSharedAudioNonAACNeedsNormalization confirms multi-channel non-AAC
++// requires a separate normalized audio stream.
++func TestSharedAudioNonAACNeedsNormalization(t *testing.T) {
++	for _, audio := range []AudioInfo{
++		{CodecName: "eac3", Channels: 6, SampleRate: 48000, BitRate: 384000},
++		{CodecName: "dts", Channels: 6, SampleRate: 48000, BitRate: 1536000},
++		{CodecName: "aac", Profile: "HE-AAC", Channels: 2, SampleRate: 48000, BitRate: 64000},
++		{CodecName: "aac", Profile: "LC", Channels: 6, SampleRate: 48000, BitRate: 384000},
++	} {
++		if !NormalizeRKMPPAudio(audio) {
++			t.Errorf("NormalizeRKMPPAudio should be true for %+v", audio)
++		}
++	}
++}
++
++// TestSharedAudioSegmentArgsUseFMP4 ensures the audio-only stream goes
++// through SegmentArgs and comes out with fMP4 muxer flags.
++func TestSharedAudioSegmentArgsUseFMP4(t *testing.T) {
++	s := Spec{
++		RKMPP:     true,
++		AudioOnly: true,
++		Audio:     AudioInfo{CodecName: "eac3", Channels: 6, SampleRate: 48000, BitRate: 384000},
++		StartAt:   0,
++		EndAt:     120,
++		Input:     "/tmp/test.mp4",
++		ChunkSize: 4,
++		HLS:       true,
++	}
++	args := SegmentArgs(s, 0, "/tmp/audio-%06d.m4s", "/tmp/audio-init-1.m4s")
++	joined := strings.Join(args, " ")
++
++	for _, want := range []string{
++		"-f", "hls",
++		"-hls_segment_type", "fmp4",
++		"-hls_fmp4_init_filename",
++		"audio-init-1.m4s",
++		"audio-%06d.m4s",
++	} {
++		if !strings.Contains(joined, want) {
++			t.Errorf("missing %q in audio SegmentArgs: %s", want, joined)
++		}
++	}
++	// -fps_mode and -bf must NOT appear for audio-only
++	for _, ban := range []string{"-fps_mode", "-bf", "-g ", "-keyint_min"} {
++		if strings.Contains(joined, ban) {
++			t.Errorf("unexpected video flag %q in audio-only SegmentArgs: %s", ban, joined)
++		}
++	}
++}
+diff --git a/go-vod/ffmpeg/timeline.go b/go-vod/ffmpeg/timeline.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..36fbb8c1f9bf604e4b0a9252a0cab8d2737a9158
+--- /dev/null
++++ b/go-vod/ffmpeg/timeline.go
+@@ -0,0 +1,65 @@
++package ffmpeg
++
++import (
++	"math"
++	"strconv"
++	"strings"
++	"time"
++)
++
++// Keyframe separates the decoder entry point from the pictures in its GOP.
++// Open GOPs can contain leading pictures presented before the keyframe itself.
++type Keyframe struct {
++	PTS   float64 `json:"pts"`
++	Start float64 `json:"start"`
++}
++
++// ParseTimeline reads the same packet pass used for the copy index. No second
++// source scan is needed to retain each GOP's earliest presentation timestamp.
++func ParseTimeline(data []byte) []Keyframe {
++	var frames []Keyframe
++	for line := range strings.SplitSeq(string(data), "\n") {
++		pts, flags, _ := strings.Cut(strings.TrimSpace(line), ",")
++		ts, err := strconv.ParseFloat(pts, 64)
++		if err != nil || math.IsNaN(ts) || math.IsInf(ts, 0) {
++			continue
++		}
++		if strings.Contains(flags, "K") {
++			if len(frames) > 0 && ts <= frames[len(frames)-1].PTS {
++				return nil
++			}
++			frames = append(frames, Keyframe{PTS: ts, Start: ts})
++		} else if len(frames) > 0 {
++			f := &frames[len(frames)-1]
++			f.Start = min(f.Start, ts)
++		}
++	}
++	return frames
++}
++
++// SourceSegments is the single presentation plan for copy and hardware video.
++// Copy seeks use KeyframeAt; encoders trim/force IDRs at Start. Audio retains
++// its independent sample clock.
++func SourceSegments(frames []Keyframe, duration time.Duration) []Segment {
++	if len(frames) == 0 || duration <= 0 {
++		return nil
++	}
++	starts := make([]float64, len(frames))
++	for i, f := range frames {
++		if math.IsNaN(f.PTS) || math.IsInf(f.PTS, 0) || math.IsNaN(f.Start) || math.IsInf(f.Start, 0) ||
++			f.Start > f.PTS || (i > 0 && (f.Start <= starts[i-1] || f.PTS <= frames[i-1].PTS)) {
++			return nil
++		}
++		starts[i] = max(0, f.Start)
++	}
++	segments := CopySegments(starts, duration)
++	if len(segments) != len(frames) {
++		return nil
++	}
++	for i := range segments {
++		if frames[i].PTS != segments[i].Start {
++			segments[i].KeyframeAt = frames[i].PTS
++		}
++	}
++	return segments
++}
+diff --git a/go-vod/ffmpeg/timeline_test.go b/go-vod/ffmpeg/timeline_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..ab9bd3cf389345641e9963df6a680ad95883ffe1
+--- /dev/null
++++ b/go-vod/ffmpeg/timeline_test.go
+@@ -0,0 +1,27 @@
++package ffmpeg
++
++import (
++	"testing"
++	"time"
++
++	"github.com/stretchr/testify/require"
++)
++
++func TestOpenGOPPresentationPlan(t *testing.T) {
++	frames := ParseTimeline([]byte("0,K__\n0.08,___\n0.96,K__\n0.90,___\n0.94,___\n1.92,K__\n1.86,___\n"))
++	require.Equal(t, []Keyframe{{PTS: 0, Start: 0}, {PTS: .96, Start: .9}, {PTS: 1.92, Start: 1.86}}, frames)
++	segments := SourceSegments(frames, 2820*time.Millisecond)
++	require.Len(t, segments, 3)
++	require.InDelta(t, .9, segments[0].Duration, .000001)
++	require.Equal(t, .9, segments[1].Start)
++	require.Equal(t, .96, segments[1].KeyframeAt, "copy must seek to the actual keyframe")
++	grid := NewRKMPPKeyframeGrid(segments, 50)
++	require.NotNil(t, grid)
++	require.Equal(t, "0.899999000,1.859999000", grid.forceTimes(.9), "encoded IDRs cover the leading pictures")
++}
++
++func TestTimelineRejectsInvalidPresentationOrder(t *testing.T) {
++	require.Nil(t, ParseTimeline([]byte("1,K__\n0.5,K__\n")))
++	require.Nil(t, SourceSegments([]Keyframe{{PTS: 0, Start: 0}, {PTS: 1, Start: 0}}, 2*time.Second))
++	require.Nil(t, SourceSegments([]Keyframe{{PTS: 0, Start: 1}}, 2*time.Second))
++}
+diff --git a/go-vod/ffmpeg/tonemap.go b/go-vod/ffmpeg/tonemap.go
+index 3223ab7f89568f6accdd4583910895f2a43c48cb..2b889c6ea9681b6e1118cd826befda6c8e448dfd 100644
+--- a/go-vod/ffmpeg/tonemap.go
++++ b/go-vod/ffmpeg/tonemap.go
+@@ -19,6 +19,15 @@ func ProbeNVENCCUDA(ctx context.Context, s Spec) error {
+ 	return probeTonemap(ctx, s, "NVENC/CUDA")
+ }
+ 
++// ProbeRKMPPOpenCL verifies a complete MPP/RGA/Mali/MPP frame pipeline.
++func ProbeRKMPPOpenCL(ctx context.Context, s Spec) error {
++	s.RKMPPOpenCL = true
++	if !usesRKMPPFrames(s) {
++		return fmt.Errorf("source profile requires software decoding")
++	}
++	return probeTonemap(ctx, s, "RKMPP/OpenCL")
++}
++
+ func probeTonemap(ctx context.Context, s Spec, backend string) error {
+ 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+ 	defer cancel()
+diff --git a/go-vod/ffmpeg/tonemap_test.go b/go-vod/ffmpeg/tonemap_test.go
+index 1fa138c726d5cf4f5fd9f4ab3d5d6a8289f0ba28..939eb1f1da398fba0d7d923dc4f69bd668c97a78 100644
+--- a/go-vod/ffmpeg/tonemap_test.go
++++ b/go-vod/ffmpeg/tonemap_test.go
+@@ -81,3 +81,24 @@ func TestProbeNVENCCUDAFailure(t *testing.T) {
+ 	defer cancel()
+ 	require.ErrorIs(t, ProbeNVENCCUDA(ctx, s), context.DeadlineExceeded)
+ }
++
++func TestProbeRKMPPOpenCLChecksARealPipeline(t *testing.T) {
++	dir := t.TempDir()
++	record := filepath.Join(dir, "args")
++	t.Setenv("PROBE_ARGS", record)
++	s := baseSpec()
++	s.RKMPP, s.HDR, s.CodecName, s.PixelFormat, s.BitDepth = true, true, "hevc", "yuv420p10le", 10
++	s.Bin = filepath.Join(dir, "ffmpeg")
++	require.NoError(t, os.WriteFile(s.Bin, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$PROBE_ARGS\"\n"), 0755))
++	require.NoError(t, ProbeRKMPPOpenCL(context.Background(), s))
++	data, err := os.ReadFile(record)
++	require.NoError(t, err)
++	args := string(data)
++	for _, part := range []string{"rkmpp=memories", "opencl=memories_opencl@memories", "format=p010", "tonemap_opencl=", "hwmap=derive_device=rkmpp:mode=write:reverse=1"} {
++		require.Contains(t, args, part)
++	}
++	require.NotContains(t, args, "hwdownload")
++	require.False(t, s.RKMPPOpenCL)
++	s.CodecName = "prores"
++	require.ErrorContains(t, ProbeRKMPPOpenCL(context.Background(), s), "software decoding")
++}
