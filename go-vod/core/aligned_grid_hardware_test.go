@@ -30,7 +30,7 @@ func TestRKMPPHardwareAlignedServing(t *testing.T) {
 		"-f", "lavfi", "-i", "sine=sample_rate=48000", "-t", "11.011", "-c:v", "libx264", "-threads", "2",
 		"-bf", "0", "-g", "1000", "-sc_threshold", "0", "-force_key_frames", "0,0.93,2.93,6.93,9.40", "-c:a", "aac", src).CombinedOutput()
 	require.NoError(t, err, string(out))
-	cfg := config.Defaults("0.7.0")
+	cfg := config.Defaults("0.7.1")
 	cfg.RKMPP, cfg.RKMPPOutputCodec = true, "h264"
 	cfg.TempDir, cfg.CacheDir_ = t.TempDir(), t.TempDir()
 	cfg.FFmpeg, cfg.FFprobe = bin, probe

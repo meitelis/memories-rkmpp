@@ -63,5 +63,5 @@ USER 1000:1000
 WORKDIR /app
 # Intentionally no exposed port/healthcheck: offline hardware test only.
 ENTRYPOINT ["/app/rkmpp-smoke"]
-LABEL org.opencontainers.image.version="memories-11.0.2-govod-0.7.0-rkmpp-hardware-smoke" \
+LABEL org.opencontainers.image.version="memories-11.1.2-govod-0.7.1-rkmpp-hardware-smoke" \
       cc.memories-rkmpp.stage="offline-test-only"

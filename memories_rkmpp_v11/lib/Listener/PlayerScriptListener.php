@@ -14,7 +14,7 @@ class PlayerScriptListener implements IEventListener {
         // Only inject on verified upstream player interfaces. Do not assume future
         // Memories releases retain the same hls.js quality-controller hooks.
         $version = Server::get(IConfig::class)->getAppValue('memories', 'installed_version');
-        if (!in_array($version, ['11.0.2', '11.1.1'], true)) { return; }
+        if (!in_array($version, ['11.0.2', '11.1.1', '11.1.2'], true)) { return; }
         $path = parse_url(Server::get(IRequest::class)->getRequestUri(), PHP_URL_PATH);
         if (is_string($path) && preg_match('~/apps/memories(?:/|$)~', $path)) {
             Util::addScript('memories_rkmpp_v11', 'policy');

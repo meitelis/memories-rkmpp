@@ -1,6 +1,6 @@
 # Deployment
 
-This source targets **Memories 11.1.1 / go-vod 0.7.0**. Upgrade the official Memories app through Nextcloud's normal update process before installing this integration. The helper installer checks the Memories version; it does not upgrade the official app.
+This source targets **Memories 11.1.2 / go-vod 0.7.1**. Upgrade the official Memories app through Nextcloud's normal update process before installing this integration. The helper installer checks the Memories version; it does not upgrade the official app.
 
 The defaults use LinuxServer Nextcloud, container `nextcloud`, document root `/app/www/public`, and web-server user `abc`. The engine requires the device nodes and Docker configuration in [compose.yml](../compose.yml). Check the network and numeric device groups against [.env.example](../.env.example).
 
@@ -39,7 +39,9 @@ Use this path only when Portainer does not already manage the service. Copy `.en
 sh scripts/deploy-v11.sh
 ```
 
-The script verifies Memories 11.1.1, builds the engine, creates the standalone cache volume if needed, starts the service under project `memories_v11`, and installs the helper. Existing containers outside that project are left in place and cause an early exit. To override the image, export `MEMORIES_RKMPP_IMAGE` before invoking the script; it passes the same tag to the build and Compose.
+The script verifies Memories 11.1.2, builds the engine, creates the standalone cache volume if needed, starts the service under project `memories_v11`, and installs the helper. Existing containers outside that project are left in place and cause an early exit. To override the image, export `MEMORIES_RKMPP_IMAGE` before invoking the script; it passes the same tag to the build and Compose.
+
+Memories 11.1.2 expects go-vod 0.7.1. When moving from 11.1.1, update both the engine image and helper; the older 0.7.0 engine fails the version handshake.
 
 ## Updating only the helper
 

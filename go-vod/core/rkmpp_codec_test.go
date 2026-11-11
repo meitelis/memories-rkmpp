@@ -40,7 +40,7 @@ func TestRKMPPAutoKeepsCompatibleAVCOriginal(t *testing.T) {
 }
 
 func TestRKMPPPreservesCompatibleHEVCOriginalInMaster(t *testing.T) {
-	c := config.Defaults("0.7.0")
+	c := config.Defaults("0.7.1")
 	c.RKMPP, c.RKMPPOutputCodec = true, "hevc"
 	c.TempDir, c.CacheDir_ = t.TempDir(), t.TempDir()
 	t.Setenv("CACHE_DIR", c.CacheDir_)
@@ -98,7 +98,7 @@ func TestRKMPPMain10OriginalRequiresExplicitCapability(t *testing.T) {
 		{"unsupported depth", []string{"hevc", "hevc10"}, "bt709", 12, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			c := config.Defaults("0.7.0")
+			c := config.Defaults("0.7.1")
 			c.RKMPP, c.RKMPPOutputCodec = true, "hevc"
 			c.TempDir, c.CacheDir_ = t.TempDir(), t.TempDir()
 			c.RKMPPOpenCL = true

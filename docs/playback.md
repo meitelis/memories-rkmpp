@@ -1,6 +1,6 @@
 # Browser playback
 
-The helper extends the stock Memories 11.1.1 HTML video/hls.js hooks. It does not replace signed Memories assets, the video element, or the shared audio playlist. The current integration is checked against hls.js 1.7.4.
+The helper extends the stock Memories 11.1.2 HTML video/hls.js hooks. It does not replace signed Memories assets, the video element, or the shared audio playlist. The current integration is checked against hls.js 1.7.4.
 
 ## Original and encoded quality
 

@@ -24,5 +24,5 @@ jobs:
           docker build --platform linux/arm64 -f go-vod/Dockerfile.rkmpp-test -t local/memories-rkmpp:v11-smoke go-vod
       - name: Check version and FFmpeg features without hardware
         run: |
-          test "$(docker run --rm --entrypoint /app/go-vod local/memories-rkmpp:v11-smoke -version)" = "go-vod 0.7.0"
+          test "$(docker run --rm --entrypoint /app/go-vod local/memories-rkmpp:v11-smoke -version)" = "go-vod 0.7.1"
           docker run --rm --network none local/memories-rkmpp:v11-smoke

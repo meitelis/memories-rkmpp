@@ -36,7 +36,7 @@ No original media or Nextcloud credentials are needed. It runs:
   running. The upstream HTTP copy/transcode restart regression also runs.
   Source-aligned serving also tests a segment ID that would be out of range on
   the old three-second grid, a cold restart and unchanged shared-audio workers.
-- `api.test`: go-vod 0.7.0 ping and Memories 11 POST envelope, authenticated
+- `api.test`: go-vod 0.7.1 ping and Memories 11 POST envelope, authenticated
   Range callbacks to a local fixture server, codec negotiation, a single audio
   group, token propagation and decoding of served init/seek segments. The
   callback server is inside the isolated test process, not your Nextcloud.
