@@ -5,7 +5,7 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 nextcloud=${NEXTCLOUD_CONTAINER:-nextcloud}
 occ() { docker exec "$nextcloud" php /app/www/public/occ "$@"; }
 version=$(occ config:app:get memories installed_version)
-[ "$version" = 11.1.1 ] || { echo "Expected Memories 11.1.1, found $version" >&2; exit 1; }
+[ "$version" = 11.1.2 ] || { echo "Expected Memories 11.1.2, found $version" >&2; exit 1; }
 occ config:system:set memories.vod.external --type=boolean --value=true
 occ config:system:set memories.vod.disable --type=boolean --value=false
 occ config:system:set memories.vod.connect --type=json --value='["memories-rkmpp:47788"]'
@@ -22,4 +22,4 @@ occ app:enable memories_rkmpp_v11
 # Advance its template asset cache after replacing the adapter's static files.
 docker exec "$nextcloud" php -r 'define("OC_CONSOLE", true); require "/app/www/public/lib/base.php"; $c=\OC::$server->get(\OCP\IConfig::class); $c->setAppValue("theming","cachebuster",(string)((int)$c->getAppValue("theming","cachebuster","0")+1));'
 docker exec "$nextcloud" php -r 'define("OC_CONSOLE", true); require "/app/www/public/lib/base.php"; $b=\OC::$server->get(\OCA\Memories\Service\BinExt::class); echo json_encode($b->testGoVod("memories-rkmpp:47788")), PHP_EOL;'
-printf 'Memories 11.1.1 is connected to go-vod 0.7.0. Reload the Memories page.\n'
+printf 'Memories 11.1.2 is connected to go-vod 0.7.1. Reload the Memories page.\n'

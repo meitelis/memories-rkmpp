@@ -21,9 +21,9 @@ func main() {
 		Version string `json:"version"`
 	}
 	if err := json.NewDecoder(res.Body).Decode(&health); err != nil ||
-		res.StatusCode != http.StatusOK || health.Status != "healthy" || health.Version != "0.7.0" {
+		res.StatusCode != http.StatusOK || health.Status != "healthy" || health.Version != "0.7.1" {
 		fmt.Fprintf(os.Stderr, "go-vod health: HTTP %d status=%s version=%s error=%v\n", res.StatusCode, health.Status, health.Version, err)
 		os.Exit(1)
 	}
-	fmt.Println("go-vod 0.7.0 healthy; Nextcloud reachable")
+	fmt.Println("go-vod 0.7.1 healthy; Nextcloud reachable")
 }

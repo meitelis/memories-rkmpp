@@ -1,6 +1,6 @@
-# go-vod 0.7.0 for RK3588
+# go-vod 0.7.1 for RK3588
 
-The engine used by this repository's Memories 11.1.1 integration. The source baseline is [Memories 11.0.2](https://github.com/pulsejet/memories/tree/e156f850ec5514433f1cfac9d4f1dbd461500c8d/go-vod), with this fork's RKMPP and playback changes applied. The upstream Apache-2.0 license is retained.
+The engine used by this repository's Memories 11.1.2 integration. The source baseline is [Memories 11.0.2](https://github.com/pulsejet/memories/tree/e156f850ec5514433f1cfac9d4f1dbd461500c8d/go-vod), with this fork's RKMPP and playback changes applied. The upstream go-vod 0.7.1 HTTP-option hotfix from [Memories 11.1.2](https://github.com/pulsejet/memories/tree/d5830c939e1c819479e397b837ec3830e9af797b/go-vod) is also applied. The upstream Apache-2.0 license is retained.
 
 - `api/`: authenticated request envelope, HLS playlists and bridge routes.
 - `core/`: source probes, segment plans, lazy workers, shared audio and cache lifecycle.
