@@ -1,0 +1,35 @@
+name: Local maintainer prototype
+on:
+  workflow_dispatch:
+  push:
+    paths: ['automation/rkmpp-maintainer/**', '.github/workflows/maintainer-prototype.yml']
+  pull_request:
+    paths: ['automation/rkmpp-maintainer/**', '.github/workflows/maintainer-prototype.yml']
+permissions:
+  contents: read
+concurrency:
+  group: maintainer-prototype-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  smoke:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Unit tests, syntax and Compose validation
+        working-directory: automation/rkmpp-maintainer
+        run: |
+          python3 -m unittest discover -s tests -v
+          python3 -m py_compile *.py
+          docker compose config --quiet
+      - name: Real ARM64 local-model edit, tests, build and export
+        working-directory: automation/rkmpp-maintainer
+        run: docker compose run --build --rm maintainer smoke
+      - name: Logs and stop isolated daemon
+        if: always()
+        working-directory: automation/rkmpp-maintainer
+        run: |
+          docker compose logs --no-color --tail=100
+          sudo find data/jobs -name result.json -exec cat {} \; 2>/dev/null || true
+          sudo find data/jobs -name agent.jsonl -exec tail -n 15 {} \; 2>/dev/null || true
+          docker compose down --volumes
