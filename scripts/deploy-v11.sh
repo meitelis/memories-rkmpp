@@ -3,7 +3,7 @@
 set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 nextcloud=${NEXTCLOUD_CONTAINER:-nextcloud}
-image=${MEMORIES_RKMPP_IMAGE:-local/memories-rkmpp:memories-11.1.2-govod-0.7.1-r11}
+image=${MEMORIES_RKMPP_IMAGE:-local/memories-rkmpp:memories-11.1.2-govod-0.7.1-r12}
 occ() { docker exec "$nextcloud" php /app/www/public/occ "$@"; }
 version=$(occ config:app:get memories installed_version)
 [ "$version" = 11.1.2 ] || { echo "Expected Memories 11.1.2, found $version" >&2; exit 1; }

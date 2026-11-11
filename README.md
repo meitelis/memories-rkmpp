@@ -6,7 +6,7 @@ Hardware video transcoding and Original playback for **Nextcloud Memories 11.1.2
 - **Auto** uses native hls.js adaptation. Manual resolution choices keep the existing playback buffer and shared audio track.
 - Encoded video uses MPP decoding/encoding, RGA transforms and Mali HDR-to-SDR mapping. Strict mode rejects unsupported hardware video. Audio follows its separate compatibility and padding policy.
 
-Memories 11.1.2 compatibility and the upstream go-vod 0.7.1 HTTP-option hotfix are documented in [the compatibility notes](docs/verification/memories-11.1.2.md). Live playback evidence below remains from 11.1.1.
+Memories 11.1.2 compatibility and the upstream go-vod 0.7.1 HTTP-option hotfix are documented in [the compatibility notes](docs/verification/memories-11.1.2.md). The detailed playback measurements below remain from 11.1.1; the owner also reports that the 11.1.2 update works on the ROCK 5B+.
 
 ## Start here
 
@@ -44,4 +44,4 @@ go build ./...
 
 Use a Linux environment for the Go integration tests. See the testing guide for hardware and PHP checks. Native Android development is separate from this server/browser tree; its unmerged work is retained on its existing branches.
 
-The latest checks include live Memories 11.1.1 Original/Auto playback and an ARM64 build. The larger synthetic hardware matrix has its own dated evidence; browser results do not establish native Android, Safari, public-share or perceptual HDR/audio acceptance.
+Validation includes detailed live Memories 11.1.1 Original/Auto checks, an ARM64 build, and an owner-reported successful 11.1.2 deployment. The larger synthetic hardware matrix has its own dated evidence; browser results do not establish native Android, Safari, public-share or perceptual HDR/audio acceptance.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"strings"
+	"time"
 )
 
 // remoteInputArgs are the options for an authenticated http input: one
@@ -39,21 +40,31 @@ var reconnectArgs = []string{
 	"-respect_retry_after", "1",
 }
 
-// DetectHTTPOptions drops reconnectArgs the installed ffprobe doesn't support
-// (e.g. reconnect_max_retries needs ffmpeg 7.1); older builds reject unknown
-// options outright. Call once at startup.
-func DetectHTTPOptions(ffprobe string) {
-	out, err := Command(context.Background(), ffprobe, "-hide_banner", "-h", "protocol=http").Output()
+// DetectHTTPOptions narrows the shared reconnect policy to options supported
+// by bin. Call for both FFmpeg and ffprobe before starting workers: their
+// intersection is safe for every caller, including mixed-version toolchains.
+func DetectHTTPOptions(bin string) {
+	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+	defer cancel()
+	cmd := Command(ctx, bin, "-hide_banner", "-h", "protocol=http")
+	cmd.WaitDelay = time.Second
+	out, err := cmd.Output()
 	if err != nil {
-		log.Printf("Failed to detect ffprobe http options: %v", err)
+		log.Printf("Failed to detect %s http options: %v", bin, err)
 		return
+	}
+	options := make(map[string]bool)
+	for line := range strings.SplitSeq(string(out), "\n") {
+		if fields := strings.Fields(line); len(fields) > 0 {
+			options[fields[0]] = true
+		}
 	}
 	var supported []string
 	for i := 0; i < len(reconnectArgs); i += 2 {
-		if strings.Contains(string(out), reconnectArgs[i]+" ") {
+		if options[reconnectArgs[i]] {
 			supported = append(supported, reconnectArgs[i], reconnectArgs[i+1])
 		} else {
-			log.Printf("ffprobe does not support http option %s, skipping", reconnectArgs[i])
+			log.Printf("%s does not support http option %s, skipping", bin, reconnectArgs[i])
 		}
 	}
 	reconnectArgs = supported

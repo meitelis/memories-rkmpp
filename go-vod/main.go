@@ -37,6 +37,7 @@ func main() {
 		log.Fatal("Invalid config: ", err)
 	}
 
+	ffmpeg.DetectHTTPOptions(c.FFmpeg)
 	ffmpeg.DetectHTTPOptions(c.FFprobe)
 
 	code := api.NewServer(c).Start()
