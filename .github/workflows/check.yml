@@ -22,7 +22,7 @@ jobs:
       - name: Protocol, formatting, race tests, vet and build
         working-directory: go-vod
         run: |
-          grep -F 'const VERSION = "0.7.0"' main.go
+          grep -F 'const VERSION = "0.7.1"' main.go
           test -z "$(gofmt -l .)"
           go test -race ./...
           go vet ./...

@@ -46,7 +46,7 @@ func TestRKMPPHardwareAPI(t *testing.T) {
 		http.ServeFile(w, r, src)
 	}))
 	defer callback.Close()
-	cfg := config.Defaults("0.7.0")
+	cfg := config.Defaults("0.7.1")
 	cfg.RKMPP, cfg.RKMPPOutputCodec, cfg.VersionMonitor = true, "hevc", true
 	cfg.TempDir, cfg.CacheDir_ = t.TempDir(), t.TempDir()
 	cfg.FFmpeg, cfg.FFprobe, cfg.NextcloudURL = bin, probe, callback.URL
@@ -64,7 +64,7 @@ func TestRKMPPHardwareAPI(t *testing.T) {
 		body, err := json.Marshal(request)
 		require.NoError(t, err)
 		r := httptest.NewRequest("POST", "/vod", bytes.NewReader(body))
-		r.Header.Set("X-Go-Vod-Version", "0.7.0")
+		r.Header.Set("X-Go-Vod-Version", "0.7.1")
 		w := httptest.NewRecorder()
 		s.routes().ServeHTTP(w, r)
 		require.Equal(t, http.StatusOK, w.Code, profile)
@@ -73,7 +73,7 @@ func TestRKMPPHardwareAPI(t *testing.T) {
 	}
 	w := httptest.NewRecorder()
 	s.routes().ServeHTTP(w, httptest.NewRequest("GET", "/ping", nil))
-	require.Contains(t, w.Body.String(), `"version":"0.7.0"`)
+	require.Contains(t, w.Body.String(), `"version":"0.7.1"`)
 	master := string(fetch("index.m3u8"))
 	require.Equal(t, 4, strings.Count(master, "#EXT-X-MEDIA:"))
 	require.Contains(t, master, `AUDIO="audio"`)

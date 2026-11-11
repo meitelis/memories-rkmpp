@@ -152,7 +152,7 @@ func RKMPPInputPaced(s Spec) bool {
 }
 
 // Build the v11 encoder prefix only; SegmentArgs remains the official
-// go-vod 0.7.0 fMP4 muxer, so init and timeline semantics are unchanged.
+// go-vod 0.7.1 fMP4 muxer, so init and timeline semantics are unchanged.
 // The v11 server enables it only when MEMORIES_RKMPP=1.
 func buildRKMPPArgs(s Spec) []string {
 	args := []string{"-hide_banner", "-loglevel", "warning"}

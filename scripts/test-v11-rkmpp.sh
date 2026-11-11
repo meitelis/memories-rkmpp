@@ -39,7 +39,7 @@ done
 for gid in "${!groups[@]}"; do docker_args+=(--group-add "$gid"); done
 
 protocol_version="$(docker run --rm --network none --entrypoint /app/go-vod "$image" -version)"
-[[ "$protocol_version" == 'go-vod 0.7.0' ]] || { echo "Wrong protocol: $protocol_version" >&2; exit 4; }
+[[ "$protocol_version" == 'go-vod 0.7.1' ]] || { echo "Wrong protocol: $protocol_version" >&2; exit 4; }
 
 echo "Testing isolated $mode; output: $output_dir"
 # MPP reads /proc/device-tree/compatible through /sys/firmware. Docker's

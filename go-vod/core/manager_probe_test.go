@@ -21,7 +21,7 @@ func TestManagerFFprobeFailure(t *testing.T) {
 }
 
 func TestRKMPPRejectsCachedDolbyVision(t *testing.T) {
-	cfg := config.Defaults("0.7.0")
+	cfg := config.Defaults("0.7.1")
 	cfg.RKMPP = true
 	cfg.CacheDir_ = t.TempDir()
 	StoreCachedProbe(cfg.CacheDir(), 1, "dv", &ProbeVideoData{

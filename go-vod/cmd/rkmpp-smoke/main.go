@@ -1,4 +1,4 @@
-// rkmpp-smoke is an offline hardware preflight for the RK3588 go-vod 0.7.0
+// rkmpp-smoke is an offline hardware preflight for the RK3588 go-vod 0.7.1
 // FFmpeg argument builder. It does not contact Nextcloud or run a server.
 package main
 

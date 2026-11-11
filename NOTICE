@@ -1,7 +1,8 @@
 This project modifies the Memories go-vod transcoder.
 Upstream: https://github.com/pulsejet/memories
 Baseline: Memories v11.0.2 / e156f850ec5514433f1cfac9d4f1dbd461500c8d
-Protocol: go-vod 0.7.0
+Compatibility update: Memories v11.1.2 / d5830c939e1c819479e397b837ec3830e9af797b
+Protocol: go-vod 0.7.1
 The upstream Apache License 2.0 is retained in LICENSE and go-vod/LICENSE.
 
 Hardware support comes from Rockchip MPP/RGA and the FFmpeg work shipped in
