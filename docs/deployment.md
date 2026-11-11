@@ -55,4 +55,8 @@ Retain the previous helper first. This command changes Nextcloud app/configurati
 
 ## Rollback
 
-Restore the old image through the same stack/project. Restore the backed-up helper to its original app path and web-server ownership, restore its saved `installed_version` if the app version advanced, and refresh Nextcloud's template asset cache. Retain the existing cache volume and original media. Verify the service health, protocol handshake and browser playback after rollback.
+Keep the official Memories app, engine and helper compatible throughout recovery. After upgrading the official app to 11.1.2, restore a known-good **0.7.1 engine and a helper that supports 11.1.2** through the same stack/project; PR #23 / image r11 is that baseline. An older 0.7.0 engine or helper without 11.1.2 support cannot serve this app version.
+
+To return to Memories 11.1.1 instead, restore a complete pre-upgrade Nextcloud app/database backup using the supported recovery process; do not merely change the stored version number.
+
+Restore the matching helper backup to its original app path and web-server ownership, restore its saved `installed_version` if the helper version advanced, and refresh Nextcloud's template asset cache. Retain the existing cache volume and original media. Verify the service health, protocol handshake and browser playback after rollback.
