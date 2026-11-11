@@ -34,7 +34,7 @@ func TestRKMPPHardwareServing(t *testing.T) {
 	require.NoError(t, err, string(out))
 	for _, codec := range []string{"h264", "hevc"} {
 		t.Run(codec, func(t *testing.T) {
-			cfg := config.Defaults("0.7.0")
+			cfg := config.Defaults("0.7.1")
 			cfg.RKMPP, cfg.RKMPPOutputCodec = true, codec
 			cfg.TempDir, cfg.CacheDir_ = t.TempDir(), t.TempDir()
 			cfg.FFmpeg, cfg.FFprobe = bin, probe

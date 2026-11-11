@@ -77,7 +77,7 @@ namespace {
         }
     }
 
-    foreach (['11.0.2', '11.1.1'] as $supported) {
+    foreach (['11.0.2', '11.1.1', '11.1.2'] as $supported) {
         verify($supported, '/index.php/apps/memories/', true);
         verify($supported, '/apps/memories', true);
         verify($supported, '/index.php/apps/memories/viewer?foo=bar', true);
@@ -85,8 +85,8 @@ namespace {
         verify($supported, '/index.php/apps/memories-extra/', false);
         verify($supported, '/index.php/apps/memories/', false, false);
     }
-    foreach (['10.2.0', '11.0.1', '11.1.0', '11.2.0', '12.0.0'] as $unsupported) {
+    foreach (['10.2.0', '11.0.1', '11.1.0', '11.1.3', '11.2.0', '12.0.0'] as $unsupported) {
         verify($unsupported, '/index.php/apps/memories/', false);
     }
-    echo "Memories adapter template listener: 17 cases passed\n";
+    echo "Memories adapter template listener: 24 cases passed\n";
 }

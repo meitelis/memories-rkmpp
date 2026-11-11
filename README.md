@@ -1,6 +1,6 @@
 # Memories on RK3588
 
-Hardware video transcoding and Original playback for **Nextcloud Memories 11.1.1 / go-vod 0.7.0**. The tested host is a ROCK 5B+ on Armbian's 6.1 vendor kernel with Rockchip MPP/RGA and Mali-G610 OpenCL.
+Hardware video transcoding and Original playback for **Nextcloud Memories 11.1.2 / go-vod 0.7.1**. The tested host is a ROCK 5B+ on Armbian's 6.1 vendor kernel with Rockchip MPP/RGA and Mali-G610 OpenCL.
 
 - **Original** copies compatible source video instead of re-encoding it. Auto can select it when browser support and bandwidth allow, including explicitly supported SDR Main10 HEVC.
 - **Auto** uses native hls.js adaptation. Manual resolution choices keep the existing playback buffer and shared audio track.
@@ -42,4 +42,4 @@ go build ./...
 
 Use a Linux environment for the Go integration tests. See the testing guide for hardware and PHP checks. Native Android development is separate from this server/browser tree; its unmerged work is retained on its existing branches.
 
-The latest checks include live Memories 11.1.1 Original/Auto playback and an ARM64 build. The larger synthetic hardware matrix has its own dated evidence; browser results do not establish native Android, Safari, public-share or perceptual HDR/audio acceptance.
+The latest recorded hardware checks cover Memories 11.1.1 Original/Auto playback and an ARM64 build. Memories 11.1.2 compatibility is described in [the upgrade notes](docs/verification/memories-11.1.2.md); hardware playback must be rechecked after updating. The larger synthetic hardware matrix has its own dated evidence; browser results do not establish native Android, Safari, public-share or perceptual HDR/audio acceptance.
