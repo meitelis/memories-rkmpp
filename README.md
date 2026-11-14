@@ -1,6 +1,6 @@
 # Memories on RK3588
 
-Hardware video transcoding and Original playback for **Nextcloud Memories 11.1.2 / go-vod 0.7.1**. The tested host is a ROCK 5B+ on Armbian's 6.1 vendor kernel with Rockchip MPP/RGA and Mali-G610 OpenCL.
+Hardware video transcoding and Original playback for **Nextcloud Memories 11.1.4 / go-vod 0.7.3**. The tested host is a ROCK 5B+ on Armbian's 6.1 vendor kernel with Rockchip MPP/RGA and Mali-G610 OpenCL.
 
 - **Original** copies compatible source video instead of re-encoding it. Auto can select it when browser support and bandwidth allow, including explicitly supported SDR Main10 HEVC.
 - **Auto** uses native hls.js adaptation. Manual resolution choices keep the existing playback buffer and shared audio track.
