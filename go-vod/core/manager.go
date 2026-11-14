@@ -92,7 +92,7 @@ type Manager struct {
 	// closeBridgeFile releases the file in bridge workers on Destroy.
 	closeBridgeFile func()
 
-	// copyEligible is set from the base probe (playable codec, no rotation)
+	// copyEligible is set from the base probe (playable fMP4 codec)
 	// and is immutable after creation. It only says keyframes are worth trying.
 	copyEligible bool
 
@@ -747,10 +747,11 @@ func (m *Manager) ffprobe() error {
 		return fmt.Errorf("invalid video dimensions or duration for file %d", m.fileid)
 	}
 
-	// Copy eligibility is cheap (codec + rotation); keyframes come later
+	// Copy eligibility is cheap; keyframes are checked later.
+	// fMP4 preserves the display matrix, including rotation.
 	// via EnsureCopySegments on direct.m3u8, so creation stays fast.
-	m.copyEligible = m.probe.Rotation == 0 && IsCodecPlayable(m.probe.CodecName, m.playableCodecs) &&
-		IsCodecFMP4(m.probe.CodecName)
+	// fMP4 keeps the display matrix, so rotated sources copy too.
+	m.copyEligible = IsCodecPlayable(m.probe.CodecName, m.playableCodecs) && IsCodecFMP4(m.probe.CodecName)
 
 	if m.c.RKMPP {
 		// Main10 requires an explicit MediaSource capability from the browser;

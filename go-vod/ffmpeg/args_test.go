@@ -102,7 +102,7 @@ func TestBuildArgsTranspose(t *testing.T) {
 	s := baseSpec()
 	s.VAAPI, s.UseTranspose, s.HLS, s.Rotation = true, true, true, -90
 	c := cmd(s, BuildArgs(s))
-	require.Contains(t, c, "-noautorotate")
+	require.Contains(t, c, "-noautorotate -display_rotation 0")
 	require.Contains(t, c, "transpose_vaapi=1")
 
 	sw := baseSpec()
@@ -111,7 +111,9 @@ func TestBuildArgsTranspose(t *testing.T) {
 
 	off := baseSpec()
 	off.Rotation = 90
-	require.NotContains(t, cmd(off, BuildArgs(off)), "transpose")
+	c = cmd(off, BuildArgs(off))
+	require.NotContains(t, c, "transpose")
+	require.NotContains(t, c, "-display_rotation")
 }
 
 func TestMP4Transpose(t *testing.T) {
@@ -479,6 +481,10 @@ func TestBuildArgsCopy(t *testing.T) {
 
 	s.CodecName = "hevc"
 	require.Contains(t, cmd(s, BuildArgs(s)), `"-c:v" copy "-tag:v" hvc1`)
+
+	// Copies keep the source display matrix.
+	s.UseTranspose, s.Rotation = true, 90
+	require.NotContains(t, cmd(s, BuildArgs(s)), "-display_rotation")
 }
 
 func TestSegmentArgsCopy(t *testing.T) {
@@ -512,7 +518,6 @@ func TestSegmentTimestamps(t *testing.T) {
 			require.Equal(t, "9.000000", args[slices.Index(args, "-ss")+1])
 			require.Equal(t, "3", args[slices.Index(args, "-start_number")+1])
 			require.Contains(t, args, "-copyts")
-			require.Equal(t, "+genpts", args[slices.Index(args, "-fflags")+1])
 			require.Equal(t, "disabled", args[slices.Index(args, "-avoid_negative_ts")+1])
 		}
 	}

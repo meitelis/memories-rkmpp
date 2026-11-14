@@ -486,12 +486,12 @@ func (s *Stream) transcode(startId int) {
 		if startId >= len(segs) {
 			startId = len(segs) - 1
 		}
-		startNumber = startId
+		startNumber = max(startId-1, 0)
 		startAt = 0
-		if startId > 0 {
-			startAt = segs[startId].Start
-			if segs[startId].KeyframeAt != 0 {
-				startAt = segs[startId].KeyframeAt
+		if startNumber > 0 {
+			startAt = segs[startNumber].Start
+			if segs[startNumber].KeyframeAt != 0 {
+				startAt = segs[startNumber].KeyframeAt
 			}
 			startAt += copySeekEpsilon
 		}
