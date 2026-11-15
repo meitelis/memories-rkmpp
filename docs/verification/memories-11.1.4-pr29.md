@@ -14,7 +14,7 @@
 2. On 15 November, the owner built the candidate on the ROCK 5B+ using `scripts/build-v11.sh`. Go unit tests, formatting, vet, image compilation and export completed.
 3. The owner executed `RKMPP_SMOKE_SKIP_BUILD=1 bash scripts/test-v11-rkmpp.sh --matrix` using a dedicated scratch location. All three hardware suites returned `PASS`:
    - `ffmpeg.test`: H.264/HEVC, 10 source codec families, 4K/HDR, aligned clocks, B frames, source grids, pacing and restart arguments.
-   - `core.test`: source-aligned serving, real fMP4 seeking/restaring for copy and RKMPP transcode, H.264/HEVC rendering and shared AAC.
+   - `core.test`: source-aligned serving, real fMP4 seeking/restarting for copy and RKMPP transcode, H.264/HEVC rendering and shared AAC.
    - `api.test`: authenticated local-fixture stream, bitrate variants, shared audio and generated segments.
 4. Logs showed `-readrate 1 -readrate_initial_burst 18 -readrate_catchup 3.5` on hardware-encoded inputs. Expected FFmpeg mono-layout guesses were nonfatal.
 5. After live testing, the owner reported **“plays all very well”** and authorized merging PR #29.
