@@ -1,6 +1,7 @@
 name: Source checks
 on:
   push:
+    branches: [main]
     paths: ['README.md', 'docs/**', 'go-vod/**', 'memories_rkmpp_v11/**', 'tests/**', 'package*.json', 'scripts/**', 'compose.yml', '.env.example', '.github/workflows/check.yml']
   pull_request:
     paths: ['README.md', 'docs/**', 'go-vod/**', 'memories_rkmpp_v11/**', 'tests/**', 'package*.json', 'scripts/**', 'compose.yml', '.env.example', '.github/workflows/check.yml']
