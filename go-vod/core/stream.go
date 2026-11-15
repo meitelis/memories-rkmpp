@@ -160,11 +160,21 @@ func (s *Stream) ServeChunk(w http.ResponseWriter, id int) error {
 			}
 		}
 		if restart {
-			s.mutex.Unlock()
-			s.restartAtChunk(w, id)
-			return nil
+			// Atomically register the missing segment and start its producer.
+			// Unlocking before the restart allowed concurrent requests to
+			// replace the same FFmpeg worker and invalidate HLS waiters.
+			if s.closed {
+				s.mutex.Unlock()
+				w.WriteHeader(http.StatusConflict)
+				return nil
+			}
+			s.clear()
+			chunk = s.createChunk(id)
+			s.goal = id + s.c.GoalBufferMax
+			s.transcode(id)
+		} else {
+			chunk = s.createChunk(id)
 		}
-		chunk = s.createChunk(id)
 	}
 	s.mutex.Unlock()
 
@@ -372,29 +382,6 @@ func (s *Stream) waitForChunk(w http.ResponseWriter, chunk *Chunk) {
 
 	// Return timeout error
 	w.WriteHeader(http.StatusRequestTimeout)
-}
-
-func (s *Stream) restartAtChunk(w http.ResponseWriter, id int) {
-	s.mutex.Lock()
-
-	// A request raced Manager teardown; the retry reaches a new Manager.
-	if s.closed {
-		s.mutex.Unlock()
-		w.WriteHeader(http.StatusConflict)
-		return
-	}
-
-	// Stop current transcoder
-	s.clear()
-
-	chunk := s.createChunk(id) // create first chunk
-
-	// Start the transcoder
-	s.goal = id + s.c.GoalBufferMax
-	s.transcode(id)
-	s.mutex.Unlock()
-
-	s.waitForChunk(w, chunk) // this is also a request
 }
 
 func (s *Stream) spec(startAt float64, isHls bool) ffmpeg.Spec {
