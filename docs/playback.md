@@ -26,6 +26,6 @@ All video qualities reference one shared audio timeline. Quality changes do not 
 
 ## Client scope
 
-The browser helper applies to HTMLVideoElement/hls.js playback. Native Android uses ExoPlayer and its own adaptation, and Safari native HLS controls its own buffering. Their behavior is not established by a browser result. Android development remains outside main's server/browser release on its existing branches, including the draft [native quality PR #16](https://github.com/meitelis/memories-rkmpp/pull/16).
+The browser helper applies to HTMLVideoElement/hls.js playback. Native Android uses ExoPlayer and its own adaptation, and Safari native HLS controls its own buffering. Their behavior is not established by a browser result. Android development remains outside the tested server/browser release; the unmerged [native quality PR #16](https://github.com/meitelis/memories-rkmpp/pull/16) was closed as superseded, not deployed.
 
-See [testing](testing/README.md) for current checks and [the latest verification](verification/auto-original-2026-11-10.md) for the observed Original/startup fix. Older Android bridge analysis and player policies are retained as [historical records](history/README.md).
+See [testing](testing/README.md) for current checks, [15 November 11.1.4 validation](verification/memories-11.1.4-pr29.md) for the latest release, and [10 November validation](verification/auto-original-2026-11-10.md) for Original/startup behavior. Older Android bridge analysis and player policies are retained as [historical records](history/README.md).

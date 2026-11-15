@@ -19,13 +19,13 @@ Keep the service in its existing stack so its mounts, devices, network, environm
    This builds and tests the engine and packages its existing pinned multimedia runtime. It does not create volumes, install the helper, or start/replace services. The shell script reads exported variables; it does not load `.env` automatically.
 
 3. In the existing Portainer stack editor, change only this service's image to the built tag and update the stack. A local-only image should use the existing `pull_policy: never`; leave image re-pull disabled. Keep the existing cache mount and all device/network settings.
-4. Install the helper from that same checkout:
+4. If the update changes the Memories/go-vod protocol, helper version, or browser files, install the **matching** helper from the same checkout:
 
    ```sh
    NEXTCLOUD_CONTAINER=nextcloud sh scripts/install-player-v11.sh
    ```
 
-   This preserves the engine's Compose project. It installs the helper, applies its Nextcloud app upgrade, refreshes the static-asset cache and checks the go-vod handshake. It also applies the integration's existing Memories external-transcoder settings.
+   The installer preserves the engine's Compose project, updates the Nextcloud helper, refreshes its static-asset cache and checks the go-vod handshake. **For engine-only bug fixes such as PR #29 with no helper/protocol changes, retain the existing compatible helper** instead of reinstalling it.
 
 5. Check that the service is healthy, reload Memories, and verify Auto, Original, manual selection, seeking and playback to the end. Use [the browser checklist](testing/README.md#live-browser-checks).
 
