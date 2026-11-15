@@ -1,6 +1,6 @@
 # Deployment
 
-This source targets **Memories 11.1.2 / go-vod 0.7.1**. Upgrade the official Memories app through Nextcloud's normal update process before installing this integration. The helper installer checks the Memories version; it does not upgrade the official app.
+This source targets **Memories 11.1.4 / go-vod 0.7.3**. Upgrade the official Memories app through Nextcloud's normal update process before installing this integration. The helper installer checks the Memories version; it does not upgrade the official app.
 
 The defaults use LinuxServer Nextcloud, container `nextcloud`, document root `/app/www/public`, and web-server user `abc`. The engine requires the device nodes and Docker configuration in [compose.yml](../compose.yml). Check the network and numeric device groups against [.env.example](../.env.example).
 
@@ -39,9 +39,9 @@ Use this path only when Portainer does not already manage the service. Copy `.en
 sh scripts/deploy-v11.sh
 ```
 
-The script verifies Memories 11.1.2, builds the engine, creates the standalone cache volume if needed, starts the service under project `memories_v11`, and installs the helper. Existing containers outside that project are left in place and cause an early exit. To override the image, export `MEMORIES_RKMPP_IMAGE` before invoking the script; it passes the same tag to the build and Compose.
+The script verifies Memories 11.1.4, builds the engine, creates the standalone cache volume if needed, starts the service under project `memories_v11`, and installs the helper. Existing containers outside that project are left in place and cause an early exit. To override the image, export `MEMORIES_RKMPP_IMAGE` before invoking the script; it passes the same tag to the build and Compose.
 
-Memories 11.1.2 expects go-vod 0.7.1. When moving from 11.1.1, update both the engine image and helper; the older 0.7.0 engine fails the version handshake.
+Memories 11.1.4 expects go-vod 0.7.3. When moving from an earlier Memories version, update both the engine image and helper; older go-vod protocols fail the version handshake.
 
 ## Updating only the helper
 
@@ -55,7 +55,7 @@ Retain the previous helper first. This command changes Nextcloud app/configurati
 
 ## Rollback
 
-Keep the official Memories app, engine and helper compatible throughout recovery. After upgrading the official app to 11.1.2, restore a known-good **0.7.1 engine and a helper that supports 11.1.2** through the same stack/project; PR #23 / image r11 is that baseline. An older 0.7.0 engine or helper without 11.1.2 support cannot serve this app version.
+Keep the official Memories app, engine and helper compatible throughout recovery. After upgrading the official app to 11.1.4, restore a known-good **0.7.3 engine and a helper that supports 11.1.4** through the same stack/project; The tested 11.1.4 / 0.7.3 image (revision r12) is that baseline. An older 0.7.0 engine or helper without 11.1.4 support cannot serve this app version.
 
 To return to Memories 11.1.1 instead, restore a complete pre-upgrade Nextcloud app/database backup using the supported recovery process; do not merely change the stored version number.
 

@@ -1,6 +1,7 @@
 name: v11 RKMPP offline image build
 on:
   push:
+    branches: [main]
     paths:
       - 'go-vod/**'
       - 'scripts/test-v11-rkmpp.sh'
